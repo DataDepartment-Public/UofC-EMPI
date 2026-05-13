@@ -93,6 +93,35 @@ PLACEHOLDER_EMAILS = {
     'declined@hamakua-health.org'
 }
 
+JUNK_EMAIL_EXACT = {
+    'noemail@noemail.com', 'noemail@email.com', 'no@email.com', 'none@none.com',
+    'unknown@unknown.com', 'unknown@email.com', 'test@test.com', 'test@example.com',
+    'donotreply@donotreply.com', 'noreply@noreply.com', 'email@email.com',
+    'patient@patient.com', 'none@noemail.com', 'na@na.com', 'null@null.com'
+}
+
+JUNK_EMAIL_LOCAL_PREFIXES = {
+    'noemail', 'no-email', 'no_email', 'noreply', 'no-reply', 'donotreply',
+    'do-not-reply', 'unknown', 'test', 'patient', 'none', 'null', 'na'
+}
+
+JUNK_EMAIL_DOMAINS = {
+    'example.com', 'example.org', 'example.net', 'test.com', 'test.org',
+    'noemail.com', 'noreply.com', 'donotreply.com', 'unknown.com', '123.com'
+}
+
+JUNK_SSN_EXACT = {
+    '010101010', '090909090', '000000001', '999999998',
+    '111223333', '219099999', '457555462'
+}
+
+JUNK_SSN_SEQUENTIAL = {'123456789', '987654321', '123123123'}
+
+COMPOUND_LAST_NAME_PREFIXES = {
+    'DE LA', 'DE LOS', 'DEL', 'VAN', 'VON', 'MC', 'MAC', "O'", 'ST',
+    'LA', 'LE', 'DI', 'DA', 'DOS', 'DAS', 'DE'
+}
+
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -375,51 +404,75 @@ def clean_birth_date(value, reference_date: date = None) -> Tuple[Optional[date]
 
 def clean_ssn(value: str) -> Tuple[Optional[str], dict]:
     """
-    Clean SSN field.
+    Clean SSN field with enhanced validation per Data-Cleaning-Guide.
     Returns (cleaned_ssn, indicators_dict)
     """
     indicators = {
-        'INVALID_SSN': False,
-        'JUNK_SSN': False,
+        'is_missing_SSN': False,
+        'is_junk_SSN': False,
+        'is_invalid_SSN': False,
         'PADDED_SSN': False
     }
     
-    if pd.isna(value):
+    if pd.isna(value) or str(value).strip() == '':
+        indicators['is_missing_SSN'] = True
         return np.nan, indicators
     
-    # Remove non-numeric characters
-    ssn = re.sub(r'\D', '', str(value))
+    # Strip all formatting characters (hyphens, spaces, dots, parentheses)
+    ssn = re.sub(r'[\-\s\.\(\)]', '', str(value))
+    # Remove any remaining non-numeric characters
+    ssn = re.sub(r'\D', '', ssn)
     
-    # Left-pad short SSNs
+    # Left-pad short SSNs (7 or 8 digits)
     if len(ssn) in (7, 8):
         ssn = ssn.zfill(9)
         indicators['PADDED_SSN'] = True
     
-    # Must be exactly 9 digits
+    # Length validation: must be exactly 9 digits
     if len(ssn) != 9:
-        indicators['INVALID_SSN'] = True
+        indicators['is_invalid_SSN'] = True
         return np.nan, indicators
     
-    # Check for junk patterns
-    junk_patterns = {'999999999', '000000000', '123456789'}
-    if ssn in junk_patterns:
-        indicators['JUNK_SSN'] = True
-        return np.nan, indicators
-    
-    # Check for repeating digits
+    # Check for repeating single digit patterns (all same digit)
     if len(set(ssn)) == 1:
-        indicators['JUNK_SSN'] = True
+        indicators['is_junk_SSN'] = True
         return np.nan, indicators
     
-    # Check for invalid prefixes
+    # Check for known sequential patterns
+    if ssn in JUNK_SSN_SEQUENTIAL:
+        indicators['is_junk_SSN'] = True
+        return np.nan, indicators
+    
+    # Check for known exact junk values
+    if ssn in JUNK_SSN_EXACT:
+        indicators['is_junk_SSN'] = True
+        return np.nan, indicators
+    
+    # Validate area number (first 3 digits)
     area_number = ssn[:3]
-    if area_number == '666' or (900 <= int(area_number) <= 999):
-        indicators['INVALID_SSN'] = True
+    # 000 - never assigned by SSA
+    if area_number == '000':
+        indicators['is_invalid_SSN'] = True
+        return np.nan, indicators
+    # 666 - never assigned by SSA
+    if area_number == '666':
+        indicators['is_invalid_SSN'] = True
+        return np.nan, indicators
+    # 9XX range - reserved for ITINs, not valid SSNs
+    if area_number.startswith('9'):
+        indicators['is_invalid_SSN'] = True
         return np.nan, indicators
     
-    # Check for all-zero group or serial
-    if ssn[3:5] == '00' or ssn[5:9] == '0000':
-        indicators['INVALID_SSN'] = True
+    # Validate group number (middle 2 digits, positions 4-5)
+    group_number = ssn[3:5]
+    if group_number == '00':
+        indicators['is_invalid_SSN'] = True
+        return np.nan, indicators
+    
+    # Validate serial number (last 4 digits, positions 6-9)
+    serial_number = ssn[5:9]
+    if serial_number == '0000':
+        indicators['is_invalid_SSN'] = True
         return np.nan, indicators
     
     return ssn, indicators
@@ -746,44 +799,70 @@ def clean_phone(value: str) -> Tuple[Optional[str], dict]:
 
 def clean_email(value: str) -> Tuple[Optional[str], dict]:
     """
-    Clean email field.
+    Clean email field with enhanced pattern-based junk detection per Data-Cleaning-Guide.
     Returns (cleaned_email, indicators_dict)
     """
     indicators = {
-        'INVALID_EMAIL': False,
-        'JUNK_EMAIL': False
+        'is_missing_Email': False,
+        'is_junk_Email': False,
+        'is_invalid_Email': False
     }
     
-    if pd.isna(value):
+    if pd.isna(value) or str(value).strip() == '':
+        indicators['is_missing_Email'] = True
         return np.nan, indicators
     
     text = str(value).lower().strip()
     
-    # Standardize nulls
-    if text.upper() in NULL_VALUES or text == '':
+    # Nullify primitive placeholders
+    if text in {'nan', 'none', 'null', 'na', ''}:
+        indicators['is_junk_Email'] = True
         return np.nan, indicators
     
-    # Check for placeholder emails (check both full strings and prefixes)
-    if text in PLACEHOLDER_EMAILS:
-        indicators['JUNK_EMAIL'] = True
+    # Format validation - presence of @
+    if '@' not in text:
+        indicators['is_invalid_Email'] = True
         return np.nan, indicators
     
-    # Check prefix placeholders
-    prefix_placeholders = {'test@', 'noemail@', 'noemai@'}
-    for prefix in prefix_placeholders:
-        if text.startswith(prefix):
-            indicators['JUNK_EMAIL'] = True
+    # Format validation - domain structure: [chars]@[chars].[chars]
+    email_pattern = r'^.+@.+\..+$'
+    if not re.match(email_pattern, text):
+        indicators['is_invalid_Email'] = True
+        return np.nan, indicators
+    
+    # Check for exact known junk email values
+    if text in JUNK_EMAIL_EXACT:
+        indicators['is_junk_Email'] = True
+        return np.nan, indicators
+    
+    # Split into local part and domain
+    local_part, domain = text.rsplit('@', 1)
+    
+    # Pattern-based junk detection - local part
+    for prefix in JUNK_EMAIL_LOCAL_PREFIXES:
+        if local_part.startswith(prefix):
+            indicators['is_junk_Email'] = True
             return np.nan, indicators
     
-    # Must contain @
-    if '@' not in text:
-        indicators['INVALID_EMAIL'] = True
+    # Local part is 1-2 characters (invalid personal emails)
+    if len(local_part) <= 2:
+        indicators['is_junk_Email'] = True
         return np.nan, indicators
     
-    # Basic email validation
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    if not re.match(email_pattern, text):
-        indicators['INVALID_EMAIL'] = True
+    # Contains sequential digit pattern
+    if '123456' in local_part:
+        indicators['is_junk_Email'] = True
+        return np.nan, indicators
+    
+    # Pattern-based junk detection - domain
+    if domain in JUNK_EMAIL_DOMAINS:
+        indicators['is_junk_Email'] = True
+        return np.nan, indicators
+    
+    # Full email validation pattern
+    full_email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(full_email_pattern, text):
+        indicators['is_invalid_Email'] = True
         return np.nan, indicators
     
     return text, indicators
@@ -831,40 +910,145 @@ def clean_sex_at_birth(value: str) -> Tuple[Optional[str], dict]:
 # CROSS-COLUMN NAME PROCESSING
 # =============================================================================
 
-def process_name_tokens(first_nm: str, middle_nm: str, last_nm: str) -> Tuple[str, str, str, dict]:
+def detect_camelcase(text: str) -> List[str]:
     """
-    Cross-column name separation and standardization.
-    Returns (first_clean, middle_clean, last_clean, indicators_dict)
+    Detect and split CamelCase patterns.
+    Returns list of words if CamelCase detected, otherwise empty list.
+    """
+    if pd.isna(text) or not isinstance(text, str):
+        return []
+    
+    # Check if text contains CamelCase pattern (lowercase followed by uppercase)
+    if not re.search(r'[a-z][A-Z]', text):
+        return []
+    
+    # Split on uppercase boundaries
+    words = re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\d|\W|$)', text)
+    return [w.upper() for w in words] if len(words) > 1 else []
+
+
+def extract_compound_prefix(tokens: List[str]) -> Tuple[List[str], str]:
+    """
+    Extract compound last name prefix from token list.
+    Returns (remaining_tokens, compound_last_name)
+    """
+    if len(tokens) < 2:
+        return tokens, ''
+    
+    # Check for compound prefixes (2-word prefixes first, then 1-word)
+    for prefix_len in [2, 1]:
+        if len(tokens) > prefix_len:
+            potential_prefix = ' '.join(tokens[-prefix_len-1:-1]).upper()
+            if potential_prefix in COMPOUND_LAST_NAME_PREFIXES:
+                compound_last = ' '.join(tokens[-prefix_len-1:])
+                return tokens[:-prefix_len-1], compound_last
+    
+    # Check single-word prefixes like MC, MAC, O'
+    for i, token in enumerate(tokens[:-1]):
+        if token.upper() in {'MC', 'MAC', "O'", 'DE', 'LA', 'LE', 'DI', 'DA', 'VAN', 'VON', 'ST'}:
+            if i < len(tokens) - 1:
+                compound_last = ' '.join(tokens[i:])
+                return tokens[:i], compound_last
+    
+    return tokens, ''
+
+
+def process_name_redistribution(
+    first_nm: str, 
+    middle_nm: str, 
+    last_nm: str, 
+    suffix_nm: str = None
+) -> Tuple[str, str, str, str, dict]:
+    """
+    Full name redistribution and cross-column name processing per Data-Cleaning-Guide.
+    Returns (first_clean, middle_clean, last_clean, suffix_clean, indicators_dict)
     """
     indicators = {
         'INFERRED_LAST_FROM_FIRST': False,
+        'MOVED_MIDDLE_FROM_FIRST': False,
+        'CAMELCASE_SPLIT': False,
+        'EXTRACTED_SUFFIX': False,
+        'needs_name_review': False,
         'REMOVED_DUPLICATE_LAST_TOKEN': False
     }
     
     first_clean = first_nm if pd.notna(first_nm) else ''
     middle_clean = middle_nm if pd.notna(middle_nm) else ''
     last_clean = last_nm if pd.notna(last_nm) else ''
+    suffix_clean = suffix_nm if pd.notna(suffix_nm) else ''
+    
+    # CamelCase detection (before other processing)
+    if first_clean and not ' ' in first_clean:
+        camel_words = detect_camelcase(first_clean)
+        if camel_words:
+            indicators['CAMELCASE_SPLIT'] = True
+            indicators['needs_name_review'] = True
+            if not last_clean and len(camel_words) >= 2:
+                first_clean = camel_words[0]
+                if len(camel_words) > 2 and not middle_clean:
+                    middle_clean = ' '.join(camel_words[1:-1])
+                last_clean = camel_words[-1]
+                indicators['INFERRED_LAST_FROM_FIRST'] = True
+            elif last_clean and len(camel_words) >= 2 and not middle_clean:
+                first_clean = camel_words[0]
+                middle_clean = ' '.join(camel_words[1:])
+                indicators['MOVED_MIDDLE_FROM_FIRST'] = True
+    
+    # Flag names > 20 chars with no spaces
+    if first_clean and len(first_clean) > 20 and ' ' not in first_clean:
+        indicators['needs_name_review'] = True
     
     # Tokenize first name
     first_tokens = first_clean.split() if first_clean else []
     
-    # Handle missing last name - infer from first name tokens
-    if not last_clean and len(first_tokens) > 1:
-        last_clean = first_tokens[-1]
-        first_tokens = first_tokens[:-1]
-        if len(first_tokens) > 1:
-            middle_clean = ' '.join(first_tokens[1:])
-            first_clean = first_tokens[0]
-        else:
-            first_clean = first_tokens[0] if first_tokens else ''
+    # Extract suffix if present in tokens
+    if first_tokens and first_tokens[-1].upper() in GENERATIONAL_SUFFIXES:
+        if not suffix_clean:
+            suffix_clean = first_tokens[-1].upper()
+            first_tokens = first_tokens[:-1]
+            indicators['EXTRACTED_SUFFIX'] = True
+    
+    # Handle compound last name prefixes
+    remaining_tokens, compound_last = extract_compound_prefix(first_tokens)
+    if compound_last and not last_clean:
+        first_tokens = remaining_tokens
+        last_clean = compound_last
         indicators['INFERRED_LAST_FROM_FIRST'] = True
+    
+    # Case 1: FirstNM has 3+ words AND LastNM is empty
+    if not last_clean and len(first_tokens) >= 3:
+        last_clean = first_tokens[-1]
+        if not middle_clean:
+            middle_clean = ' '.join(first_tokens[1:-1])
+        first_clean = first_tokens[0]
+        indicators['INFERRED_LAST_FROM_FIRST'] = True
+        indicators['needs_name_review'] = True
+    
+    # Case 2: FirstNM has 2 words AND LastNM is empty
+    elif not last_clean and len(first_tokens) == 2:
+        first_clean = first_tokens[0]
+        last_clean = first_tokens[1]
+        indicators['INFERRED_LAST_FROM_FIRST'] = True
+        indicators['needs_name_review'] = True
+    
+    # Case 3: FirstNM has 2+ words AND LastNM exists AND MiddleNM is empty
+    elif last_clean and len(first_tokens) >= 2 and not middle_clean:
+        first_clean = first_tokens[0]
+        middle_clean = ' '.join(first_tokens[1:])
+        indicators['MOVED_MIDDLE_FROM_FIRST'] = True
+        indicators['needs_name_review'] = True
+    
+    # Case 4: FirstNM has 2+ words AND LastNM exists AND MiddleNM exists
+    # Leave as-is (assume compound first name)
+    elif last_clean and len(first_tokens) >= 2 and middle_clean:
+        first_clean = ' '.join(first_tokens)
     
     # Check for duplicate last name in first name tokens
     elif last_clean and first_tokens:
         if first_tokens[-1].upper() == last_clean.upper():
             first_tokens = first_tokens[:-1]
-            if len(first_tokens) > 1:
-                middle_clean = ' '.join(first_tokens[1:]) if not middle_clean else middle_clean
+            if len(first_tokens) > 1 and not middle_clean:
+                middle_clean = ' '.join(first_tokens[1:])
                 first_clean = first_tokens[0]
             elif first_tokens:
                 first_clean = first_tokens[0]
@@ -873,11 +1057,62 @@ def process_name_tokens(first_nm: str, middle_nm: str, last_nm: str) -> Tuple[st
             indicators['REMOVED_DUPLICATE_LAST_TOKEN'] = True
     
     # Convert empty strings to NaN
-    first_clean = first_clean if first_clean else np.nan
-    middle_clean = middle_clean if middle_clean else np.nan
-    last_clean = last_clean if last_clean else np.nan
+    first_clean = first_clean.strip() if first_clean else np.nan
+    middle_clean = middle_clean.strip() if middle_clean else np.nan
+    last_clean = last_clean.strip() if last_clean else np.nan
+    suffix_clean = suffix_clean.strip() if suffix_clean else np.nan
     
+    # Final empty check
+    if pd.notna(first_clean) and first_clean == '':
+        first_clean = np.nan
+    if pd.notna(middle_clean) and middle_clean == '':
+        middle_clean = np.nan
+    if pd.notna(last_clean) and last_clean == '':
+        last_clean = np.nan
+    if pd.notna(suffix_clean) and suffix_clean == '':
+        suffix_clean = np.nan
+    
+    return first_clean, middle_clean, last_clean, suffix_clean, indicators
+
+
+def process_name_tokens(first_nm: str, middle_nm: str, last_nm: str) -> Tuple[str, str, str, dict]:
+    """
+    Legacy wrapper for cross-column name separation.
+    Returns (first_clean, middle_clean, last_clean, indicators_dict)
+    """
+    first_clean, middle_clean, last_clean, _, indicators = process_name_redistribution(
+        first_nm, middle_nm, last_nm, None
+    )
     return first_clean, middle_clean, last_clean, indicators
+
+
+def validate_name_presence(first_nm: str, last_nm: str) -> Tuple[bool, dict]:
+    """
+    Validate that both first and last name are present.
+    Returns (is_valid, indicators_dict)
+    """
+    indicators = {
+        'MISSING_FIRST_NAME': False,
+        'MISSING_LAST_NAME': False,
+        'MISSING_BOTH_NAMES': False
+    }
+    
+    has_first = pd.notna(first_nm) and str(first_nm).strip() != ''
+    has_last = pd.notna(last_nm) and str(last_nm).strip() != ''
+    
+    if not has_first and not has_last:
+        indicators['MISSING_BOTH_NAMES'] = True
+        return False, indicators
+    
+    if not has_first:
+        indicators['MISSING_FIRST_NAME'] = True
+        return False, indicators
+    
+    if not has_last:
+        indicators['MISSING_LAST_NAME'] = True
+        return False, indicators
+    
+    return True, indicators
 
 
 # =============================================================================
@@ -985,22 +1220,40 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if 'SuffixNM' in result.columns:
         result['SuffixNM_clean'] = result['SuffixNM'].apply(clean_suffix)
     
-    # Cross-column name processing
+    # Cross-column name processing with full redistribution
     if all(col in result.columns for col in ['FirstNM_clean', 'LastNM_clean']):
         middle_col = 'MiddleNM_clean' if 'MiddleNM_clean' in result.columns else None
+        suffix_col = 'SuffixNM_clean' if 'SuffixNM_clean' in result.columns else None
         
         def process_names(row):
             first = row.get('FirstNM_clean', np.nan)
             middle = row.get(middle_col, np.nan) if middle_col else np.nan
             last = row.get('LastNM_clean', np.nan)
-            return process_name_tokens(first, middle, last)
+            suffix = row.get(suffix_col, np.nan) if suffix_col else np.nan
+            return process_name_redistribution(first, middle, last, suffix)
         
         name_results = result.apply(process_names, axis=1)
         result['FirstNM_clean'] = name_results.apply(lambda x: x[0])
         result['MiddleNM_clean'] = name_results.apply(lambda x: x[1])
         result['LastNM_clean'] = name_results.apply(lambda x: x[2])
-        result['INFERRED_LAST_FROM_FIRST'] = name_results.apply(lambda x: x[3].get('INFERRED_LAST_FROM_FIRST', False))
-        result['REMOVED_DUPLICATE_LAST_TOKEN'] = name_results.apply(lambda x: x[3].get('REMOVED_DUPLICATE_LAST_TOKEN', False))
+        if suffix_col:
+            result['SuffixNM_clean'] = name_results.apply(lambda x: x[3])
+        result['INFERRED_LAST_FROM_FIRST'] = name_results.apply(lambda x: x[4].get('INFERRED_LAST_FROM_FIRST', False))
+        result['MOVED_MIDDLE_FROM_FIRST'] = name_results.apply(lambda x: x[4].get('MOVED_MIDDLE_FROM_FIRST', False))
+        result['CAMELCASE_SPLIT'] = name_results.apply(lambda x: x[4].get('CAMELCASE_SPLIT', False))
+        result['EXTRACTED_SUFFIX'] = name_results.apply(lambda x: x[4].get('EXTRACTED_SUFFIX', False))
+        result['needs_name_review'] = name_results.apply(lambda x: x[4].get('needs_name_review', False))
+        result['REMOVED_DUPLICATE_LAST_TOKEN'] = name_results.apply(lambda x: x[4].get('REMOVED_DUPLICATE_LAST_TOKEN', False))
+        
+        # Validate name presence - mark invalid if first or last name missing
+        def validate_names(row):
+            return validate_name_presence(row.get('FirstNM_clean'), row.get('LastNM_clean'))
+        
+        name_validation = result.apply(validate_names, axis=1)
+        result['ValidRecord'] = result['ValidRecord'] & name_validation.apply(lambda x: x[0])
+        result['MISSING_FIRST_NAME'] = name_validation.apply(lambda x: x[1].get('MISSING_FIRST_NAME', False))
+        result['MISSING_LAST_NAME'] = name_validation.apply(lambda x: x[1].get('MISSING_LAST_NAME', False))
+        result['MISSING_BOTH_NAMES'] = name_validation.apply(lambda x: x[1].get('MISSING_BOTH_NAMES', False))
     
     # Date of Birth
     if 'BirthDT' in result.columns:
@@ -1019,9 +1272,10 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if 'SSN' in result.columns:
         ssn_results = result['SSN'].apply(clean_ssn)
         result['SSN_clean'] = ssn_results.apply(lambda x: x[0])
-        result['last_4_SSN'] = result['SSN_clean'].apply(extract_last_4_ssn)
-        result['INVALID_SSN'] = ssn_results.apply(lambda x: x[1].get('INVALID_SSN', False))
-        result['JUNK_SSN'] = ssn_results.apply(lambda x: x[1].get('JUNK_SSN', False))
+        result['SSN_Last4'] = result['SSN_clean'].apply(extract_last_4_ssn)
+        result['is_missing_SSN'] = ssn_results.apply(lambda x: x[1].get('is_missing_SSN', False))
+        result['is_junk_SSN'] = ssn_results.apply(lambda x: x[1].get('is_junk_SSN', False))
+        result['is_invalid_SSN'] = ssn_results.apply(lambda x: x[1].get('is_invalid_SSN', False))
         result['PADDED_SSN'] = ssn_results.apply(lambda x: x[1].get('PADDED_SSN', False))
     
     # Address Line 1
@@ -1098,8 +1352,9 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if 'Email' in result.columns:
         email_results = result['Email'].apply(clean_email)
         result['Email_clean'] = email_results.apply(lambda x: x[0])
-        result['INVALID_EMAIL'] = email_results.apply(lambda x: x[1].get('INVALID_EMAIL', False))
-        result['JUNK_EMAIL'] = email_results.apply(lambda x: x[1].get('JUNK_EMAIL', False))
+        result['is_missing_Email'] = email_results.apply(lambda x: x[1].get('is_missing_Email', False))
+        result['is_junk_Email'] = email_results.apply(lambda x: x[1].get('is_junk_Email', False))
+        result['is_invalid_Email'] = email_results.apply(lambda x: x[1].get('is_invalid_Email', False))
     
     # Sex at Birth
     if 'SexAtBirthDSC' in result.columns:

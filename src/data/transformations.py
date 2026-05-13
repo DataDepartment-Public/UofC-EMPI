@@ -76,9 +76,22 @@ UNIT_DESIGNATOR_MAP = {
     'BUILDING': 'BLDG', 'FLOOR': 'FL', 'DEPARTMENT': 'DEPT'
 }
 
-PLACEHOLDER_ADDRESSES = {'HOMELESS', 'TRANSIENT', 'BAD ADDRESS', 'DO NOT USE', 'NO ADDRESS'}
+PLACEHOLDER_ADDRESSES = {
+    'HOMELESS', 'TRANSIENT', 'BAD ADDRESS', 'DO NOT USE', 'NO ADDRESS', '?', 'NO MAIL',
+    'GENERAL DELIVERY', 'NKA', '.', 'NOT TAKEN', 'ZOCDOC', 'GET', 'HOPE CENTER', 'INCORRECT ADDRESS'
+}
 PLACEHOLDER_ZIPS = {'00000', '99999', '11111', '12345'}
-PLACEHOLDER_EMAILS = {'test@', 'noemail@', 'none@none.com', 'noemail@noemail.com'}
+PLACEHOLDER_EMAILS = {
+    'test@', 'noemail@', 'none@none.com', 'noemail@noemail.com',
+    'none', 'declined', 'decline', 'no email', 'na', 'n', 'aca@eriefamilyhealth.org',
+    'noemail@textmessage.com', 'noemail@textmessaging.com', 'none listed', 'blank',
+    'none provided', 'declined portal', 'aca@eriefamilyheath.org', 'no e-mail', 'refused',
+    'aca@eriefamilyhealth.com', 'no', 'denied', 'no email address', 'no email cm',
+    'no email address daj', 'noemail@textmessages.com', 'decline@hamakua-health.org',
+    'noemai@noemail.com', 'patientdeclined@howardbrown.org', 'ptdeclined@hb.org',
+    'noemail@noemail', 'not age appropriate', 'unknown', 'pt declined', 'none@gmail.com',
+    'declined@hamakua-health.org'
+}
 
 
 # =============================================================================
@@ -423,10 +436,10 @@ def extract_last_4_ssn(ssn: str) -> Optional[str]:
 # ADDRESS TRANSFORMATIONS
 # =============================================================================
 
-def clean_address(value: str) -> Tuple[Optional[str], dict]:
+def clean_address(value: str, valid_record_flag: bool = True) -> Tuple[Optional[str], bool, dict]:
     """
     Clean address field.
-    Returns (cleaned_address, indicators_dict)
+    Returns (cleaned_address, valid_record_flag, indicators_dict)
     """
     indicators = {
         'IS_POBOX': False,
@@ -436,21 +449,25 @@ def clean_address(value: str) -> Tuple[Optional[str], dict]:
     }
     
     if pd.isna(value):
-        return np.nan, indicators
+        return np.nan, valid_record_flag, indicators
     
     text = str(value).upper().strip()
     text = collapse_whitespace(text)
     
     # Standardize nulls
     if text in NULL_VALUES or text == '':
-        return np.nan, indicators
+        return np.nan, valid_record_flag, indicators
     
     # Check for placeholder addresses
     if text in PLACEHOLDER_ADDRESSES:
         indicators['INVALID_ADDRESS'] = True
         if text in {'HOMELESS', 'TRANSIENT'}:
             indicators['HOMELESS_ADDRESS'] = True
-        return np.nan, indicators
+        return np.nan, valid_record_flag, indicators
+    
+    # Check for invalid patterns - mark record as invalid
+    if text in INVALID_NAME_PATTERNS or text.replace(' ', '') in INVALID_NAME_PATTERNS:
+        valid_record_flag = False
     
     # Detect PO Box
     po_box_pattern = r'P\.?\s*O\.?\s*BOX|POST\s+OFFICE\s+BOX'
@@ -485,9 +502,9 @@ def clean_address(value: str) -> Tuple[Optional[str], dict]:
     text = collapse_whitespace(text)
     
     if text == '':
-        return np.nan, indicators
+        return np.nan, valid_record_flag, indicators
     
-    return text, indicators
+    return text, valid_record_flag, indicators
 
 
 # =============================================================================
@@ -746,16 +763,22 @@ def clean_email(value: str) -> Tuple[Optional[str], dict]:
     if text.upper() in NULL_VALUES or text == '':
         return np.nan, indicators
     
+    # Check for placeholder emails (check both full strings and prefixes)
+    if text in PLACEHOLDER_EMAILS:
+        indicators['JUNK_EMAIL'] = True
+        return np.nan, indicators
+    
+    # Check prefix placeholders
+    prefix_placeholders = {'test@', 'noemail@', 'noemai@'}
+    for prefix in prefix_placeholders:
+        if text.startswith(prefix):
+            indicators['JUNK_EMAIL'] = True
+            return np.nan, indicators
+    
     # Must contain @
     if '@' not in text:
         indicators['INVALID_EMAIL'] = True
         return np.nan, indicators
-    
-    # Check for placeholder emails
-    for placeholder in PLACEHOLDER_EMAILS:
-        if text.startswith(placeholder) or text == placeholder:
-            indicators['JUNK_EMAIL'] = True
-            return np.nan, indicators
     
     # Basic email validation
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
@@ -785,8 +808,8 @@ def clean_sex_at_birth(value: str) -> Tuple[Optional[str], dict]:
     
     text = str(value).upper().strip()
     
-    # Standardize nulls
-    if text in {'UNKNOWN', 'NULL', 'N/A', 'NA', ''}:
+    # Standardize nulls - include OTHER as nullifiable per guide
+    if text in {'UNKNOWN', 'NULL', 'N/A', 'NA', 'OTHER', ''}:
         indicators['UNKNOWN_SEX'] = True
         return np.nan, indicators
     
@@ -795,8 +818,8 @@ def clean_sex_at_birth(value: str) -> Tuple[Optional[str], dict]:
     if text in sex_map:
         text = sex_map[text]
     
-    # Validate
-    valid_values = {'MALE', 'FEMALE', 'OTHER'}
+    # Validate - only MALE and FEMALE are valid
+    valid_values = {'MALE', 'FEMALE'}
     if text not in valid_values:
         indicators['INVALID_SEX_VALUE'] = True
         return np.nan, indicators
@@ -1003,17 +1026,19 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     
     # Address Line 1
     if 'AddressLine1' in result.columns:
-        addr1_results = result['AddressLine1'].apply(clean_address)
+        addr1_results = result['AddressLine1'].apply(lambda x: clean_address(x, True))
         result['AddressLine1_clean'] = addr1_results.apply(lambda x: x[0])
-        result['IS_POBOX'] = addr1_results.apply(lambda x: x[1].get('IS_POBOX', False))
-        result['HAS_TRAPPED_UNIT'] = addr1_results.apply(lambda x: x[1].get('HAS_TRAPPED_UNIT', False))
-        result['INVALID_ADDRESS'] = addr1_results.apply(lambda x: x[1].get('INVALID_ADDRESS', False))
-        result['HOMELESS_ADDRESS'] = addr1_results.apply(lambda x: x[1].get('HOMELESS_ADDRESS', False))
+        result['ValidRecord'] = result['ValidRecord'] & addr1_results.apply(lambda x: x[1])
+        result['IS_POBOX'] = addr1_results.apply(lambda x: x[2].get('IS_POBOX', False))
+        result['HAS_TRAPPED_UNIT'] = addr1_results.apply(lambda x: x[2].get('HAS_TRAPPED_UNIT', False))
+        result['INVALID_ADDRESS'] = addr1_results.apply(lambda x: x[2].get('INVALID_ADDRESS', False))
+        result['HOMELESS_ADDRESS'] = addr1_results.apply(lambda x: x[2].get('HOMELESS_ADDRESS', False))
     
     # Address Line 2
     if 'AddressLine2' in result.columns:
-        addr2_results = result['AddressLine2'].apply(clean_address)
+        addr2_results = result['AddressLine2'].apply(lambda x: clean_address(x, True))
         result['AddressLine2_clean'] = addr2_results.apply(lambda x: x[0])
+        result['ValidRecord'] = result['ValidRecord'] & addr2_results.apply(lambda x: x[1])
     
     # City
     if 'CityNM' in result.columns:

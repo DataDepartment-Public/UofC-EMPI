@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>A3 Redundancy Analysis Report</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px;
+         color: #1a1a2e; background: #f8f9fa; padding: 20px; }
+  .page { background: white; max-width: 1280px; margin: 0 auto;
+          padding: 28px 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+          border-radius: 6px; }
+  .header { display: flex; justify-content: space-between;
+            border-bottom: 3px solid #2E86AB; padding-bottom: 14px;
+            margin-bottom: 20px; }
+  .header h1 { font-size: 18px; }
+  .header h2 { font-size: 12px; color: #2E86AB; margin-top: 3px; }
+  .header-right { text-align: right; font-size: 10px; color: #666;
+                  line-height: 1.6; }
+  .badge { background: #2E86AB; color: white; padding: 3px 10px;
+           border-radius: 12px; font-size: 10px; font-weight: 600;
+           display: inline-block; margin-bottom: 4px; }
+  .summary-stats { display: grid; grid-template-columns: repeat(4, 1fr);
+                   gap: 12px; margin-bottom: 18px; }
+  .stat-card { background: #f0f7fb; border-left: 4px solid #2E86AB;
+               padding: 10px 14px; border-radius: 4px; }
+  .stat-card h3 { font-size: 9px; color: #2E86AB; font-weight: 700;
+                  text-transform: uppercase; letter-spacing: 0.5px;
+                  margin-bottom: 4px; }
+  .stat-card .stat-value { font-size: 18px; font-weight: 700;
+                            color: #1a1a2e; }
+  .stat-card .stat-context { font-size: 9px; color: #666;
+                              margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+  th { background: #1a1a2e; color: white; padding: 9px 12px;
+        text-align: left; font-size: 10px; font-weight: 600; }
+  td { padding: 8px 12px; border-bottom: 1px solid #eee;
+        vertical-align: middle; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .block-id { font-weight: 700; font-size: 13px; color: #2E86AB; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .strong { font-weight: 700; color: #27AE60; font-size: 11.5px; }
+  .role-badge { display: inline-block; padding: 2px 8px;
+                border-radius: 10px; font-size: 9px; font-weight: 700;
+                text-transform: uppercase; }
+  .role-precision { background: #fde8ec; color: #c0392b; }
+  .role-recall { background: #e8f5e9; color: #27ae60; }
+  .bar-wrap { display: flex; align-items: center; gap: 8px;
+              min-width: 120px; }
+  .bar { height: 8px; background: #27ae60; border-radius: 4px;
+         min-width: 2px; }
+  .bar-label { font-size: 10px; font-weight: 600; }
+  .rec-keep { color: #27ae60; font-weight: 600; }
+  .rec-warn { color: #e67e22; font-weight: 700; }
+  .rec-remove { color: #c0392b; font-weight: 700; }
+  .footer { margin-top: 18px; border-top: 1px solid #ddd;
+            padding-top: 10px; display: flex;
+            justify-content: space-between; color: #999; font-size: 9px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <div>
+      <h1>A3 — Block Redundancy Analysis</h1>
+      <h2>eMPI Blocking Scheme Feasibility Assessment</h2>
+    </div>
+    <div class="header-right">
+      <div class="badge">INTERNAL — DRAFT</div><br>
+      Generated: May 17, 2026 at 14:57<br>
+      Dataset: 163,364 cleaned records<br>
+      Total unique candidate pairs: 72,885
+    </div>
+  </div>
+
+  <div class="summary-stats">
+    <div class="stat-card">
+      <h3>Total Unique Pairs</h3>
+      <div class="stat-value">72,885</div>
+      <div class="stat-context">After union deduplication</div>
+    </div>
+    <div class="stat-card">
+      <h3>Blocking Reduction</h3>
+      <div class="stat-value">99.999%</div>
+      <div class="stat-context">From 13,343,816,566 naive pairs</div>
+    </div>
+    <div class="stat-card">
+      <h3>Overlap Across Blocks</h3>
+      <div class="stat-value">71.3%</div>
+      <div class="stat-context">Redundancy in candidate generation</div>
+    </div>
+    <div class="stat-card">
+      <h3>Blocks Recommended</h3>
+      <div class="stat-value">
+        7 / 9
+      </div>
+      <div class="stat-context">For inclusion in final scheme</div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Block</th>
+        <th>Role</th>
+        <th>Total Pairs</th>
+        <th>Unique Pairs</th>
+        <th>Shared Pairs</th>
+        <th>% Unique</th>
+        <th>Recommendation</th>
+      </tr>
+    </thead>
+    <tbody>
+      
+    <tr>
+      <td class="block-id">B1</td>
+      <td><span class="role-badge role-precision">Precision Anchor</span></td>
+      <td class="num">5,696</td>
+      <td class="num strong">1,580</td>
+      <td class="num">4,116</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:55%"></div>
+          <span class="bar-label">27.7%</span>
+        </div>
+      </td>
+      <td class="rec-keep">✅ KEEP — High marginal contribution</td>
+    </tr>
+    <tr>
+      <td class="block-id">B2</td>
+      <td><span class="role-badge role-recall">Recall Workhorse</span></td>
+      <td class="num">49,117</td>
+      <td class="num strong">0</td>
+      <td class="num">49,117</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:0%"></div>
+          <span class="bar-label">0.0%</span>
+        </div>
+      </td>
+      <td class="rec-remove">❌ REMOVE — Zero unique pairs; fully redundant</td>
+    </tr>
+    <tr>
+      <td class="block-id">B3</td>
+      <td><span class="role-badge role-recall">Recall Workhorse</span></td>
+      <td class="num">53,399</td>
+      <td class="num strong">558</td>
+      <td class="num">52,841</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:2%"></div>
+          <span class="bar-label">1.0%</span>
+        </div>
+      </td>
+      <td class="rec-keep">✅ KEEP — Targeted contribution</td>
+    </tr>
+    <tr>
+      <td class="block-id">B4</td>
+      <td><span class="role-badge role-recall">Recall Workhorse</span></td>
+      <td class="num">47,979</td>
+      <td class="num strong">1,059</td>
+      <td class="num">46,920</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:4%"></div>
+          <span class="bar-label">2.2%</span>
+        </div>
+      </td>
+      <td class="rec-keep">✅ KEEP — Targeted contribution</td>
+    </tr>
+    <tr>
+      <td class="block-id">B5</td>
+      <td><span class="role-badge role-recall">Recall Supplement</span></td>
+      <td class="num">0</td>
+      <td class="num strong">0</td>
+      <td class="num">0</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:0%"></div>
+          <span class="bar-label">0.0%</span>
+        </div>
+      </td>
+      <td class="rec-remove">❌ REMOVE — Zero unique pairs; fully redundant</td>
+    </tr>
+    <tr>
+      <td class="block-id">B6</td>
+      <td><span class="role-badge role-precision">Precision Anchor</span></td>
+      <td class="num">5,360</td>
+      <td class="num strong">2,094</td>
+      <td class="num">3,266</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:78%"></div>
+          <span class="bar-label">39.1%</span>
+        </div>
+      </td>
+      <td class="rec-keep">✅ KEEP — High marginal contribution</td>
+    </tr>
+    <tr>
+      <td class="block-id">B7</td>
+      <td><span class="role-badge role-recall">Recall Supplement</span></td>
+      <td class="num">30,652</td>
+      <td class="num strong">8,019</td>
+      <td class="num">22,633</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:52%"></div>
+          <span class="bar-label">26.2%</span>
+        </div>
+      </td>
+      <td class="rec-keep">✅ KEEP — High marginal contribution</td>
+    </tr>
+    <tr>
+      <td class="block-id">B8</td>
+      <td><span class="role-badge role-recall">Recall Supplement</span></td>
+      <td class="num">55,657</td>
+      <td class="num strong">3,360</td>
+      <td class="num">52,297</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:12%"></div>
+          <span class="bar-label">6.0%</span>
+        </div>
+      </td>
+      <td class="rec-keep">✅ KEEP — Targeted contribution</td>
+    </tr>
+    <tr>
+      <td class="block-id">B9</td>
+      <td><span class="role-badge role-precision">Precision Anchor</span></td>
+      <td class="num">5,989</td>
+      <td class="num strong">1,497</td>
+      <td class="num">4,492</td>
+      <td>
+        <div class="bar-wrap">
+          <div class="bar" style="width:49%"></div>
+          <span class="bar-label">25.0%</span>
+        </div>
+      </td>
+      <td class="rec-keep">✅ KEEP — Moderate marginal contribution</td>
+    </tr>
+    </tbody>
+  </table>
+
+  <div class="footer">
+    <span>eMPI Capstone — AllianceChicago | Methodology Section Evidence Base</span>
+    <span>A3 Owner: Analyst | Generated: May 17, 2026 at 14:57</span>
+  </div>
+</div>
+</body>
+</html>

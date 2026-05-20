@@ -61,4 +61,4 @@ Thumbs.db
 htmlcov/
 
 # Claude
-.claude
+.claude/

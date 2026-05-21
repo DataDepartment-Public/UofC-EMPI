@@ -131,7 +131,7 @@ def _parse_phone_set(value) -> set:
         parsed = ast.literal_eval(value)
         if isinstance(parsed, (set, list, tuple)):
             return set(str(p).strip() for p in parsed if str(p).strip())
-    except (ValueError, SyntaxError):
+    except (ValueError, SyntaxError, TypeError):
         pass
  
     # Fallback: strip delimiters and split by comma
@@ -693,6 +693,21 @@ def save_candidate_pairs(
     -------
     Path to the saved file.
     """
+    #Verify pyarrow is available before attempting to write
+    #Paquet requires either pyarrow or fastparquet. We standardize on pyarrow for consistency.
+    #Raise a clear actionable error rather than letting pandas surface a cryptic ImportError.
+    try:
+        import pyarrow #noqa: F401
+    except ImportError:
+        try:
+            import fastparquet #noqa: F401
+        except ImportError:
+            raise ImportError(
+                "No parquet engine found. Please install pyarrow or fastparquet to save candidate pairs in parquet format.\n"
+                "Install pyarrow to enable parquet output:\n"
+                "    pip install pyarrow\n\n"
+                "Candidate pairs were not saved. The in-memory DataFrame is still valid."
+            ) from None
     output_path = Path(output_path)
     if output_path.is_dir():
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")

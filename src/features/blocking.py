@@ -117,10 +117,10 @@ def _parse_phone_set(value) -> set:
     of a Python set (e.g. "{'7735551234', '3125559876'}"). This function
     handles all observed serialization formats.
     """
-    if pd.isna(value):
-        return set()
     if isinstance(value, (set, list)):
         return set(str(p).strip() for p in value if str(p).strip())
+    if pd.isna(value):
+        return set()
     if not isinstance(value, str):
         return set()
  

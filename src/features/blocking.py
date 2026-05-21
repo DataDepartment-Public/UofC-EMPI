@@ -54,7 +54,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
-from typing import Optional
  
 import jellyfish
 import pandas as pd

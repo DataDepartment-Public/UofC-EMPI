@@ -108,8 +108,8 @@ def _soundex(name: str) -> str | None:
     except Exception:
         return None
  
- #------Phone set Parser----------------------
- def _parse_phone_set(value) -> set:
+#------Phone set Parser----------------------
+def _parse_phone_set(value) -> set:
     """
     Parse a string-serialized phone set back to a Python set of strings.
  

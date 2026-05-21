@@ -184,8 +184,8 @@ def _compute_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
  
 
- #---Blocking index Dataclass----------------
- @dataclass
+#---Blocking index Dataclass----------------
+@dataclass
 class BlockingIndex:
     """
     Pre-built lookup structures for all 8 blocking schemes.

@@ -264,8 +264,8 @@ def build_blocking_index(df_clean: pd.DataFrame) -> BlockingIndex:
     df = _compute_derived_columns(df_clean)
  
 
- #-----Build key columns-----------------
-    
+    #-----Build key columns-----------------
+ 
     sep = "|"  # pipe separator prevents false key collisions
  
     df["_k_b1"] = df[COL_SSN]

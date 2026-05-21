@@ -606,8 +606,8 @@ def run_inference_blocking(
     return result
  
 
- #----Statistics & Audit----------------
- def get_blocking_stats(candidate_pairs: pd.DataFrame) -> dict:
+#----Statistics & Audit----------------
+def get_blocking_stats(candidate_pairs: pd.DataFrame) -> dict:
     """
     Compute audit statistics for a candidate pairs DataFrame.
  

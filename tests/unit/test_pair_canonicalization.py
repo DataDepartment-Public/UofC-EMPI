@@ -276,9 +276,17 @@ class TestOutputSchema:
         pairs = run_batch_blocking(df)
 
         if not pairs.empty:
-            assert pairs["PATID_A"].dtype == object       # string
-            assert pairs["PATID_B"].dtype == object       # string
-            assert pairs["source_blocks"].dtype == object  # string
+            # Accept both legacy object dtype and modern pandas StringDtype
+            string_dtypes = {object, pd.StringDtype()}
+            assert pairs["PATID_A"].dtype in string_dtypes or \
+               pd.api.types.is_string_dtype(pairs["PATID_A"]), \
+               f"PATID_A dtype unexpected: {pairs['PATID_A'].dtype}"
+            assert pairs["PATID_B"].dtype in string_dtypes or \
+               pd.api.types.is_string_dtype(pairs["PATID_B"]), \
+               f"PATID_B dtype unexpected: {pairs['PATID_B'].dtype}"
+            assert pairs["source_blocks"].dtype in string_dtypes or \
+               pd.api.types.is_string_dtype(pairs["source_blocks"]), \
+               f"source_blocks dtype unexpected: {pairs['source_blocks'].dtype}"
             assert pairs["n_blocks"].dtype in (
                 np.int64, np.int32, int
             ), f"n_blocks dtype is {pairs['n_blocks'].dtype}"

@@ -1,5 +1,5 @@
 """
-Production code for mulit-pass blocking module for the AllianceChicago eMPI pipeline.
+Production code for multi-pass blocking module for the AllianceChicago eMPI pipeline.
 FINALIZED BLOCKING SCHEME (8 blocks):
     B1  — SSN Exact
     B3  — Double Metaphone (LastNM) + Full DOB

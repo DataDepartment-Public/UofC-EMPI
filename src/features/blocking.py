@@ -356,7 +356,7 @@ def _pairs_from_index(
                 "Applying governance cap.",
                 block_id, len(patid_list), GOVERNANCE_THRESHOLD,
             )
-            # Governance action: sample to cap, preserve all for B2/B3 Jan1
+            # Governance action: cap the candidate list at the configured threshold.
             patid_list = patid_list[:GOVERNANCE_THRESHOLD]
  
         for a, b in combinations(sorted(patid_list), 2):

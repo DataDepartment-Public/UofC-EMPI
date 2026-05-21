@@ -618,13 +618,20 @@ def get_blocking_stats(candidate_pairs: pd.DataFrame) -> dict:
     ----------
     candidate_pairs : pd.DataFrame
         Output from run_batch_blocking().
+        Must contain a 'PATID_A' column so n_records can be inferred
+        for the naive pairs calculation, or pass n_records explicitly.
+
  
     Returns
     -------
     dict with keys:
-        total_unique_pairs, naive_pairs, reduction_pct,
-        overlap_pct, per_block (dict of block_id -> pair_count),
-        n_blocks_distribution (dict of n_blocks -> pair_count)
+        total_unique_pairs    int   — deduplicated pair count
+        total_with_overlap    int   — sum of per block pair counts
+        naive_pairs           int   - N*(N-1)/2 - estimated from unique PATIDs across both PATID columns
+        reduction_pct         float - 100 * (1-unique/naive)
+        overlap_pct           float - redundancy across blocks
+        per_block             dict  - block_id -> pair count
+        n_blocks_distribution dict  - n_blocks value -> pair count
     """
     if candidate_pairs.empty:
         return {}
@@ -638,13 +645,26 @@ def get_blocking_stats(candidate_pairs: pd.DataFrame) -> dict:
     total_unique = len(candidate_pairs)
     total_with_overlap = sum(block_counts.values())
  
-    # Estimate naive pairs from the pair count + assumed dataset size
-    # We use the ratio from the index if available, else approximate
+    #Infer N from the union of all PATIDs referenced in the pair set
+    #This is a lower-bound estimate - the true N is the full dataset size,
+    #which may include records that appear in no candidate pair (singletons).
+
+    all_patids = pd.concat([
+        candidate_pairs["PATID_A"],
+        candidate_pairs["PATID_B"],
+    ]).nunique()
+    naive_pairs = all_patids * (all_patids - 1) // 2
+    reduction_pct = round(
+        100 * (1 - total_unique / naive_pairs), 6
+    ) if naive_pairs > 0 else 0.0
+
     n_blocks_dist = candidate_pairs["n_blocks"].value_counts().sort_index().to_dict()
  
     return {
         "total_unique_pairs":    total_unique,
         "total_with_overlap":    total_with_overlap,
+        "reduction_pct":         reduction_pct,
+        "naive_pairs":           naive_pairs,
         "overlap_pct":           round(
             100 * (1 - total_unique / max(total_with_overlap, 1)), 1
         ),

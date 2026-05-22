@@ -8,3 +8,5 @@ unidecode
 # build from https://github.com/openvenues/libpostal). If libpostal is not
 # installed the cleaning pipeline still runs — `Address_normalized` stays NaN.
 postal
+jellyfish
+phonetics

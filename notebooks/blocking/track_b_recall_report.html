@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Track B Recall Testing Report</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px;
+         color: #1a1a2e; background: #f8f9fa; padding: 20px; margin: 0; }
+  .page { background: white; max-width: 1280px; margin: 0 auto;
+          padding: 28px 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+          border-radius: 6px; }
+  .header { display: flex; justify-content: space-between;
+            border-bottom: 3px solid #2E86AB; padding-bottom: 14px;
+            margin-bottom: 20px; }
+  .header h1 { font-size: 18px; }
+  .header h2 { font-size: 12px; color: #2E86AB; margin-top: 3px; }
+  .header-right { text-align: right; font-size: 10px; color: #666;
+                  line-height: 1.6; }
+  .badge { background: #2E86AB; color: white; padding: 3px 10px;
+           border-radius: 12px; font-size: 10px; font-weight: 600;
+           display: inline-block; margin-bottom: 4px; }
+  .summary-stats { display: grid; grid-template-columns: repeat(4, 1fr);
+                   gap: 12px; margin-bottom: 18px; }
+  .stat-card { background: #f0f7fb; border-left: 4px solid #2E86AB;
+               padding: 10px 14px; border-radius: 4px; }
+  .stat-card h3 { font-size: 9px; color: #2E86AB; font-weight: 700;
+                  text-transform: uppercase; letter-spacing: 0.5px;
+                  margin-bottom: 4px; }
+  .stat-card .stat-value { font-size: 18px; font-weight: 700; }
+  .stat-card .stat-context { font-size: 9px; color: #666; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th { background: #1a1a2e; color: white; padding: 9px 12px;
+        text-align: left; font-size: 10px; }
+  td { padding: 9px 12px; border-bottom: 1px solid #eee;
+        vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .strong { font-weight: 700; color: #2E86AB; }
+  .verdict-pass { color: #27ae60; font-weight: 700; }
+  .verdict-warn { color: #e67e22; font-weight: 700; }
+  .verdict-fail { color: #c0392b; font-weight: 700; }
+  .footer { margin-top: 18px; border-top: 1px solid #ddd;
+            padding-top: 10px; display: flex;
+            justify-content: space-between; color: #999; font-size: 9px; }
+</style></head>
+<body>
+<div class="page">
+  <div class="header">
+    <div>
+      <h1>Track B — Synthetic Pair Recall Testing</h1>
+      <h2>eMPI Blocking Scheme Feasibility Assessment</h2>
+    </div>
+    <div class="header-right">
+      <div class="badge">INTERNAL — DRAFT</div><br>
+      Generated: May 17, 2026 at 16:18<br>
+      Anchor records: 1,000<br>
+      Synthetic pairs: 6,837<br>
+      Pass threshold: ≥95.0% cumulative recall
+    </div>
+  </div>
+
+  <div class="summary-stats">
+    <div class="stat-card">
+      <h3>Scenarios Tested</h3>
+      <div class="stat-value">9</div>
+      <div class="stat-context">Error patterns simulated</div>
+    </div>
+    <div class="stat-card">
+      <h3>Scenarios Passing</h3>
+      <div class="stat-value">9 / 9</div>
+      <div class="stat-context">Cumulative recall ≥ 95.0%</div>
+    </div>
+    <div class="stat-card">
+      <h3>Anchor Records</h3>
+      <div class="stat-value">1,000</div>
+      <div class="stat-context">High-quality records perturbed</div>
+    </div>
+    <div class="stat-card">
+      <h3>Total Synthetic Pairs</h3>
+      <div class="stat-value">6,837</div>
+      <div class="stat-context">Across all scenarios</div>
+    </div>
+  </div>
+
+  <h3 style="margin-bottom:10px;font-size:13px">Per-Scenario Recall Summary</h3>
+  <table>
+    <thead>
+      <tr><th>Error Scenario</th><th>Pairs</th><th>Cumulative Recall</th>
+          <th>Best Single Block</th><th>Verdict</th></tr>
+    </thead>
+    <tbody>
+    <tr>
+      <td><strong>lastnm_typo</strong><br>
+          <small style="color:#666">Last name typo (adjacent char swap)</small></td>
+      <td class="num">998</td>
+      <td class="num strong">100.0%</td>
+      <td>B1 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr>
+    <tr>
+      <td><strong>lastnm_phonetic</strong><br>
+          <small style="color:#666">Last name phonetic variant (S↔Z, C↔K)</small></td>
+      <td class="num">828</td>
+      <td class="num strong">100.0%</td>
+      <td>B1 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr>
+    <tr>
+      <td><strong>firstnm_phonetic</strong><br>
+          <small style="color:#666">First name phonetic variant</small></td>
+      <td class="num">781</td>
+      <td class="num strong">100.0%</td>
+      <td>B1 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr>
+    <tr>
+      <td><strong>firstnm_nickname</strong><br>
+          <small style="color:#666">First name nickname (truncated form)</small></td>
+      <td class="num">881</td>
+      <td class="num strong">100.0%</td>
+      <td>B1 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr>
+    <tr>
+      <td><strong>dob_transposition</strong><br>
+          <small style="color:#666">DOB month/day transposition</small></td>
+      <td class="num">346</td>
+      <td class="num strong">100.0%</td>
+      <td>B1 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr>
+    <tr>
+      <td><strong>dob_partial_loss</strong><br>
+          <small style="color:#666">DOB partial loss (year only retained)</small></td>
+      <td class="num">1,000</td>
+      <td class="num strong">100.0%</td>
+      <td>B1 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr>
+    <tr>
+      <td><strong>ssn_typo</strong><br>
+          <small style="color:#666">SSN single-digit typo in first 5 digits</small></td>
+      <td class="num">3</td>
+      <td class="num strong">100.0%</td>
+      <td>B2 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr>
+    <tr>
+      <td><strong>ssn_null</strong><br>
+          <small style="color:#666">SSN missing in one record</small></td>
+      <td class="num">1,000</td>
+      <td class="num strong">100.0%</td>
+      <td>B5 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr>
+    <tr>
+      <td><strong>phone_reorder</strong><br>
+          <small style="color:#666">Phone reordering (same number, different col)</small></td>
+      <td class="num">1,000</td>
+      <td class="num strong">100.0%</td>
+      <td>B1 (100%)</td>
+      <td class="verdict-pass">✅ PASS</td>
+    </tr></tbody>
+  </table>
+
+  <div class="footer">
+    <span>eMPI Capstone — AllianceChicago | Methodology Evidence Base</span>
+    <span>Track B Owner: Lead Analyst | Generated: May 17, 2026 at 16:18</span>
+  </div>
+</div>
+</body>
+</html>

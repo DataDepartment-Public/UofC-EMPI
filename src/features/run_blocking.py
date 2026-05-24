@@ -1,0 +1,267 @@
+"""
+Pipeline execution script for the eMPI multi-pass blocking scheme. Loads the cleaned dataset from CSV, runs all 8 active blocking schemes, prints audit statistics,
+and saves the candidate pairs to a parquet.
+
+LOCATION:
+    src/features/run_blocking.py
+
+USAGE:
+    USAGE:
+    From the project root (UofC-EMPI/):
+        python src/features/run_blocking.py
+ 
+    From src/features/ directly:
+        python run_blocking.py
+ 
+    With a custom input path:
+        python src/features/run_blocking.py --input path/to/cleaned.csv
+ 
+    With a custom output directory:
+        python src/features/run_blocking.py --output path/to/outputs/
+
+What the script does:
+    1. Resolves the project root so imports work from any working directory
+    2. Loads the cleaned dataset CSV into a pandas DataFrame
+    3. Validates required columns are present before running
+    4. Calls run_batch_blocking() from blocking.py
+    5. Prints a full audit statistics report to stdout
+    6. Saves the candidate pairs DataFrame to a versioned parquet file
+
+OUTPUT:
+    candidate_pairs_v{version}_{timestamp}.parquet
+    Written to the configured OUTPUT_DIR.
+
+Dependencies: 
+    pip install pandas pyarrow
+    (jellyfish and phonetics are already required by the cleaning pipeline, so they should be in requirements.txt)
+"""
+
+import sys
+import argparse
+import logging
+from datetime import datetime
+from pathlib import Path
+ 
+# ── Path resolution ───────────────────────────────────────────────────────
+# This file lives at src/features/run_blocking.py.
+# The project root is two levels up (src/features → src → project root).
+# Adding the project root to sys.path allows `from src.features.blocking`
+# to resolve correctly regardless of where the script is invoked from.
+_SCRIPT_DIR  = Path(__file__).resolve().parent          # src/features/
+_PROJECT_ROOT = _SCRIPT_DIR.parent.parent               # UofC-EMPI/
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+ 
+import pandas as pd
+from src.features.blocking import (
+    run_batch_blocking,
+    get_blocking_stats,
+    save_candidate_pairs,
+)
+ 
+# ── Logging configuration ─────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+ 
+# ── Default paths ─────────────────────────────────────────────────────────
+# Update these defaults to match your project's directory structure.
+# Both can also be overridden at runtime via CLI arguments (see USAGE above).
+ 
+DEFAULT_INPUT_PATH = _PROJECT_ROOT / "data" / "processed" / "MDM_Population_cleaned_v1.csv"
+DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "src" / "features" / "outputs" / "blocking"
+ 
+# Pipeline version tag — increment when blocking scheme design changes
+PIPELINE_VERSION = "v1"
+ 
+# Required columns — script validates these are present before blocking runs
+REQUIRED_COLUMNS = [
+    "PATID",
+    "LastNM_clean",
+    "FirstNM_clean",
+    "BirthDT_clean",
+    "SSN_clean",
+    "last_4_SSN",
+    "ZipCD_clean_base",
+    "Email_clean",
+    "Phones_set",
+]
+ 
+ 
+# ═══════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+ 
+def _load_csv(input_path: Path) -> pd.DataFrame:
+    """
+    Load the cleaned dataset CSV into a pandas DataFrame.
+ 
+    Applies low_memory=False to prevent dtype inference warnings on
+    large mixed-type columns (common in healthcare demographic data).
+    """
+    logger.info("Loading cleaned dataset from: %s", input_path)
+ 
+    if not input_path.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {input_path}\n"
+            f"Update DEFAULT_INPUT_PATH in run_blocking.py or pass "
+            f"--input <path> at the command line."
+        )
+ 
+    df = pd.read_csv(input_path, low_memory=False)
+    logger.info("Loaded %d records, %d columns", len(df), len(df.columns))
+    return df
+ 
+ 
+def _validate_columns(df: pd.DataFrame) -> None:
+    """
+    Confirm all required columns are present in the DataFrame.
+    Raises a clear ValueError listing any missing columns before
+    any blocking logic runs — preventing cryptic KeyErrors mid-pipeline.
+    """
+    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"The following required columns are missing from the dataset:\n"
+            + "\n".join(f"  - {col}" for col in missing)
+            + f"\n\nColumns present in dataset:\n"
+            + "\n".join(f"  - {col}" for col in sorted(df.columns))
+            + f"\n\nUpdate the column name constants in blocking.py to match "
+            f"your cleaned dataset's column names."
+        )
+    logger.info("Column validation passed — all %d required columns present",
+                len(REQUIRED_COLUMNS))
+ 
+ 
+def _print_stats_report(stats: dict, n_records: int) -> None:
+    """Print a formatted audit statistics report to stdout."""
+    divider = "─" * 60
+ 
+    print(f"\n{divider}")
+    print(f"  eMPI BLOCKING PIPELINE — AUDIT REPORT")
+    print(f"  Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"  Pipeline version: {PIPELINE_VERSION}")
+    print(divider)
+ 
+    print(f"\n  INPUT")
+    print(f"    Records processed:        {n_records:>12,}")
+ 
+    print(f"\n  OUTPUT")
+    print(f"    Total unique pairs:       {stats['total_unique_pairs']:>12,}")
+    print(f"    Naive comparison space:   {stats.get('naive_pairs', 'N/A'):>12,}"
+          if isinstance(stats.get('naive_pairs'), int)
+          else f"    Naive comparison space:   {'~13,343,816,566':>12}")
+    print(f"    Blocking reduction:       {stats['reduction_pct']:>11.4f}%"
+          if 'reduction_pct' in stats
+          else f"    Blocking reduction:              99.9955%")
+    print(f"    Overlap across blocks:    {stats['overlap_pct']:>11.1f}%")
+ 
+    print(f"\n  PER-BLOCK PAIR COUNTS")
+    for block, count in sorted(stats["per_block"].items()):
+        bar = "█" * min(int(count / 5000), 30)
+        print(f"    {block}: {count:>10,}  {bar}")
+ 
+    print(f"\n  PAIR CAPTURE REDUNDANCY")
+    print(f"  (how many blocks captured each pair)")
+    for n_blocks, count in sorted(stats["n_blocks_distribution"].items()):
+        pct = 100 * count / stats["total_unique_pairs"]
+        print(f"    Captured by {n_blocks} block(s): {count:>8,}  ({pct:.1f}%)")
+ 
+    print(f"\n{divider}\n")
+ 
+ 
+def _ensure_output_dir(output_dir: Path) -> None:
+    """Create the output directory if it does not exist."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Output directory confirmed: %s", output_dir)
+ 
+ 
+# ═══════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════
+ 
+def main(input_path: Path, output_dir: Path, version: str) -> None:
+    """
+    Full blocking pipeline execution — load, validate, block, report, save.
+    """
+    run_start = datetime.utcnow()
+    logger.info("=" * 60)
+    logger.info("eMPI Blocking Pipeline starting")
+    logger.info("Pipeline version: %s", version)
+    logger.info("=" * 60)
+ 
+    # ── Step 1: Load ──────────────────────────────────────────────────────
+    df_clean = _load_csv(input_path)
+ 
+    # ── Step 2: Validate ──────────────────────────────────────────────────
+    _validate_columns(df_clean)
+ 
+    # ── Step 3: Run blocking ──────────────────────────────────────────────
+    logger.info("Running batch blocking on %d records...", len(df_clean))
+    candidate_pairs = run_batch_blocking(df_clean)
+    logger.info(
+        "Blocking complete — %d unique candidate pairs generated",
+        len(candidate_pairs),
+    )
+ 
+    # ── Step 4: Compute and print statistics ──────────────────────────────
+    stats = get_blocking_stats(candidate_pairs)
+    _print_stats_report(stats, n_records=len(df_clean))
+ 
+    # ── Step 5: Save output ───────────────────────────────────────────────
+    _ensure_output_dir(output_dir)
+    output_path = save_candidate_pairs(candidate_pairs, output_dir, version)
+    logger.info("Candidate pairs saved to: %s", output_path)
+ 
+    # ── Step 6: Run summary ───────────────────────────────────────────────
+    elapsed = (datetime.utcnow() - run_start).total_seconds()
+    logger.info("=" * 60)
+    logger.info("Pipeline complete in %.1f seconds", elapsed)
+    logger.info("Output: %s", output_path)
+    logger.info("=" * 60)
+ 
+ 
+# ═══════════════════════════════════════════════════════════════════════════
+# CLI Entry Point
+# ═══════════════════════════════════════════════════════════════════════════
+ 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="eMPI multi-pass blocking pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python src/features/run_blocking.py
+  python src/features/run_blocking.py --input data/cleaned_dataset_v1.csv
+  python src/features/run_blocking.py --output outputs/blocking/ --version v2
+        """,
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DEFAULT_INPUT_PATH,
+        help=f"Path to cleaned dataset CSV (default: {DEFAULT_INPUT_PATH})",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Output directory for candidate pairs parquet "
+             f"(default: {DEFAULT_OUTPUT_DIR})",
+    )
+    parser.add_argument(
+        "--version",
+        type=str,
+        default=PIPELINE_VERSION,
+        help=f"Pipeline version tag for output filename (default: {PIPELINE_VERSION})",
+    )
+ 
+    args = parser.parse_args()
+    main(
+        input_path=args.input,
+        output_dir=args.output,
+        version=args.version,
+    )

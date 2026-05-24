@@ -28,14 +28,17 @@ What the script does:
     6. Saves the candidate pairs DataFrame to a versioned parquet file
 
 OUTPUT:
-    candidate_pairs_v{version}_{timestamp}.parquet
-    Written to the configured OUTPUT_DIR.
+    candidate_pairs_v{N}_{YYYY_MM_DD}.parquet
+    Written to the configured OUTPUT_DIR. The version `N` is auto-incremented
+    to one above the highest existing `candidate_pairs_v<N>_*.parquet` in the
+    output directory (starts at v1 when the directory is empty).
 
 Dependencies: 
     pip install pandas pyarrow
     (jellyfish and phonetics are already required by the cleaning pipeline, so they should be in requirements.txt)
 """
 
+import re
 import sys
 import argparse
 import logging
@@ -74,8 +77,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_INPUT_PATH = _PROJECT_ROOT / "data" / "processed" / "MDM_Population_cleaned_v1.csv"
 DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "data" / "blocking"
  
-# Pipeline version tag — increment when blocking scheme design changes
-PIPELINE_VERSION = "v1"
+# Filename version tag is auto-incremented at runtime from the output directory
+# (see `_next_version`). No static default is needed.
  
 # Required columns — script validates these are present before blocking runs
 REQUIRED_COLUMNS = [
@@ -138,14 +141,14 @@ def _validate_columns(df: pd.DataFrame) -> None:
                 len(REQUIRED_COLUMNS))
  
  
-def _print_stats_report(stats: dict, n_records: int) -> None:
+def _print_stats_report(stats: dict, n_records: int, version: str) -> None:
     """Print a formatted audit statistics report to stdout."""
     divider = "─" * 60
- 
+
     print(f"\n{divider}")
     print(f"  eMPI BLOCKING PIPELINE — AUDIT REPORT")
     print(f"  Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    print(f"  Pipeline version: {PIPELINE_VERSION}")
+    print(f"  Pipeline version: {version}")
     print(divider)
  
     print(f"\n  INPUT")
@@ -179,28 +182,49 @@ def _ensure_output_dir(output_dir: Path) -> None:
     """Create the output directory if it does not exist."""
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Output directory confirmed: %s", output_dir)
+
+
+def _next_version(output_dir: Path) -> str:
+    """Return the next free `v<N>` tag for `candidate_pairs_v<N>_*.parquet`
+    in `output_dir`. If no prior file exists (or the directory is missing),
+    returns `"v1"`."""
+    pattern = re.compile(r"^candidate_pairs_v(\d+)_.*\.parquet$")
+    max_n = 0
+    if output_dir.exists():
+        for entry in output_dir.iterdir():
+            m = pattern.match(entry.name)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+    return f"v{max_n + 1}"
  
  
 # ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
  
-def main(input_path: Path, output_dir: Path, version: str) -> None:
+def main(input_path: Path, output_dir: Path) -> None:
     """
     Full blocking pipeline execution — load, validate, block, report, save.
     """
     run_start = datetime.utcnow()
+
+    # ── Step 0: Resolve version ───────────────────────────────────────────
+    # Ensure the output dir exists first so the version scan is meaningful
+    # on a fresh checkout (returns "v1" when the dir is empty / new).
+    _ensure_output_dir(output_dir)
+    version = _next_version(output_dir)
+
     logger.info("=" * 60)
     logger.info("eMPI Blocking Pipeline starting")
-    logger.info("Pipeline version: %s", version)
+    logger.info("Pipeline version: %s (auto-incremented)", version)
     logger.info("=" * 60)
- 
+
     # ── Step 1: Load ──────────────────────────────────────────────────────
     df_clean = _load_csv(input_path)
- 
+
     # ── Step 2: Validate ──────────────────────────────────────────────────
     _validate_columns(df_clean)
- 
+
     # ── Step 3: Run blocking ──────────────────────────────────────────────
     logger.info("Running batch blocking on %d records...", len(df_clean))
     candidate_pairs = run_batch_blocking(df_clean)
@@ -208,13 +232,12 @@ def main(input_path: Path, output_dir: Path, version: str) -> None:
         "Blocking complete — %d unique candidate pairs generated",
         len(candidate_pairs),
     )
- 
+
     # ── Step 4: Compute and print statistics ──────────────────────────────
     stats = get_blocking_stats(candidate_pairs)
-    _print_stats_report(stats, n_records=len(df_clean))
- 
+    _print_stats_report(stats, n_records=len(df_clean), version=version)
+
     # ── Step 5: Save output ───────────────────────────────────────────────
-    _ensure_output_dir(output_dir)
     output_path = save_candidate_pairs(candidate_pairs, output_dir, version)
     logger.info("Candidate pairs saved to: %s", output_path)
  
@@ -238,7 +261,7 @@ if __name__ == "__main__":
 Examples:
   python src/features/run_blocking.py
   python src/features/run_blocking.py --input data/cleaned_dataset_v1.csv
-  python src/features/run_blocking.py --output outputs/blocking/ --version v2
+  python src/features/run_blocking.py --output data/blocking/
         """,
     )
     parser.add_argument(
@@ -254,16 +277,9 @@ Examples:
         help=f"Output directory for candidate pairs parquet "
              f"(default: {DEFAULT_OUTPUT_DIR})",
     )
-    parser.add_argument(
-        "--version",
-        type=str,
-        default=PIPELINE_VERSION,
-        help=f"Pipeline version tag for output filename (default: {PIPELINE_VERSION})",
-    )
- 
+
     args = parser.parse_args()
     main(
         input_path=args.input,
         output_dir=args.output,
-        version=args.version,
     )

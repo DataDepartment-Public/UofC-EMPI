@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 # Both can also be overridden at runtime via CLI arguments (see USAGE above).
  
 DEFAULT_INPUT_PATH = _PROJECT_ROOT / "data" / "processed" / "MDM_Population_cleaned_v1.csv"
-DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "src" / "features" / "outputs" / "blocking"
+DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "data" / "blocking"
  
 # Pipeline version tag — increment when blocking scheme design changes
 PIPELINE_VERSION = "v1"

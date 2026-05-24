@@ -32,18 +32,18 @@ Multi-pass blocking scheme that emits candidate `(PATID_A, PATID_B)` pairs likel
 
 - **Input:** a cleaned dataset produced by the cleaning stage above (`data/processed/<stem>_cleaned_v<N>.csv`).
 - **Implementation:** `src/features/blocking.py` defines the blocking logic; `src/features/run_blocking.py` is the pipeline script that loads the cleaned CSV (with `dtype=str` to preserve leading zeros), runs all 8 blocks, prints an audit report, and saves the candidate pairs.
-- **Output location:** `src/features/outputs/blocking/candidate_pairs_v<version>_<timestamp>.parquet`. Schema: `PATID_A | PATID_B | source_blocks | n_blocks`.
+- **Output location:** `data/blocking/candidate_pairs_v<version>_<YYYY_MM_DD>.parquet`. Schema: `PATID_A | PATID_B | source_blocks | n_blocks`.
 
 ### Run
 
 ```bash
 # Defaults: --input data/processed/MDM_Population_cleaned_v1.csv,
-#           --output src/features/outputs/blocking/, --version v1
+#           --output data/blocking/, --version v1
 python src/features/run_blocking.py
 
 # Override any of the defaults
 python src/features/run_blocking.py \
     --input  data/processed/MDM_Population_cleaned_v1.csv \
-    --output src/features/outputs/blocking \
+    --output data/blocking \
     --version v1
 ```

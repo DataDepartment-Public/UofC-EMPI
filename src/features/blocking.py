@@ -748,7 +748,7 @@ def save_candidate_pairs(
             ) from None
     output_path = Path(output_path)
     if output_path.is_dir():
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.utcnow().strftime("%Y_%m_%d")
         fname = f"candidate_pairs_{version}_{ts}.parquet"
         output_path = output_path / fname
  

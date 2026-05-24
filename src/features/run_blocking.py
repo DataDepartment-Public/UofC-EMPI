@@ -98,20 +98,22 @@ REQUIRED_COLUMNS = [
 def _load_csv(input_path: Path) -> pd.DataFrame:
     """
     Load the cleaned dataset CSV into a pandas DataFrame.
- 
-    Applies low_memory=False to prevent dtype inference warnings on
-    large mixed-type columns (common in healthcare demographic data).
+
+    dtype=str is required: it preserves leading zeros on ID-like fields
+    (`PATID`, `last_4_SSN`, `ZipCD_clean_base`, `ZipCD_clean_ext`). Without
+    it pandas infers numeric dtypes and silently truncates values like
+    "02134" → 2134, partitioning records into the wrong blocking buckets.
     """
     logger.info("Loading cleaned dataset from: %s", input_path)
- 
+
     if not input_path.exists():
         raise FileNotFoundError(
             f"Input file not found: {input_path}\n"
             f"Update DEFAULT_INPUT_PATH in run_blocking.py or pass "
             f"--input <path> at the command line."
         )
- 
-    df = pd.read_csv(input_path, low_memory=False)
+
+    df = pd.read_csv(input_path, dtype=str)
     logger.info("Loaded %d records, %d columns", len(df), len(df.columns))
     return df
  

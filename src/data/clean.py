@@ -45,10 +45,22 @@ def _next_version(processed_dir: Path, stem: str) -> int:
 
 
 def _load(input_path: Path) -> pd.DataFrame:
+    # dtype=str preserves leading zeros on ID-like fields (SSN, ZipCD, PATID).
+    # Without it, pandas infers numeric dtypes and "012345678" becomes 12345678
+    # before the per-field transformations can apply the left-pad rules from
+    # docs/Data-Cleaning-Guide.md.
     suffix = input_path.suffix.lower()
     if suffix in {'.xls', '.xlsx'}:
-        return pd.read_excel(input_path)
-    return pd.read_csv(input_path)
+        return pd.read_excel(input_path, dtype=str)
+    return pd.read_csv(input_path, dtype=str)
+
+
+def load_cleaned_csv(path: str | os.PathLike) -> pd.DataFrame:
+    """Read a cleaned CSV produced by this module while preserving leading
+    zeros on string-typed ID fields (`PATID`, `last_4_SSN`, `ZipCD_clean_base`,
+    `ZipCD_clean_ext`, etc.). Always prefer this over a bare `pd.read_csv`
+    on processed files."""
+    return pd.read_csv(path, dtype=str)
 
 
 def clean_from_file(

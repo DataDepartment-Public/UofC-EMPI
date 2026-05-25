@@ -1,27 +1,27 @@
 """
-Pipeline execution script for the eMPI multi-pass blocking scheme. Loads the cleaned dataset from CSV, runs all 8 active blocking schemes, prints audit statistics,
-and saves the candidate pairs to a parquet.
+Pipeline execution script for the eMPI multi-pass blocking scheme. Loads the
+cleaned dataset from Parquet, runs all 8 active blocking schemes, prints audit
+statistics, and saves the candidate pairs to a parquet.
 
 LOCATION:
     src/features/run_blocking.py
 
 USAGE:
-    USAGE:
     From the project root (UofC-EMPI/):
         python src/features/run_blocking.py
- 
+
     From src/features/ directly:
         python run_blocking.py
- 
+
     With a custom input path:
-        python src/features/run_blocking.py --input path/to/cleaned.csv
- 
+        python src/features/run_blocking.py --input path/to/cleaned.parquet
+
     With a custom output directory:
         python src/features/run_blocking.py --output path/to/outputs/
 
 What the script does:
     1. Resolves the project root so imports work from any working directory
-    2. Loads the cleaned dataset CSV into a pandas DataFrame
+    2. Loads the cleaned dataset Parquet into a pandas DataFrame
     3. Validates required columns are present before running
     4. Calls run_batch_blocking() from blocking.py
     5. Prints a full audit statistics report to stdout
@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 # Update these defaults to match your project's directory structure.
 # Both can also be overridden at runtime via CLI arguments (see USAGE above).
  
-DEFAULT_INPUT_PATH = _PROJECT_ROOT / "data" / "processed" / "MDM_Population_cleaned_v1.csv"
+DEFAULT_INPUT_PATH = _PROJECT_ROOT / "data" / "processed" / "MDM_Population_cleaned_v1_2026_05_24.parquet"
 DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "data" / "blocking"
  
 # Filename version tag is auto-incremented at runtime from the output directory
@@ -98,14 +98,14 @@ REQUIRED_COLUMNS = [
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════
  
-def _load_csv(input_path: Path) -> pd.DataFrame:
+def _load_parquet(input_path: Path) -> pd.DataFrame:
     """
-    Load the cleaned dataset CSV into a pandas DataFrame.
+    Load the cleaned dataset Parquet into a pandas DataFrame.
 
-    dtype=str is required: it preserves leading zeros on ID-like fields
-    (`PATID`, `last_4_SSN`, `ZipCD_clean_base`, `ZipCD_clean_ext`). Without
-    it pandas infers numeric dtypes and silently truncates values like
-    "02134" → 2134, partitioning records into the wrong blocking buckets.
+    Parquet preserves dtypes natively, so leading zeros on ID-like fields
+    (`PATID`, `last_4_SSN`, `ZipCD_clean_base`, `ZipCD_clean_ext`) survive
+    the round trip without any explicit dtype handling — unlike CSV, which
+    silently coerces strings like "02134" → 2134 unless `dtype=str` is set.
     """
     logger.info("Loading cleaned dataset from: %s", input_path)
 
@@ -116,7 +116,7 @@ def _load_csv(input_path: Path) -> pd.DataFrame:
             f"--input <path> at the command line."
         )
 
-    df = pd.read_csv(input_path, dtype=str)
+    df = pd.read_parquet(input_path)
     logger.info("Loaded %d records, %d columns", len(df), len(df.columns))
     return df
  
@@ -220,7 +220,7 @@ def main(input_path: Path, output_dir: Path) -> None:
     logger.info("=" * 60)
 
     # ── Step 1: Load ──────────────────────────────────────────────────────
-    df_clean = _load_csv(input_path)
+    df_clean = _load_parquet(input_path)
 
     # ── Step 2: Validate ──────────────────────────────────────────────────
     _validate_columns(df_clean)
@@ -260,7 +260,7 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   python src/features/run_blocking.py
-  python src/features/run_blocking.py --input data/cleaned_dataset_v1.csv
+  python src/features/run_blocking.py --input data/processed/MDM_Population_cleaned_v1_2026_05_24.parquet
   python src/features/run_blocking.py --output data/blocking/
         """,
     )
@@ -268,7 +268,7 @@ Examples:
         "--input",
         type=Path,
         default=DEFAULT_INPUT_PATH,
-        help=f"Path to cleaned dataset CSV (default: {DEFAULT_INPUT_PATH})",
+        help=f"Path to cleaned dataset Parquet (default: {DEFAULT_INPUT_PATH})",
     )
     parser.add_argument(
         "--output",

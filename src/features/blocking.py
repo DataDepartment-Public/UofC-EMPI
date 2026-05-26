@@ -85,6 +85,41 @@ _COL_PHONES_SET = "_phones_parsed"
 # Governance threshold — blocks with more records than this are flagged
 GOVERNANCE_THRESHOLD = 500
 
+# Column produced by the cleaning pipeline marking record-level validity.
+# Records with valid_record == False are excluded from blocking.
+COL_VALID_RECORD = "valid_record"
+
+
+def _filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows flagged invalid by the cleaning pipeline.
+
+    Records where `valid_record` is False (or its string equivalents from a
+    `dtype=str` CSV read) are excluded. Rows with missing/NaN values are
+    kept — only an explicit False drops the record. If the column is absent,
+    the input is returned unchanged with a warning.
+    """
+    if COL_VALID_RECORD not in df.columns:
+        logger.warning(
+            "No '%s' column found — proceeding without validity filter. "
+            "All %d records will be blocked.",
+            COL_VALID_RECORD, len(df),
+        )
+        return df
+
+    col = df[COL_VALID_RECORD]
+    falsy = {False, "False", "false", "FALSE", "0", 0}
+    mask = ~col.isin(falsy)
+
+    n_before = len(df)
+    df_filtered = df[mask].copy()
+    n_dropped = n_before - len(df_filtered)
+    logger.info(
+        "Validity filter: dropped %d invalid records (valid_record=False); "
+        "%d records remain for blocking",
+        n_dropped, len(df_filtered),
+    )
+    return df_filtered
+
 #-------Phonetic Encoding Functions----------------
 
 def _dm_primary(name: str) -> str | None:
@@ -260,6 +295,7 @@ def build_blocking_index(df_clean: pd.DataFrame) -> BlockingIndex:
         Pre-built lookup structures for all 8 blocking schemes.
     """
     logger.info("Building blocking index from %d records...", len(df_clean))
+    df_clean = _filter_valid_records(df_clean)
     df = _compute_derived_columns(df_clean)
  
 
@@ -439,7 +475,9 @@ def run_batch_blocking(df_clean: pd.DataFrame) -> pd.DataFrame:
         "Starting batch blocking on %d records...", len(df_clean)
     )
     start = datetime.utcnow()
- 
+
+    # Validity filtering is applied inside build_blocking_index — invalid
+    # records (valid_record=False) never reach the indexes.
     index = build_blocking_index(df_clean)
     pair_blocks: dict = {}
  
@@ -710,7 +748,7 @@ def save_candidate_pairs(
             ) from None
     output_path = Path(output_path)
     if output_path.is_dir():
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.utcnow().strftime("%Y_%m_%d")
         fname = f"candidate_pairs_{version}_{ts}.parquet"
         output_path = output_path / fname
  
@@ -719,53 +757,4 @@ def save_candidate_pairs(
                 len(candidate_pairs))
     return output_path
  
-
-#---Main Entry Point for Direct Execution-----------------
-
-if __name__ == "__main__":
-    """
-    Direct execution: run batch blocking on df_clean and save output.
- 
-    Usage:
-        python blocking.py --input cleaned_dataset_v1.parquet \
-                           --output ./outputs/ \
-                           --version v1
-    """
-    import argparse
- 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
- 
-    parser = argparse.ArgumentParser(
-        description="Run eMPI multi-pass blocking pipeline"
-    )
-    parser.add_argument("--input",   required=True,
-                        help="Path to cleaned dataset parquet file")
-    parser.add_argument("--output",  required=True,
-                        help="Output directory for candidate pairs")
-    parser.add_argument("--version", default="v1",
-                        help="Version tag for output filename")
-    args = parser.parse_args()
- 
-    df = pd.read_parquet(args.input)
-    logging.info("Loaded %d records from %s", len(df), args.input)
- 
-    pairs = run_batch_blocking(df)
-    stats = get_blocking_stats(pairs)
- 
-    logging.info("=== BLOCKING STATISTICS ===")
-    logging.info("Total unique candidate pairs : %d", stats["total_unique_pairs"])
-    logging.info("Overlap across blocks        : %.1f%%", stats["overlap_pct"])
-    logging.info("Per-block pair counts:")
-    for blk, cnt in stats["per_block"].items():
-        logging.info("  %s: %d", blk, cnt)
- 
-    out_path = save_candidate_pairs(pairs, args.output, args.version)
-    logging.info("Done. Output: %s", out_path)
-
-
-
 

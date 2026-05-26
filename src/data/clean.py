@@ -2,8 +2,9 @@
 
 Loads a CSV/XLSX from `data/raw/`, runs the transformations defined in
 `docs/Data-Cleaning-Guide.md` via `transformations.transform_dataframe`, and
-writes a versioned CSV `<stem>_cleaned_v<N>.csv` into `data/processed/`
-(higher than any existing version for that stem).
+writes a versioned Parquet `<stem>_cleaned_v<N>_<YYYY_MM_DD>.parquet` into
+`data/processed/`. The version `<N>` is one higher than any existing version
+for that stem regardless of the date suffix.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -33,8 +35,13 @@ def clean_mdm_population(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _next_version(processed_dir: Path, stem: str) -> int:
-    """Return the next free `_v<N>` integer for `<stem>_cleaned_v<N>.csv`."""
-    pattern = re.compile(rf'^{re.escape(stem)}_cleaned_v(\d+)\.csv$')
+    """Return the next free `v<N>` integer for
+    `<stem>_cleaned_v<N>_<YYYY_MM_DD>.parquet`. The date suffix is ignored —
+    versions increment monotonically regardless of when prior runs occurred.
+    """
+    pattern = re.compile(
+        rf'^{re.escape(stem)}_cleaned_v(\d+)(?:_\d{{4}}_\d{{2}}_\d{{2}})?\.parquet$'
+    )
     max_n = 0
     if processed_dir.exists():
         for entry in processed_dir.iterdir():
@@ -45,18 +52,30 @@ def _next_version(processed_dir: Path, stem: str) -> int:
 
 
 def _load(input_path: Path) -> pd.DataFrame:
+    # dtype=str preserves leading zeros on ID-like fields (SSN, ZipCD, PATID).
+    # Without it, pandas infers numeric dtypes and "012345678" becomes 12345678
+    # before the per-field transformations can apply the left-pad rules from
+    # docs/Data-Cleaning-Guide.md.
     suffix = input_path.suffix.lower()
     if suffix in {'.xls', '.xlsx'}:
-        return pd.read_excel(input_path)
-    return pd.read_csv(input_path)
+        return pd.read_excel(input_path, dtype=str)
+    return pd.read_csv(input_path, dtype=str)
+
+
+def load_cleaned(path: str | os.PathLike) -> pd.DataFrame:
+    """Read a cleaned Parquet produced by this module. Parquet preserves
+    dtypes natively, so leading zeros on string-typed ID fields (`PATID`,
+    `last_4_SSN`, `ZipCD_clean_base`, `ZipCD_clean_ext`, etc.) survive
+    without any explicit dtype handling."""
+    return pd.read_parquet(path)
 
 
 def clean_from_file(
     input_path: str | os.PathLike,
     processed_dir: Optional[str | os.PathLike] = None,
 ) -> Tuple[pd.DataFrame, Path]:
-    """Load `input_path`, clean it, write the next-version CSV, and return
-    (cleaned_df, output_path)."""
+    """Load `input_path`, clean it, write the next-version Parquet, and
+    return (cleaned_df, output_path)."""
     input_path = Path(input_path)
     processed_dir = Path(processed_dir) if processed_dir is not None else DEFAULT_PROCESSED_DIR
     processed_dir.mkdir(parents=True, exist_ok=True)
@@ -65,8 +84,21 @@ def clean_from_file(
     cleaned = transform_dataframe(df)
 
     version = _next_version(processed_dir, input_path.stem)
-    output_path = processed_dir / f'{input_path.stem}_cleaned_v{version}.csv'
-    cleaned.to_csv(output_path, index=False)
+    date_str = datetime.utcnow().strftime('%Y_%m_%d')
+    output_path = processed_dir / f'{input_path.stem}_cleaned_v{version}_{date_str}.parquet'
+
+    # Arrow/Parquet has no native `set` type. Stringify set-valued columns
+    # at write time so the on-disk schema is plain strings — matches the
+    # legacy CSV form `"{'a', 'b'}"` that `_parse_phone_set` in blocking.py
+    # already knows how to read. The in-memory DataFrame returned to the
+    # caller is unchanged.
+    to_persist = cleaned.copy()
+    for col in ('Phones_set', 'full_name_tokens'):
+        if col in to_persist.columns:
+            to_persist[col] = to_persist[col].apply(
+                lambda v: str(v) if isinstance(v, (set, frozenset)) else v
+            )
+    to_persist.to_parquet(output_path, index=False)
 
     return cleaned, output_path
 

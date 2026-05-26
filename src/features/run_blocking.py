@@ -22,6 +22,8 @@ USAGE:
 What the script does:
     1. Resolves the project root so imports work from any working directory
     2. Loads the cleaned dataset Parquet into a pandas DataFrame
+       (defaults to the highest-versioned MDM_Population_cleaned_v<N>_*.parquet
+       in data/processed/, overridable via --input)
     3. Validates required columns are present before running
     4. Calls run_batch_blocking() from blocking.py
     5. Prints a full audit statistics report to stdout
@@ -74,8 +76,30 @@ logger = logging.getLogger(__name__)
 # Update these defaults to match your project's directory structure.
 # Both can also be overridden at runtime via CLI arguments (see USAGE above).
  
-DEFAULT_INPUT_PATH = _PROJECT_ROOT / "data" / "processed" / "MDM_Population_cleaned_v1_2026_05_24.parquet"
+DEFAULT_INPUT_DIR = _PROJECT_ROOT / "data" / "processed"
+DEFAULT_INPUT_STEM = "MDM_Population_cleaned"
 DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "data" / "blocking"
+
+
+def _latest_cleaned_parquet(input_dir: Path, stem: str) -> Path:
+    """Return the `<stem>_v<N>_*.parquet` in `input_dir` with the highest
+    version `N`. Ties on `N` are broken by filename (lexicographic, which
+    sorts the `YYYY_MM_DD` suffix chronologically). Raises FileNotFoundError
+    if no matching file exists."""
+    pattern = re.compile(rf"^{re.escape(stem)}_v(\d+)_.*\.parquet$")
+    best: tuple[int, str, Path] | None = None
+    if input_dir.exists():
+        for entry in input_dir.iterdir():
+            m = pattern.match(entry.name)
+            if m:
+                key = (int(m.group(1)), entry.name)
+                if best is None or key > (best[0], best[1]):
+                    best = (key[0], key[1], entry)
+    if best is None:
+        raise FileNotFoundError(
+            f"No files matching {stem}_v<N>_*.parquet found in {input_dir}"
+        )
+    return best[2]
  
 # Filename version tag is auto-incremented at runtime from the output directory
 # (see `_next_version`). No static default is needed.
@@ -267,8 +291,9 @@ Examples:
     parser.add_argument(
         "--input",
         type=Path,
-        default=DEFAULT_INPUT_PATH,
-        help=f"Path to cleaned dataset Parquet (default: {DEFAULT_INPUT_PATH})",
+        default=None,
+        help=f"Path to cleaned dataset Parquet (default: latest "
+             f"{DEFAULT_INPUT_STEM}_v<N>_*.parquet in {DEFAULT_INPUT_DIR})",
     )
     parser.add_argument(
         "--output",
@@ -279,7 +304,10 @@ Examples:
     )
 
     args = parser.parse_args()
+    input_path = args.input or _latest_cleaned_parquet(
+        DEFAULT_INPUT_DIR, DEFAULT_INPUT_STEM
+    )
     main(
-        input_path=args.input,
+        input_path=input_path,
         output_dir=args.output,
     )

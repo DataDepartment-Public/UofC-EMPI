@@ -37,7 +37,8 @@ Multi-pass blocking scheme that emits candidate `(PATID_A, PATID_B)` pairs likel
 ### Run
 
 ```bash
-# Defaults: --input data/processed/MDM_Population_cleaned_v1_2026_05_24.parquet,
+# Defaults: --input  highest-versioned MDM_Population_cleaned_v<N>_*.parquet
+#                    in data/processed/ (auto-resolved at runtime)
 #           --output data/blocking/
 # Output filename version (v<N>) auto-increments past the highest already
 # in the output dir.

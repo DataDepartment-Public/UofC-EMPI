@@ -22,8 +22,10 @@ dist/
 # Data files (keep structure, ignore data)
 data/raw/*
 data/processed/*
+data/blocking/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/blocking/.gitkeep
 *.csv
 *.parquet
 *.pkl
@@ -59,3 +61,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Claude
+.claude/
+CLAUDE.md

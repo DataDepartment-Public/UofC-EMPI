@@ -26,10 +26,17 @@ What the script does:
        candidate_pairs_v<N>_*.parquet in data/blocking/)
     4. Applies the deterministic rules via apply_rules()
     5. Prints an audit report and saves the matches to a versioned parquet
+    6. Saves the unconfirmed candidate pairs (non-matches) to a versioned
+       parquet so they can be picked up by downstream matching processes
 
 OUTPUT:
     matches_v{N}_{YYYY_MM_DD}.parquet written to the output directory. The
     version N is auto-incremented above the highest existing matches file.
+
+    non_matches_v{N}_{YYYY_MM_DD}.parquet written to data/non_matches/. These
+    are the candidate pairs that no deterministic rule confirmed — the input to
+    the downstream (probabilistic / ML) matching stage. The full blocking
+    schema (source_blocks, n_blocks) is preserved for provenance.
 
 Dependencies:
     pip install pandas pyarrow
@@ -57,6 +64,7 @@ from src.models.deterministic_rules import (  # noqa: E402
     apply_rules,
     assign_clusters,
     get_match_stats,
+    get_non_matches,
 )
 
 logging.basicConfig(
@@ -71,6 +79,7 @@ DEFAULT_CLEAN_DIR = _PROJECT_ROOT / "data" / "processed"
 DEFAULT_CLEAN_STEM = "MDM_Population_cleaned"
 DEFAULT_PAIRS_DIR = _PROJECT_ROOT / "data" / "blocking"
 DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "data" / "matches"
+DEFAULT_NON_MATCH_DIR = _PROJECT_ROOT / "data" / "non_matches"
 
 
 def _latest_versioned(input_dir: Path, pattern: re.Pattern[str], label: str) -> Path:
@@ -92,9 +101,9 @@ def _latest_versioned(input_dir: Path, pattern: re.Pattern[str], label: str) -> 
     return best[2]
 
 
-def _next_version(output_dir: Path) -> str:
-    """Return the next free `v<N>` tag for `matches_v<N>_*.parquet`."""
-    pattern = re.compile(r"^matches_v(\d+)_.*\.parquet$")
+def _next_version(output_dir: Path, stem: str = "matches") -> str:
+    """Return the next free `v<N>` tag for `{stem}_v<N>_*.parquet`."""
+    pattern = re.compile(rf"^{re.escape(stem)}_v(\d+)_.*\.parquet$")
     max_n = 0
     if output_dir.exists():
         for entry in output_dir.iterdir():
@@ -146,11 +155,17 @@ def _print_report(stats: dict, version: str) -> None:
     print(f"\n{divider}\n")
 
 
-def main(clean_path: Path, pairs_path: Path, output_dir: Path) -> None:
-    """Full rules pipeline: load, apply, report, save."""
+def main(
+    clean_path: Path,
+    pairs_path: Path,
+    output_dir: Path,
+    non_match_dir: Path,
+) -> None:
+    """Full rules pipeline: load, apply, report, save matches + non-matches."""
     run_start = datetime.utcnow()
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    non_match_dir.mkdir(parents=True, exist_ok=True)
     version = _next_version(output_dir)
 
     logger.info("=" * 60)
@@ -176,16 +191,28 @@ def main(clean_path: Path, pairs_path: Path, output_dir: Path) -> None:
         matches = matches.copy()
         matches["cluster_id"] = matches["PATID_A"].map(clusters)
 
-    output_path = output_dir / (
-        f"matches_{version}_{datetime.utcnow().strftime('%Y_%m_%d')}.parquet"
-    )
+    date_tag = datetime.utcnow().strftime("%Y_%m_%d")
+
+    output_path = output_dir / f"matches_{version}_{date_tag}.parquet"
     matches.to_parquet(output_path, index=False)
     logger.info("Matches saved to %s (%d rows)", output_path, len(matches))
+
+    # Candidate pairs no rule confirmed — the input to downstream matching.
+    non_matches = get_non_matches(candidate_pairs, matches)
+    nm_version = _next_version(non_match_dir, stem="non_matches")
+    non_match_path = non_match_dir / f"non_matches_{nm_version}_{date_tag}.parquet"
+    non_matches.to_parquet(non_match_path, index=False)
+    logger.info(
+        "Non-matches saved to %s (%d rows) for downstream matching.",
+        non_match_path,
+        len(non_matches),
+    )
 
     elapsed = (datetime.utcnow() - run_start).total_seconds()
     logger.info("=" * 60)
     logger.info("Pipeline complete in %.1f seconds", elapsed)
-    logger.info("Output: %s", output_path)
+    logger.info("Matches:     %s", output_path)
+    logger.info("Non-matches: %s", non_match_path)
     logger.info("=" * 60)
 
 
@@ -214,6 +241,13 @@ if __name__ == "__main__":
         default=DEFAULT_OUTPUT_DIR,
         help=f"Output directory for matches parquet (default: {DEFAULT_OUTPUT_DIR})",
     )
+    parser.add_argument(
+        "--non-match-output",
+        type=Path,
+        default=DEFAULT_NON_MATCH_DIR,
+        help=f"Output directory for the non-matches parquet routed to "
+        f"downstream matching (default: {DEFAULT_NON_MATCH_DIR})",
+    )
 
     args = parser.parse_args()
 
@@ -228,4 +262,9 @@ if __name__ == "__main__":
         "candidate pairs",
     )
 
-    main(clean_path=clean_path, pairs_path=pairs_path, output_dir=args.output)
+    main(
+        clean_path=clean_path,
+        pairs_path=pairs_path,
+        output_dir=args.output,
+        non_match_dir=args.non_match_output,
+    )

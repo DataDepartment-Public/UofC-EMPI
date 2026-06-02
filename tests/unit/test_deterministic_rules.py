@@ -25,6 +25,7 @@ from src.models.deterministic_rules import (
     apply_rules,
     assign_clusters,
     get_match_stats,
+    get_non_matches,
     _parse_phone_set,
 )
 
@@ -279,6 +280,59 @@ class TestOutputShape:
         df = pd.DataFrame([{"SSN_clean": "123456789"}])
         with pytest.raises(ValueError, match="PATID"):
             apply_rules(_pairs(("A", "B")), df)
+
+
+# ── Non-matches (downstream input) ───────────────────────────────────────────────
+class TestNonMatches:
+    def test_complement_of_matches(self):
+        df = _clean_df([
+            {COL_PATID: "A", "SSN_clean": "123456789"},
+            {COL_PATID: "B", "SSN_clean": "123456789"},
+            {COL_PATID: "C", "SSN_clean": "999999999"},
+            {COL_PATID: "D"},
+        ])
+        pairs = _pairs(("A", "B"), ("C", "D"))
+        matches = apply_rules(pairs, df)
+        non = get_non_matches(pairs, matches)
+        assert list(zip(non["PATID_A"], non["PATID_B"])) == [("C", "D")]
+
+    def test_partition_is_exhaustive_and_disjoint(self):
+        df = _clean_df([
+            {COL_PATID: "A", "SSN_clean": "111111111"},
+            {COL_PATID: "B", "SSN_clean": "111111111"},
+            {COL_PATID: "C", "SSN_clean": "222222222"},
+            {COL_PATID: "D"},
+        ])
+        pairs = _pairs(("A", "B"), ("C", "D"))
+        matches = apply_rules(pairs, df)
+        non = get_non_matches(pairs, matches)
+        assert len(matches) + len(non) == len(pairs)
+        matched = set(zip(matches["PATID_A"], matches["PATID_B"]))
+        unmatched = set(zip(non["PATID_A"], non["PATID_B"]))
+        assert matched.isdisjoint(unmatched)
+        assert matched | unmatched == set(zip(pairs["PATID_A"], pairs["PATID_B"]))
+
+    def test_blocking_schema_preserved(self):
+        df = _clean_df([{COL_PATID: "C"}, {COL_PATID: "D"}])
+        pairs = _pairs(("C", "D"), blocks="B3|B7")
+        non = get_non_matches(pairs, apply_rules(pairs, df))
+        row = non.iloc[0]
+        assert list(non.columns) == ["PATID_A", "PATID_B", "source_blocks", "n_blocks"]
+        assert row["source_blocks"] == "B3|B7"
+
+    def test_no_matches_returns_all_pairs(self):
+        df = _clean_df([{COL_PATID: "C"}, {COL_PATID: "D"}])
+        pairs = _pairs(("C", "D"))
+        non = get_non_matches(pairs, apply_rules(pairs, df))
+        assert len(non) == 1
+
+    def test_empty_candidate_pairs(self):
+        empty = pd.DataFrame(columns=["PATID_A", "PATID_B"])
+        assert get_non_matches(empty, empty).empty
+
+    def test_missing_required_columns_raises(self):
+        with pytest.raises(ValueError, match="PATID_B"):
+            get_non_matches(pd.DataFrame({"PATID_A": ["A"]}), pd.DataFrame())
 
 
 # ── Clustering ─────────────────────────────────────────────────────────────────

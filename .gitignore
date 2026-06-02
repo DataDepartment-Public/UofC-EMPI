@@ -24,10 +24,12 @@ data/raw/*
 data/processed/*
 data/blocking/*
 data/matches/*
+data/non_matches/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/blocking/.gitkeep
 !data/matches/.gitkeep
+!data/non_matches/.gitkeep
 *.csv
 *.parquet
 *.pkl

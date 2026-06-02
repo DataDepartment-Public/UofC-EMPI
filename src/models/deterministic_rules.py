@@ -20,9 +20,10 @@ INPUTS:
         PATID and carrying the `*_clean` attribute columns plus `Phones_set`.
 
 PUBLIC API:
-    apply_rules(candidate_pairs, df_clean)  -> pd.DataFrame   (confirmed matches)
-    assign_clusters(matches)                -> dict[str, int] (PATID -> cluster id)
-    get_match_stats(matches, n_records)     -> dict           (audit report)
+    apply_rules(candidate_pairs, df_clean)      -> pd.DataFrame (confirmed matches)
+    get_non_matches(candidate_pairs, matches)   -> pd.DataFrame (downstream input)
+    assign_clusters(matches)                    -> dict[str, int] (PATID -> cluster)
+    get_match_stats(matches, n_records)         -> dict         (audit report)
 
 OUTPUT SCHEMA (matches DataFrame):
     PATID_A        str   — canonical first PATID (carried from blocking)
@@ -326,6 +327,60 @@ def apply_rules(
             out[passthrough] = confirmed[passthrough]
 
     return out.reset_index(drop=True)
+
+
+def get_non_matches(
+    candidate_pairs: pd.DataFrame, matches: pd.DataFrame
+) -> pd.DataFrame:
+    """Return the candidate pairs that no deterministic rule confirmed.
+
+    These are the pairs that fall through the deterministic stage and become
+    the input to the downstream (probabilistic / ML) matching processes. The
+    original blocking schema is preserved verbatim so downstream consumers keep
+    the full candidate provenance (`source_blocks`, `n_blocks`, ...).
+
+    Identity is the canonical `(PATID_A, PATID_B)` tuple, which `apply_rules`
+    carries through unchanged from the blocking output, so this is an exact set
+    difference: every confirmed match is removed and everything else is kept.
+
+    Parameters
+    ----------
+    candidate_pairs : pd.DataFrame
+        Blocking output. Must contain `PATID_A` and `PATID_B`.
+    matches : pd.DataFrame
+        Output of `apply_rules` (the confirmed deterministic matches).
+
+    Returns
+    -------
+    pd.DataFrame
+        The subset of `candidate_pairs` (same columns) whose `(PATID_A,
+        PATID_B)` does not appear in `matches`, with a reset index.
+    """
+    required = {"PATID_A", "PATID_B"}
+    missing = required - set(candidate_pairs.columns)
+    if missing:
+        raise ValueError(
+            f"candidate_pairs missing required column(s): {sorted(missing)}"
+        )
+
+    if candidate_pairs.empty:
+        return candidate_pairs.copy()
+    if matches.empty:
+        return candidate_pairs.reset_index(drop=True).copy()
+
+    matched_keys = set(zip(matches["PATID_A"], matches["PATID_B"]))
+    keep = [
+        (a, b) not in matched_keys
+        for a, b in zip(candidate_pairs["PATID_A"], candidate_pairs["PATID_B"])
+    ]
+    non_matches = candidate_pairs[pd.Series(keep, index=candidate_pairs.index)]
+    logger.info(
+        "%d/%d candidate pairs were not confirmed; routing to downstream "
+        "matching.",
+        len(non_matches),
+        len(candidate_pairs),
+    )
+    return non_matches.reset_index(drop=True)
 
 
 def assign_clusters(matches: pd.DataFrame) -> dict[str, int]:

@@ -22,6 +22,7 @@ PACKAGE_ROOT = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
+from src.contracts import CleanedRecords, validate
 from src.data.transformations import transform_dataframe
 
 DEFAULT_RAW_DIR = PACKAGE_ROOT / 'data' / 'raw'
@@ -82,16 +83,25 @@ def clean_from_file(
 
     df = _load(input_path)
     cleaned = transform_dataframe(df)
+    validate(cleaned, CleanedRecords)
 
     version = _next_version(processed_dir, input_path.stem)
     date_str = datetime.utcnow().strftime('%Y_%m_%d')
     output_path = processed_dir / f'{input_path.stem}_cleaned_v{version}_{date_str}.parquet'
+    write_cleaned(cleaned, output_path)
 
-    # Arrow/Parquet has no native `set` type. Stringify set-valued columns
-    # at write time so the on-disk schema is plain strings — matches the
-    # legacy CSV form `"{'a', 'b'}"` that `_parse_phone_set` in blocking.py
-    # already knows how to read. The in-memory DataFrame returned to the
-    # caller is unchanged.
+    return cleaned, output_path
+
+
+def write_cleaned(cleaned: pd.DataFrame, output_path: str | os.PathLike) -> Path:
+    """Persist a cleaned DataFrame to Parquet (the single cleaned-write path).
+
+    List-valued columns (`Phones_set`, `full_name_tokens`) are written as native
+    Arrow `list<string>` and round-trip as `np.ndarray`; any stray `set`/
+    `frozenset` is stringified first so the on-disk schema stays plain. The
+    in-memory DataFrame is never mutated.
+    """
+    output_path = Path(output_path)
     to_persist = cleaned.copy()
     for col in ('Phones_set', 'full_name_tokens'):
         if col in to_persist.columns:
@@ -99,8 +109,7 @@ def clean_from_file(
                 lambda v: str(v) if isinstance(v, (set, frozenset)) else v
             )
     to_persist.to_parquet(output_path, index=False)
-
-    return cleaned, output_path
+    return output_path
 
 
 def process_raw_directory(

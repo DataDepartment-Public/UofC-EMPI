@@ -60,6 +60,14 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
+from src.contracts import (  # noqa: E402
+    CandidatePairs,
+    CleanedRecords,
+    Matches,
+    NonMatches,
+    assert_patid_coverage,
+    validate,
+)
 from src.models.deterministic_rules import (  # noqa: E402
     apply_rules,
     assign_clusters,
@@ -174,11 +182,16 @@ def main(
 
     logger.info("Loading cleaned dataset: %s", clean_path)
     df_clean = pd.read_parquet(clean_path)
+    df_clean = validate(df_clean, CleanedRecords)  # contract: cleaned input
     logger.info("Loaded %d cleaned records", len(df_clean))
 
     logger.info("Loading candidate pairs: %s", pairs_path)
     candidate_pairs = pd.read_parquet(pairs_path)
+    candidate_pairs = validate(candidate_pairs, CandidatePairs)  # contract: pairs input
     logger.info("Loaded %d candidate pairs", len(candidate_pairs))
+
+    # Lineage guard: the cleaned frame and the pairs must be from the same run.
+    assert_patid_coverage(candidate_pairs, df_clean)
 
     matches = apply_rules(candidate_pairs, df_clean)
 
@@ -194,11 +207,13 @@ def main(
     date_tag = datetime.utcnow().strftime("%Y_%m_%d")
 
     output_path = output_dir / f"matches_{version}_{date_tag}.parquet"
+    validate(matches, Matches)  # contract: matches output (empty frames skipped)
     matches.to_parquet(output_path, index=False)
     logger.info("Matches saved to %s (%d rows)", output_path, len(matches))
 
     # Candidate pairs no rule confirmed — the input to downstream matching.
     non_matches = get_non_matches(candidate_pairs, matches)
+    validate(non_matches, NonMatches)  # contract: non-matches output
     nm_version = _next_version(non_match_dir, stem="non_matches")
     non_match_path = non_match_dir / f"non_matches_{nm_version}_{date_tag}.parquet"
     non_matches.to_parquet(non_match_path, index=False)

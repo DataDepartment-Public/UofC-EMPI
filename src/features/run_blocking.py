@@ -58,6 +58,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
  
 import pandas as pd
+from src.contracts import CandidatePairs, CleanedRecords, validate
 from src.features.blocking import (
     run_batch_blocking,
     get_blocking_stats,
@@ -248,6 +249,7 @@ def main(input_path: Path, output_dir: Path) -> None:
 
     # ── Step 2: Validate ──────────────────────────────────────────────────
     _validate_columns(df_clean)
+    df_clean = validate(df_clean, CleanedRecords)  # contract: input schema
 
     # ── Step 3: Run blocking ──────────────────────────────────────────────
     logger.info("Running batch blocking on %d records...", len(df_clean))
@@ -262,6 +264,7 @@ def main(input_path: Path, output_dir: Path) -> None:
     _print_stats_report(stats, n_records=len(df_clean), version=version)
 
     # ── Step 5: Save output ───────────────────────────────────────────────
+    validate(candidate_pairs, CandidatePairs)  # contract: output schema
     output_path = save_candidate_pairs(candidate_pairs, output_dir, version)
     logger.info("Candidate pairs saved to: %s", output_path)
  

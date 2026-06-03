@@ -1,4 +1,8 @@
 pandas
+pyarrow
+pandera>=0.20
+pydantic>=2
+pydantic-settings>=2
 matplotlib
 numpy
 openpyxl

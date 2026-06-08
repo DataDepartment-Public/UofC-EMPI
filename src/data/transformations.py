@@ -46,6 +46,11 @@ INVALID_CONTAINS = (
 
 INVALID_EQUALS = frozenset({'TEST', 'BABY'})
 
+# Numeric-only or ID-prefixed-digits patterns in name fields (e.g., `12345`,
+# `ID4567`). Tested against the raw value, since downstream cleaning strips
+# digits from names.
+NUMERIC_NAME_PATTERN = re.compile(r"^\d+$|^[Ii][Dd]\d+$")
+
 ADDRESS_PLACEHOLDERS = frozenset({
     'HOMELESS', 'TRANSIENT', 'BAD ADDRESS', 'NO ADDRESS', '?',
     'NO MAIL', 'GENERAL DELIVERY', 'NKA', '.', 'NOT TAKEN',
@@ -272,11 +277,14 @@ def clean_first_name(value) -> Tuple[Optional[str], bool]:
     if pd.isna(value):
         return np.nan, False
 
-    text = _apply_unicode(str(value))
+    raw = str(value).strip()
+    is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
+
+    text = _apply_unicode(raw)
     text = _split_camelcase(text)
     text = _collapse_ws(text.upper())
 
-    is_invalid = _contains_any(text, INVALID_CONTAINS)
+    is_invalid = is_invalid or _contains_any(text, INVALID_CONTAINS)
 
     text = re.sub(r"[^A-Z \-']", '', text)
     text = _collapse_ws(text)
@@ -304,11 +312,14 @@ def clean_last_name(value) -> Tuple[Optional[str], bool]:
     if pd.isna(value):
         return np.nan, False
 
-    text = _apply_unicode(str(value))
+    raw = str(value).strip()
+    is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
+
+    text = _apply_unicode(raw)
     text = _split_camelcase(text)
     text = _collapse_ws(text.upper())
 
-    is_invalid = _contains_any(text, INVALID_CONTAINS)
+    is_invalid = is_invalid or _contains_any(text, INVALID_CONTAINS)
 
     text = re.sub(r"[^A-Z \-']", '', text)
     text = _collapse_ws(text)
@@ -337,11 +348,14 @@ def clean_middle_name(value) -> Tuple[Optional[str], bool]:
     if pd.isna(value):
         return np.nan, False
 
-    text = _apply_unicode(str(value))
+    raw = str(value).strip()
+    is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
+
+    text = _apply_unicode(raw)
     text = _split_camelcase(text)
     text = _collapse_ws(text.upper())
 
-    is_invalid = _contains_any(text, INVALID_CONTAINS)
+    is_invalid = is_invalid or _contains_any(text, INVALID_CONTAINS)
 
     if text in INVALID_EQUALS:
         is_invalid = True

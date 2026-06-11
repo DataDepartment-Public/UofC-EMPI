@@ -3,6 +3,7 @@ matplotlib
 numpy
 openpyxl
 unidecode
+pytest>=8.0
 # `postal` is the Python binding for libpostal; it requires the native libpostal
 # library installed on the system (e.g. `brew install libpostal` on macOS, or
 # build from https://github.com/openvenues/libpostal). If libpostal is not
@@ -10,3 +11,5 @@ unidecode
 postal
 jellyfish
 phonetics
+
+

@@ -424,35 +424,36 @@ def clean_ssn(value) -> Tuple[Optional[str], Optional[str]]:
 
     digits = re.sub(r'\D', '', str(value))
 
-    last_4 = digits[-4:] if len(digits) >= 4 else np.nan
-
     if len(digits) in (7, 8):
         digits = digits.zfill(9)
 
     if len(digits) != 9:
-        return np.nan, last_4
+        return np.nan, np.nan
 
     if len(set(digits)) == 1:
-        return np.nan, last_4
+        return np.nan, np.nan
 
     if digits[:3] == digits[3:6] == digits[6:9]:
-        return np.nan, last_4
+        return np.nan, np.nan
 
     if digits in SEQUENTIAL_SSN:
-        return np.nan, last_4
+        return np.nan, np.nan
 
     area = digits[:3]
     if area == '000' or area == '666':
-        return np.nan, last_4
+        return np.nan, np.nan
     if 900 <= int(area) <= 999:
-        return np.nan, last_4
+        return np.nan, np.nan
     if digits[3:5] == '00':
-        return np.nan, last_4
+        return np.nan, np.nan
     if digits[5:9] == '0000':
-        return np.nan, last_4
+        return np.nan, np.nan
 
     if digits in JUNK_SSN_EXACT:
-        return np.nan, last_4
+        return np.nan, np.nan
+
+    # Extract last 4 only from a fully validated SSN
+    last_4 = digits[-4:]
 
     return digits, last_4
 

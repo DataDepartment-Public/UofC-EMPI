@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 PACKAGE_ROOT = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -96,7 +97,8 @@ def clean_from_file(
     for col in ('Phones_set', 'full_name_tokens'):
         if col in to_persist.columns:
             to_persist[col] = to_persist[col].apply(
-                lambda v: str(v) if isinstance(v, (set, frozenset)) else v
+                lambda v: v if (v is None or (np.isscalar(v) and pd.isna(v)))
+                else str(v)
             )
     to_persist.to_parquet(output_path, index=False)
 

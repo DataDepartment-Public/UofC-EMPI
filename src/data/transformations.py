@@ -11,10 +11,12 @@ pipeline consumes (`last_4_SSN`, `ZipCD_clean_base`/`_ext`,
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from stdnum.us import ssn as _us_ssn
 from unidecode import unidecode
 
 try:
@@ -195,7 +197,36 @@ JUNK_SSN_EXACT = frozenset({
     '111223333', '219099999', '457555462',
 })
 
-SEQUENTIAL_SSN = frozenset({'123456789', '987654321'})
+# A structurally valid SSN whose digits carry almost no information is a
+# placeholder a clerk typed to satisfy a required field (e.g. 333333330,
+# 003333333, 012345678). These pass area/group/serial structural checks AND
+# stdnum.us.ssn validation, yet on the real AllianceChicago data a single such
+# value (333333330) chained 22 unrelated patients into one EXACT_SSN cluster.
+# We treat an SSN as a placeholder when it has <=2 distinct digits, one digit
+# fills >=7 of the 9 positions, or it is a full ascending/descending digit run.
+# A genuine SSN essentially never looks like this.
+_SSN_MAX_DIGIT_DOMINANCE = 7
+
+
+def _is_sequential_ssn(digits: str) -> bool:
+    """True for a full ascending or descending consecutive-digit run (mod 10).
+
+    Catches 012345678, 123456789, 234567890, 987654321, ... generically rather
+    than relying on a hardcoded enumeration.
+    """
+    d = [int(c) for c in digits]
+    asc = all((d[i + 1] - d[i]) % 10 == 1 for i in range(len(d) - 1))
+    desc = all((d[i] - d[i + 1]) % 10 == 1 for i in range(len(d) - 1))
+    return asc or desc
+
+
+def _is_placeholder_ssn(digits: str) -> bool:
+    """True for low-entropy SSNs that are clerical placeholders, not identities."""
+    if len(set(digits)) <= 2:
+        return True
+    if Counter(digits).most_common(1)[0][1] >= _SSN_MAX_DIGIT_DOMINANCE:
+        return True
+    return _is_sequential_ssn(digits)
 
 INVALID_NPA_N11 = frozenset({'211', '311', '411', '511', '611', '711', '811', '911'})
 SEQUENTIAL_PHONES = frozenset({
@@ -436,9 +467,6 @@ def clean_ssn(value) -> Tuple[Optional[str], Optional[str]]:
     if digits[:3] == digits[3:6] == digits[6:9]:
         return np.nan, np.nan
 
-    if digits in SEQUENTIAL_SSN:
-        return np.nan, np.nan
-
     area = digits[:3]
     if area == '000' or area == '666':
         return np.nan, np.nan
@@ -452,9 +480,19 @@ def clean_ssn(value) -> Tuple[Optional[str], Optional[str]]:
     if digits in JUNK_SSN_EXACT:
         return np.nan, np.nan
 
-    # Extract last 4 only from a fully validated SSN
-    last_4 = digits[-4:]
+    # Low-entropy placeholders (e.g. 333333330) and full ascending/descending
+    # digit runs (e.g. 012345678) pass every structural check above but are not
+    # real identities — reject them before they create EXACT_SSN false-merges.
+    if _is_placeholder_ssn(digits):
+        return np.nan, np.nan
 
+    # Final gate: stdnum's US SSN validator (known-bogus advertising SSNs,
+    # invalid area/group/serial combinations the rules above don't enumerate).
+    if not _us_ssn.is_valid(digits):
+        return np.nan, np.nan
+
+    # Extract last 4 only from a fully validated SSN.
+    last_4 = digits[-4:]
     return digits, last_4
 
 
@@ -867,12 +905,12 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if 'FirstNM_clean' in out.columns and 'LastNM_clean' in out.columns:
         middle = out['MiddleNM_clean'] if 'MiddleNM_clean' in out.columns else pd.Series(np.nan, index=out.index)
         out['full_name_tokens'] = [
-            derive_full_name_tokens(f, m, l)
-            for f, m, l in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
+            derive_full_name_tokens(first, mid, last)
+            for first, mid, last in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
         ]
         out['full_name_compact'] = [
-            derive_full_name_compact(f, m, l)
-            for f, m, l in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
+            derive_full_name_compact(first, mid, last)
+            for first, mid, last in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
         ]
 
     # ---- Derived: Phones_set ----

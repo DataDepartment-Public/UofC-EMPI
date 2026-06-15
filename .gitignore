@@ -23,9 +23,15 @@ dist/
 data/raw/*
 data/processed/*
 data/blocking/*
+data/matches/*
+data/non_matches/*
+data/runs/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/blocking/.gitkeep
+!data/matches/.gitkeep
+!data/non_matches/.gitkeep
+!data/runs/.gitkeep
 *.csv
 *.parquet
 *.pkl

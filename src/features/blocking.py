@@ -59,7 +59,9 @@ import jellyfish
 import pandas as pd
 import numpy as np
 import phonetics
- 
+
+from src.config.config import settings
+
 logger = logging.getLogger(__name__)
 
 # -----------Column Name Constraints-------------------
@@ -82,8 +84,9 @@ _COL_BIRTH_YEAR = "_birth_year"
 _COL_FN_PRE3    = "_fn_prefix3"
 _COL_PHONES_SET = "_phones_parsed"
  
-# Governance threshold — blocks with more records than this are flagged
-GOVERNANCE_THRESHOLD = 500
+# Governance threshold — blocks with more records than this are capped.
+# Sourced from the central config (override via EMPI_GOVERNANCE_THRESHOLD).
+GOVERNANCE_THRESHOLD = settings.governance_threshold
 
 # Column produced by the cleaning pipeline marking record-level validity.
 # Records with valid_record == False are excluded from blocking.
@@ -151,7 +154,8 @@ def _parse_phone_set(value) -> set:
     of a Python set (e.g. "{'7735551234', '3125559876'}"). This function
     handles all observed serialization formats.
     """
-    if isinstance(value, (set, list, tuple, np.ndarray)): 
+    if isinstance(value, (set, frozenset, list, tuple, np.ndarray)):
+        # Parquet round-trips the pipeline's Phones_set list as an np.ndarray.
         return set(str(p).strip() for p in value if str(p).strip())
     if pd.isna(value):
         return set()

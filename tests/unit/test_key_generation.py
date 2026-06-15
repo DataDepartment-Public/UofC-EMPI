@@ -18,8 +18,6 @@ WHY THIS MATTERS:
     the missing pairs and cannot compensate.
 """
 
-import pytest
-import numpy as np
 import pandas as pd
 
 from src.features.blocking import _compute_derived_columns

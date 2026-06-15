@@ -46,6 +46,24 @@ class TestCleanSSN:
         clean, last4 = clean_ssn("111223333")
         assert pd.isna(clean) and last4 == "3333"
 
+    def test_nullifies_dominant_digit_placeholder(self):
+        # 333333330 / 003333333 pass structural + stdnum checks but are clerical
+        # placeholders (one digit fills >=7 of 9 positions). Must be rejected.
+        for junk, last4 in (("333333330", "3330"), ("003333333", "3333")):
+            clean, l4 = clean_ssn(junk)
+            assert pd.isna(clean) and l4 == last4
+
+    def test_keeps_valid_low_repeat_ssn(self):
+        # A genuine SSN with some repeated digits must survive.
+        clean, _ = clean_ssn("536901234")
+        assert clean == "536901234"
+
+    def test_nullifies_sequential_runs(self):
+        # Full ascending/descending digit runs are placeholders, not just the
+        # two values that used to be hardcoded.
+        for junk in ("012345678", "123456789", "234567890", "987654321"):
+            assert pd.isna(clean_ssn(junk)[0])
+
 
 class TestCleanZip:
     def test_base_only(self):

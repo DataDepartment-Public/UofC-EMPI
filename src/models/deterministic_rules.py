@@ -32,6 +32,8 @@ OUTPUT SCHEMA (matches DataFrame):
     confidence     float — confidence of `match_rule`
     rules_fired    str   — pipe-delimited list of every rule that fired
     is_suspicious  bool  — DOB/last-name/SSN disagreement flag (see guide)
+    high_fanout_ssn bool — pair's shared SSN is carried by >= threshold patients
+                           (likely shared/fraudulent SSN — flag for review)
     source_blocks  str   — passed through from blocking (if present)
     n_blocks       int   — passed through from blocking (if present)
 
@@ -49,6 +51,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from src.config.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ── Column-name constants (must match the cleaning + blocking pipelines) ──────
@@ -61,6 +65,12 @@ COL_EMAIL = "Email_clean"
 COL_ADDRESS = "AddressLine1_clean"
 COL_SEX = "SexAtBirthDSC_clean"
 COL_PHONES = "Phones_set"
+
+# A confirmed match whose shared SSN is carried by at least this many distinct
+# patients is flagged `high_fanout_ssn` for clerical review (likely shared or
+# fraudulent SSN rather than true duplicates). Sourced from central config
+# (EMPI_SSN_FANOUT_THRESHOLD); still overridable per-call via apply_rules().
+DEFAULT_SSN_FANOUT_THRESHOLD = settings.ssn_fanout_threshold
 
 # Attribute columns pulled from df_clean onto each side of a pair. Phones are
 # handled separately (set intersection), so Phones_set is not in this list.
@@ -91,9 +101,15 @@ class MatchRule:
 
 
 # Ordered by confidence (descending) — the order the winning rule is resolved in.
+#
+# EMAIL_EXACT (email-only) was REMOVED. On the real AllianceChicago data it ran
+# at ~63-80% precision: shared family/clinic inboxes linked parents to children,
+# siblings, and unrelated patients (see docs/Deterministic-Rules-Guide.md
+# "Evaluation"). Email is only trustworthy when corroborated by name + DOB, which
+# is exactly NAME_DOB_EMAIL. Bare email agreement now flows to the downstream
+# probabilistic stage as a non-match rather than being auto-confirmed here.
 RULES: tuple[MatchRule, ...] = (
     MatchRule("EXACT_SSN", 1.000, ("ssn",)),
-    MatchRule("EMAIL_EXACT", 0.995, ("email",)),
     MatchRule("NAME_DOB_EMAIL", 0.990, ("first", "last", "dob", "email")),
     MatchRule("NAME_DOB_PHONE", 0.985, ("first", "last", "dob", "phone")),
     MatchRule("NAME_DOB_SEX", 0.980, ("first", "last", "dob", "sex")),
@@ -217,6 +233,35 @@ def _build_agreement(
     }
 
 
+def _ssn_fanout_map(df_clean: pd.DataFrame) -> dict[str, int]:
+    """Map each non-null SSN to the number of distinct patients carrying it.
+
+    A valid SSN shared by many distinct identities is almost always a shared or
+    fraudulent number (a family member's SSN entered, or fraud) rather than true
+    duplicates — used by `_high_fanout_ssn_flag`.
+    """
+    if COL_SSN not in df_clean.columns:
+        return {}
+    sub = df_clean[[COL_PATID, COL_SSN]].dropna(subset=[COL_SSN])
+    return sub.groupby(COL_SSN)[COL_PATID].nunique().to_dict()
+
+
+def _high_fanout_ssn_flag(
+    frame: pd.DataFrame, fanout: dict[str, int], threshold: int
+) -> pd.Series:
+    """True where the pair's shared SSN is carried by >= `threshold` patients.
+
+    Only fires when both sides present the same SSN (the EXACT_SSN agreement
+    condition); pairs confirmed by other rules without SSN agreement are False.
+    """
+    left, right = f"{COL_SSN}_L", f"{COL_SSN}_R"
+    if left not in frame.columns or right not in frame.columns or not fanout:
+        return pd.Series(False, index=frame.index)
+    same_ssn = frame[left].notna() & frame[right].notna() & (frame[left] == frame[right])
+    counts = frame[left].map(fanout).fillna(0)
+    return same_ssn & (counts >= threshold)
+
+
 def _suspicious_flag(frame: pd.DataFrame) -> pd.Series:
     """Replicate the guide's suspicious-match definition.
 
@@ -237,7 +282,9 @@ def _suspicious_flag(frame: pd.DataFrame) -> pd.Series:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 def apply_rules(
-    candidate_pairs: pd.DataFrame, df_clean: pd.DataFrame
+    candidate_pairs: pd.DataFrame,
+    df_clean: pd.DataFrame,
+    ssn_fanout_threshold: int = DEFAULT_SSN_FANOUT_THRESHOLD,
 ) -> pd.DataFrame:
     """Apply every deterministic rule to the candidate pairs.
 
@@ -322,6 +369,9 @@ def apply_rules(
     out["confidence"] = confidence
     out["rules_fired"] = rules_fired
     out["is_suspicious"] = _suspicious_flag(confirmed)
+    out["high_fanout_ssn"] = _high_fanout_ssn_flag(
+        confirmed, _ssn_fanout_map(df_clean), ssn_fanout_threshold
+    )
     for passthrough in ("source_blocks", "n_blocks"):
         if passthrough in confirmed.columns:
             out[passthrough] = confirmed[passthrough]
@@ -474,6 +524,11 @@ def get_match_stats(matches: pd.DataFrame, n_records: int | None = None) -> dict
         "suspicious_rate": round(
             100 * float(matches["is_suspicious"].mean()), 2
         ),
+        "high_fanout_ssn_matches": (
+            int(matches["high_fanout_ssn"].sum())
+            if "high_fanout_ssn" in matches.columns
+            else 0
+        ),
         "patients_matched": n_matched,
         "total_patients": n_records,
         "coverage_rate": coverage_rate,
@@ -491,6 +546,7 @@ def _empty_matches(candidate_pairs: pd.DataFrame) -> pd.DataFrame:
         "confidence",
         "rules_fired",
         "is_suspicious",
+        "high_fanout_ssn",
     ]
     for passthrough in ("source_blocks", "n_blocks"):
         if passthrough in candidate_pairs.columns:

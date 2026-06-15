@@ -54,7 +54,7 @@ CLEANED_REQUIRED_COLUMNS: tuple[str, ...] = (
 
 #: Deterministic rule names — keep in sync with deterministic_rules.RULES.
 RULE_NAMES: tuple[str, ...] = (
-    "EXACT_SSN", "EMAIL_EXACT", "NAME_DOB_EMAIL",
+    "EXACT_SSN", "NAME_DOB_EMAIL",
     "NAME_DOB_PHONE", "NAME_DOB_SEX", "NAME_DOB_ADDRESS",
 )
 
@@ -154,6 +154,7 @@ class Matches(pa.DataFrameModel):
     confidence: Series[float] = pa.Field(nullable=False, coerce=True, ge=0.97, le=1.0)
     rules_fired: Series[str] = pa.Field(nullable=False, coerce=True)
     is_suspicious: Series[bool] = pa.Field(nullable=False, coerce=True)
+    high_fanout_ssn: Series[bool] = pa.Field(nullable=False, coerce=True)
     cluster_id: Series[int] = pa.Field(nullable=False, coerce=True, ge=0)
     source_blocks: Series[str] = pa.Field(nullable=False, coerce=True)
     n_blocks: Series[int] = pa.Field(nullable=False, coerce=True, ge=1)

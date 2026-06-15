@@ -22,11 +22,13 @@ PACKAGE_ROOT = Path(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from src.contracts import CleanedRecords, validate
-from src.data.transformations import transform_dataframe
+# Imports below must follow the sys.path insertion above, hence noqa: E402.
+from src.config.config import settings  # noqa: E402
+from src.contracts import CleanedRecords, validate  # noqa: E402
+from src.data.transformations import transform_dataframe  # noqa: E402
 
-DEFAULT_RAW_DIR = PACKAGE_ROOT / 'data' / 'raw'
-DEFAULT_PROCESSED_DIR = PACKAGE_ROOT / 'data' / 'processed'
+DEFAULT_RAW_DIR = settings.raw_dir
+DEFAULT_PROCESSED_DIR = settings.processed_dir
 SUPPORTED_EXTENSIONS = {'.csv', '.xls', '.xlsx'}
 
 

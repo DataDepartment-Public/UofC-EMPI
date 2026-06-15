@@ -50,6 +50,35 @@ class Settings(BaseSettings):
         description="Per-key record cap; blocks larger than this are capped.",
     )
 
+    # ── Rules ───────────────────────────────────────────────────────────────
+    ssn_fanout_threshold: int = Field(
+        default=4,
+        description="Flag EXACT_SSN matches whose shared SSN is carried by at "
+        "least this many distinct patients (likely shared/fraudulent SSN).",
+    )
+
+    # ── Evaluation / adjudication (src/evaluation/rule_eval.py) ──────────────
+    adj_sample_size: int = Field(
+        default=300,
+        description="Matches sampled per rule when adjudicating precision.",
+    )
+    adj_first_strong: float = Field(
+        default=0.92,
+        description="First-name similarity treated as the same name outright.",
+    )
+    adj_first_ok: float = Field(
+        default=0.85,
+        description="First-name similarity acceptable when a field corroborates.",
+    )
+    adj_last_ok: float = Field(
+        default=0.80,
+        description="Last-name similarity acceptable (maiden-name tolerance).",
+    )
+    adj_first_different: float = Field(
+        default=0.70,
+        description="Below this first-name similarity, names are distinct people.",
+    )
+
     def ensure_dirs(self) -> None:
         """Create every output directory this run will write to."""
         for d in (

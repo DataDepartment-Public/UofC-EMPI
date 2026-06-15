@@ -146,7 +146,9 @@ def run_pipeline(
 
     # ── Stage 3: deterministic rules ──────────────────────────────────────
     assert_patid_coverage(candidate_pairs, cleaned)  # guaranteed in-process; guard anyway
-    matches = apply_rules(candidate_pairs, cleaned)
+    matches = apply_rules(
+        candidate_pairs, cleaned, ssn_fanout_threshold=settings.ssn_fanout_threshold
+    )
     if not matches.empty:
         clusters = assign_clusters(matches)
         matches = matches.copy()

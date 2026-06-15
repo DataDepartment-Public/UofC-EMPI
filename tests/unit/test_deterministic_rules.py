@@ -70,19 +70,18 @@ class TestEachRuleFires:
         assert row["match_rule"] == "EXACT_SSN"
         assert row["confidence"] == 1.0
 
-    def test_email_exact(self):
-        # Different names, shared email → EMAIL_EXACT (and nothing else).
+    def test_email_only_does_not_match(self):
+        # Different names sharing an email (family/clinic inbox) must NOT be
+        # confirmed: bare email agreement was removed as a rule. The pair falls
+        # through to the downstream probabilistic stage instead.
         df = _clean_df([
             {COL_PATID: "A", "Email_clean": "shared@x.com", "LastNM_clean": "A"},
             {COL_PATID: "B", "Email_clean": "shared@x.com", "LastNM_clean": "B"},
         ])
-        row = _one(apply_rules(_pairs(("A", "B")), df))
-        assert row["match_rule"] == "EMAIL_EXACT"
-        assert row["confidence"] == 0.995
+        assert apply_rules(_pairs(("A", "B")), df).empty
 
     def test_name_dob_email(self):
-        # Name+DOB+email agree but SSN absent → EMAIL_EXACT wins, but
-        # NAME_DOB_EMAIL must also be among the fired rules.
+        # Name+DOB+email agree, no SSN → NAME_DOB_EMAIL is now the winning rule.
         df = _clean_df([
             {COL_PATID: "A", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
              "BirthDT_clean": pd.Timestamp("1990-01-01"),
@@ -92,8 +91,8 @@ class TestEachRuleFires:
              "Email_clean": "j@x.com"},
         ])
         row = _one(apply_rules(_pairs(("A", "B")), df))
-        assert "NAME_DOB_EMAIL" in row["rules_fired"].split("|")
-        assert "EMAIL_EXACT" in row["rules_fired"].split("|")
+        assert row["match_rule"] == "NAME_DOB_EMAIL"
+        assert row["confidence"] == 0.990
 
     def test_name_dob_phone(self):
         df = _clean_df([
@@ -151,6 +150,35 @@ class TestPrecedence:
     def test_rules_are_confidence_sorted(self):
         confidences = [r.confidence for r in RULES]
         assert confidences == sorted(confidences, reverse=True)
+
+
+# ── High-fanout SSN flag ────────────────────────────────────────────────────────
+class TestHighFanoutSSN:
+    def test_flags_ssn_shared_by_many_identities(self):
+        # One SSN carried by 4 distinct patients → matches on it are flagged.
+        df = _clean_df([
+            {COL_PATID: p, "SSN_clean": "123456789", "LastNM_clean": ln}
+            for p, ln in zip("ABCD", ("AA", "BB", "CC", "DD"))
+        ])
+        out = apply_rules(_pairs(("A", "B")), df, ssn_fanout_threshold=4)
+        assert bool(_one(out)["high_fanout_ssn"]) is True
+
+    def test_does_not_flag_normal_duplicate(self):
+        # The same SSN on only 2 patients is a normal duplicate, not flagged.
+        df = _clean_df([
+            {COL_PATID: "A", "SSN_clean": "123456789"},
+            {COL_PATID: "B", "SSN_clean": "123456789"},
+        ])
+        out = apply_rules(_pairs(("A", "B")), df, ssn_fanout_threshold=4)
+        assert bool(_one(out)["high_fanout_ssn"]) is False
+
+    def test_threshold_is_configurable(self):
+        df = _clean_df([
+            {COL_PATID: "A", "SSN_clean": "123456789"},
+            {COL_PATID: "B", "SSN_clean": "123456789"},
+        ])
+        out = apply_rules(_pairs(("A", "B")), df, ssn_fanout_threshold=2)
+        assert bool(_one(out)["high_fanout_ssn"]) is True
 
 
 # ── Agreement edge cases ───────────────────────────────────────────────────────

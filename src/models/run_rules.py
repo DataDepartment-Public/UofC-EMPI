@@ -82,12 +82,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Default paths ─────────────────────────────────────────────────────────────
-DEFAULT_CLEAN_DIR = _PROJECT_ROOT / "data" / "processed"
-DEFAULT_CLEAN_STEM = "MDM_Population_cleaned"
-DEFAULT_PAIRS_DIR = _PROJECT_ROOT / "data" / "blocking"
-DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "data" / "matches"
-DEFAULT_NON_MATCH_DIR = _PROJECT_ROOT / "data" / "non_matches"
+# ── Default paths (sourced from the central config) ──────────────────────────
+from src.config.config import settings  # noqa: E402
+
+DEFAULT_CLEAN_DIR = settings.processed_dir
+DEFAULT_CLEAN_STEM = settings.cleaned_stem
+DEFAULT_PAIRS_DIR = settings.blocking_dir
+DEFAULT_OUTPUT_DIR = settings.matches_dir
+DEFAULT_NON_MATCH_DIR = settings.non_matches_dir
 
 
 def _latest_versioned(input_dir: Path, pattern: re.Pattern[str], label: str) -> Path:
@@ -155,6 +157,11 @@ def _print_report(stats: dict, version: str) -> None:
         f"    Suspicious matches:       {stats['suspicious_matches']:>12,}"
         f"  ({stats['suspicious_rate']:.2f}%)"
     )
+    if stats.get("high_fanout_ssn_matches"):
+        print(
+            f"    High-fanout SSN matches:  {stats['high_fanout_ssn_matches']:>12,}"
+            "  (shared/fraudulent SSN — review)"
+        )
 
     print("\n  CLUSTERS")
     print(f"    Distinct clusters:        {stats['n_clusters']:>12,}")

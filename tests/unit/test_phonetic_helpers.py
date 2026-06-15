@@ -17,7 +17,6 @@ WHY THIS MATTERS:
 
 import pytest
 import numpy as np
-import pandas as pd
 
 from src.features.blocking import _dm_primary, _soundex
 

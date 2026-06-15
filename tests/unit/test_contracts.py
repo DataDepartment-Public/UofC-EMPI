@@ -66,6 +66,7 @@ def _matches(**override) -> pd.DataFrame:
         "confidence": [1.0],
         "rules_fired": ["EXACT_SSN"],
         "is_suspicious": [False],
+        "high_fanout_ssn": [False],
         "cluster_id": [0],
         "source_blocks": ["B1"],
         "n_blocks": [1],

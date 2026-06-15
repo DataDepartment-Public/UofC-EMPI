@@ -28,12 +28,10 @@ ARCHITECTURE NOTE:
 
 import pytest
 import pandas as pd
-import numpy as np
 
 from src.features.blocking import (
     build_blocking_index,
     run_inference_blocking,
-    BlockingIndex,
 )
 
 # ── Column name constants ─────────────────────────────────────────────────

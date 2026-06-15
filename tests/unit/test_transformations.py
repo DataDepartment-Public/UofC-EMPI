@@ -34,9 +34,11 @@ class TestCleanSSN:
         assert clean == "053690123"  # leading zero preserved
         assert last4 == "0123"
 
-    def test_nullifies_all_same_digits_but_keeps_last4(self):
+    def test_nullifies_all_same_digits(self):
+        # last_4 is only extracted from a fully-validated SSN, so an invalid
+        # value yields (nan, nan).
         clean, last4 = clean_ssn("000000000")
-        assert pd.isna(clean) and last4 == "0000"
+        assert pd.isna(clean) and pd.isna(last4)
 
     def test_nullifies_invalid_area_900(self):
         clean, _ = clean_ssn("900112222")
@@ -44,14 +46,15 @@ class TestCleanSSN:
 
     def test_nullifies_known_junk_value(self):
         clean, last4 = clean_ssn("111223333")
-        assert pd.isna(clean) and last4 == "3333"
+        assert pd.isna(clean) and pd.isna(last4)
 
     def test_nullifies_dominant_digit_placeholder(self):
         # 333333330 / 003333333 pass structural + stdnum checks but are clerical
-        # placeholders (one digit fills >=7 of 9 positions). Must be rejected.
-        for junk, last4 in (("333333330", "3330"), ("003333333", "3333")):
+        # placeholders (one digit fills >=7 of 9 positions). Must be rejected,
+        # and an invalid SSN yields no last_4.
+        for junk in ("333333330", "003333333"):
             clean, l4 = clean_ssn(junk)
-            assert pd.isna(clean) and l4 == last4
+            assert pd.isna(clean) and pd.isna(l4)
 
     def test_keeps_valid_low_repeat_ssn(self):
         # A genuine SSN with some repeated digits must survive.

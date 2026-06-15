@@ -48,6 +48,11 @@ INVALID_CONTAINS = (
 
 INVALID_EQUALS = frozenset({'TEST', 'BABY'})
 
+# Numeric-only or ID-prefixed-digits patterns in name fields (e.g., `12345`,
+# `ID4567`). Tested against the raw value, since downstream cleaning strips
+# digits from names.
+NUMERIC_NAME_PATTERN = re.compile(r"^\d+$|^[Ii][Dd]\d+$")
+
 ADDRESS_PLACEHOLDERS = frozenset({
     'HOMELESS', 'TRANSIENT', 'BAD ADDRESS', 'NO ADDRESS', '?',
     'NO MAIL', 'GENERAL DELIVERY', 'NKA', '.', 'NOT TAKEN',
@@ -303,11 +308,14 @@ def clean_first_name(value) -> Tuple[Optional[str], bool]:
     if pd.isna(value):
         return np.nan, False
 
-    text = _apply_unicode(str(value))
+    raw = str(value).strip()
+    is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
+
+    text = _apply_unicode(raw)
     text = _split_camelcase(text)
     text = _collapse_ws(text.upper())
 
-    is_invalid = _contains_any(text, INVALID_CONTAINS)
+    is_invalid = is_invalid or _contains_any(text, INVALID_CONTAINS)
 
     text = re.sub(r"[^A-Z \-']", '', text)
     text = _collapse_ws(text)
@@ -335,11 +343,14 @@ def clean_last_name(value) -> Tuple[Optional[str], bool]:
     if pd.isna(value):
         return np.nan, False
 
-    text = _apply_unicode(str(value))
+    raw = str(value).strip()
+    is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
+
+    text = _apply_unicode(raw)
     text = _split_camelcase(text)
     text = _collapse_ws(text.upper())
 
-    is_invalid = _contains_any(text, INVALID_CONTAINS)
+    is_invalid = is_invalid or _contains_any(text, INVALID_CONTAINS)
 
     text = re.sub(r"[^A-Z \-']", '', text)
     text = _collapse_ws(text)
@@ -368,11 +379,14 @@ def clean_middle_name(value) -> Tuple[Optional[str], bool]:
     if pd.isna(value):
         return np.nan, False
 
-    text = _apply_unicode(str(value))
+    raw = str(value).strip()
+    is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
+
+    text = _apply_unicode(raw)
     text = _split_camelcase(text)
     text = _collapse_ws(text.upper())
 
-    is_invalid = _contains_any(text, INVALID_CONTAINS)
+    is_invalid = is_invalid or _contains_any(text, INVALID_CONTAINS)
 
     if text in INVALID_EQUALS:
         is_invalid = True
@@ -441,44 +455,44 @@ def clean_ssn(value) -> Tuple[Optional[str], Optional[str]]:
 
     digits = re.sub(r'\D', '', str(value))
 
-    last_4 = digits[-4:] if len(digits) >= 4 else np.nan
-
     if len(digits) in (7, 8):
         digits = digits.zfill(9)
 
     if len(digits) != 9:
-        return np.nan, last_4
+        return np.nan, np.nan
 
     if len(set(digits)) == 1:
-        return np.nan, last_4
+        return np.nan, np.nan
 
     if digits[:3] == digits[3:6] == digits[6:9]:
-        return np.nan, last_4
+        return np.nan, np.nan
 
     area = digits[:3]
     if area == '000' or area == '666':
-        return np.nan, last_4
+        return np.nan, np.nan
     if 900 <= int(area) <= 999:
-        return np.nan, last_4
+        return np.nan, np.nan
     if digits[3:5] == '00':
-        return np.nan, last_4
+        return np.nan, np.nan
     if digits[5:9] == '0000':
-        return np.nan, last_4
+        return np.nan, np.nan
 
     if digits in JUNK_SSN_EXACT:
-        return np.nan, last_4
+        return np.nan, np.nan
 
-    # Low-entropy placeholders (e.g. 333333330) pass every structural check
-    # above but are not real identities — reject them before they create
-    # EXACT_SSN false-merge chains.
+    # Low-entropy placeholders (e.g. 333333330) and full ascending/descending
+    # digit runs (e.g. 012345678) pass every structural check above but are not
+    # real identities — reject them before they create EXACT_SSN false-merges.
     if _is_placeholder_ssn(digits):
-        return np.nan, last_4
+        return np.nan, np.nan
 
     # Final gate: stdnum's US SSN validator (known-bogus advertising SSNs,
     # invalid area/group/serial combinations the rules above don't enumerate).
     if not _us_ssn.is_valid(digits):
-        return np.nan, last_4
+        return np.nan, np.nan
 
+    # Extract last 4 only from a fully validated SSN.
+    last_4 = digits[-4:]
     return digits, last_4
 
 

@@ -216,11 +216,13 @@ def prepare_model_input(df_clean: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         Model-ready frame with derived columns, Phones_array, and shim columns.
     """
-    df = _compute_derived_columns(df_clean)
+    df = _compute_derived_columns(df_clean)  # returns a copy; caller's frame is not mutated
 
     # _phones_parsed (set) -> Phones_array (sorted list); empty set -> [].
+    # Guard with isinstance: pandas treats NaN as truthy, so `if s else []` would
+    # send a NaN into sorted() if _parse_phone_set's set-output invariant ever drifts.
     df[COL_PHONES_ARRAY] = df[_COL_PHONES_SET].apply(
-        lambda s: sorted(s) if s else []
+        lambda s: sorted(s) if isinstance(s, set) and s else []
     )
 
     # Inert placeholders so Splink's retain_matching_columns harvesting binds.
@@ -437,7 +439,13 @@ def _warn_on_weight_inversions(linker: Linker) -> None:
     """
     try:
         records = linker._settings_obj._parameters_as_detailed_records
-    except Exception:  # diagnostics must never break training
+    except AttributeError as exc:
+        # Splink private API changed. Diagnostics must never break training,
+        # but we want the silent-pass condition to be observable in the logs.
+        logger.warning(
+            "Weight-inversion diagnostic skipped — Splink private API "
+            "_parameters_as_detailed_records not accessible: %s", exc,
+        )
         return
     for r in records:
         m, u = r.get("m_probability"), r.get("u_probability")
@@ -574,16 +582,22 @@ def get_model_diagnostics(linker: Linker) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {}
     try:
         diagnostics["trained_settings"] = linker.misc.save_model_to_json()
-    except Exception as exc:  # pragma: no cover - defensive
+    except AttributeError as exc:  # pragma: no cover - defensive
+        logger.warning("Splink save_model_to_json missing: %s", exc)
         diagnostics["trained_settings_error"] = str(exc)
     try:
         diagnostics["parameter_records"] = linker._settings_obj._parameters_as_detailed_records
-    except Exception as exc:  # pragma: no cover - defensive
+    except AttributeError as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Splink _parameters_as_detailed_records missing: %s", exc,
+        )
         diagnostics["parameter_records_error"] = str(exc)
     try:
         diagnostics["per_session_estimates"] = linker._settings_obj._parameter_estimates_as_records
-    except Exception:  # pragma: no cover - defensive
-        pass
+    except AttributeError as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "Splink _parameter_estimates_as_records missing: %s", exc,
+        )
     diagnostics["probability_two_random_records_match"] = getattr(
         linker._settings_obj, "_probability_two_random_records_match", None
     )

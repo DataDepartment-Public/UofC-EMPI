@@ -9,18 +9,22 @@ or any other identifier — only aggregate counts and the non-PHI diagnostics
 bundle (trained m/u parameters), consistent with fellegi_sunter_baseline.py's
 HIPAA note.
 
-Inputs (defaults match the implementation plan, Section 3.0, updated to the
-2026-06-11 data refresh):
-    data/processed/MDM_Population_cleaned_v3_2026_06_11.parquet
-    src/features/outputs/blocking/candidate_pairs_v4_2026_06_11.parquet
+Inputs (auto-resolved to the highest-versioned parquet on disk via
+``models.common.versioning.latest_versioned``; override with CLI flags):
+    data/processed/MDM_Population_cleaned_v*_*.parquet
+    src/features/outputs/blocking/candidate_pairs_v*_*.parquet
 
 Outputs:
-    models/outputs/fs_splink_baseline__v4_2026_06_11.parquet
+    models/outputs/fs_splink_baseline__<data-version>.parquet
         Standardized 5-column evaluation frame (PATID_A, PATID_B, model_name,
         score, predicted_tier) for the team's comparison call.
-    models/artifacts/fs_splink_baseline/diagnostics__v4_2026_06_11.json
+    models/artifacts/fs_splink_baseline/diagnostics__<data-version>.json
         Non-PHI diagnostics: trained m/u parameters, per-EM-session estimates,
         probability_two_random_records_match.
+
+The ``<data-version>`` tag is auto-derived from the resolved candidate-pairs
+filename (e.g. ``v4_2026_06_11``) so re-runs across data refreshes do not
+overwrite each other. Override with ``--data-version`` if you need a custom tag.
 
 Usage (from project root, with the project venv activated):
     python models/experiments/fs_splink_baseline/run_real_baseline.py
@@ -49,6 +53,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from models.experiments.fs_splink_baseline import fellegi_sunter_baseline as fs
+from models.common.versioning import latest_versioned, version_tag_from_filename
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -56,16 +61,12 @@ logger = logging.getLogger(__name__)
 OUTPUTS_DIR = PROJECT_ROOT / "models" / "outputs"
 ARTIFACTS_DIR = PROJECT_ROOT / "models" / "artifacts" / fs.MODEL_NAME
 
-# Defaults reflect the 2026-06-11 data refresh. Override via CLI flags if your
-# team produces a newer cleaned index / candidate-pairs file.
-DEFAULT_CLEANED_INDEX = (
-    PROJECT_ROOT / "data" / "processed" / "MDM_Population_cleaned_v3_2026_06_11.parquet"
-)
-DEFAULT_CANDIDATE_PAIRS = (
-    PROJECT_ROOT / "src" / "features" / "outputs" / "blocking"
-    / "candidate_pairs_v4_2026_06_11.parquet"
-)
-DEFAULT_DATA_VERSION = "v4_2026_06_11"
+# Auto-resolved at runtime (see resolve_inputs()) from these directories +
+# glob patterns. Override via CLI flags to pin a specific file.
+CLEANED_DIR = PROJECT_ROOT / "data" / "processed"
+CLEANED_GLOB = "MDM_Population_cleaned_v*_*.parquet"
+PAIRS_DIR = PROJECT_ROOT / "src" / "features" / "outputs" / "blocking"
+PAIRS_GLOB = "candidate_pairs_v*_*.parquet"
 
 # Production default (multi-core VM). The module's _estimate_u_with_guard
 # auto-falls-back to 1e4 with a clear error if this host turns out to be
@@ -76,16 +77,25 @@ U_MAX_PAIRS = 1e6
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--cleaned-index", type=Path, default=DEFAULT_CLEANED_INDEX,
-        help="Path to the cleaned patient index parquet (Section 3.0).",
+        "--cleaned-index", type=Path, default=None,
+        help=(
+            "Path to the cleaned patient index parquet. Defaults to the "
+            f"highest-versioned file matching {CLEANED_GLOB} in {CLEANED_DIR}."
+        ),
     )
     p.add_argument(
-        "--candidate-pairs", type=Path, default=DEFAULT_CANDIDATE_PAIRS,
-        help="Path to the candidate-pairs parquet from blocking.py (Section 3.0).",
+        "--candidate-pairs", type=Path, default=None,
+        help=(
+            "Path to the candidate-pairs parquet from blocking.py. Defaults to "
+            f"the highest-versioned file matching {PAIRS_GLOB} in {PAIRS_DIR}."
+        ),
     )
     p.add_argument(
-        "--data-version", default=DEFAULT_DATA_VERSION,
-        help="Tag used in output filenames, e.g. v4_2026_06_11.",
+        "--data-version", default=None,
+        help=(
+            "Tag used in output filenames, e.g. v4_2026_06_11. Defaults to "
+            "the version tag parsed from the resolved candidate-pairs filename."
+        ),
     )
     p.add_argument(
         "--u-max-pairs", type=float, default=U_MAX_PAIRS,
@@ -105,16 +115,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if not args.cleaned_index.exists():
+    if args.cleaned_index is None:
+        args.cleaned_index = latest_versioned(CLEANED_DIR, CLEANED_GLOB)
+        logger.info("Auto-resolved --cleaned-index -> %s", args.cleaned_index)
+    elif not args.cleaned_index.exists():
         raise FileNotFoundError(
             f"Cleaned index not found: {args.cleaned_index}\n"
             "Pass --cleaned-index pointing at the current cleaned parquet."
         )
-    if not args.candidate_pairs.exists():
+
+    if args.candidate_pairs is None:
+        args.candidate_pairs = latest_versioned(PAIRS_DIR, PAIRS_GLOB)
+        logger.info("Auto-resolved --candidate-pairs -> %s", args.candidate_pairs)
+    elif not args.candidate_pairs.exists():
         raise FileNotFoundError(
             f"Candidate pairs not found: {args.candidate_pairs}\n"
             "Pass --candidate-pairs pointing at the current blocking output."
         )
+
+    if args.data_version is None:
+        args.data_version = version_tag_from_filename(args.candidate_pairs)
+        logger.info("Auto-resolved --data-version -> %s", args.data_version)
 
     logger.info("Loading cleaned patient index from %s", args.cleaned_index)
     df_clean = pd.read_parquet(args.cleaned_index)

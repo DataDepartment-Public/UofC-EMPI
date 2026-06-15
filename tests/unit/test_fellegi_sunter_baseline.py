@@ -69,14 +69,15 @@ def test_prepare_model_input_adds_shim_columns(fs_df_clean):
 # build_settings
 # ===========================================================================
 def test_build_settings_structure():
-    """dedupe_only, 8 comparisons, TF on exactly FN + LN + Email."""
+    """dedupe_only, 7 comparisons, TF on exactly FN + LN + Email."""
     settings = fs.build_settings()
     d = settings.get_settings("duckdb").as_dict()
 
     assert d["link_type"] == "dedupe_only"
     assert d["unique_id_column_name"] == fs.COL_PATID
-    # Post-R2: FirstNM, LastNM, DOB, SSN, Email, Phones, ZIP, Address.
-    assert len(d["comparisons"]) == 8
+    # FirstNM, LastNM, DOB, SSN, Email, Phones, ZIP (R2 Address comparison
+    # reverted on 2026-06-15 pending ground-truth calibration).
+    assert len(d["comparisons"]) == 7
 
     # Term-frequency adjustments must be ON for FirstNM, LastNM, Email and
     # OFF everywhere else. We detect TF by inspecting comparison levels.
@@ -93,10 +94,9 @@ def test_build_settings_structure():
     assert COL_LAST_NM in tf_fields
     # Post-R1 Email is a CustomComparison with output_column_name="Email".
     assert "Email" in tf_fields
-    # Graded SSN / ZIP / DOB / phones / Address must NOT carry TF.
+    # Graded SSN / ZIP / DOB / phones must NOT carry TF.
     assert "SSN" not in tf_fields
     assert "ZIP" not in tf_fields
-    assert "Address" not in tf_fields
 
 
 def test_build_settings_retains_audit_columns():

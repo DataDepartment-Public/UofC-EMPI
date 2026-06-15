@@ -89,15 +89,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 COL_PHONES_ARRAY = "Phones_array"  # DuckDB LIST built from _phones_parsed
 
-# Address-bearing columns produced by the cleaning pipeline (src/data/
-# transformations.py). The *_clean siblings are always populated; the
-# libpostal-derived Address_normalized may be NaN when libpostal is not
-# installed — pick Branch A vs. Branch B in build_settings() accordingly.
-COL_ADDRESS_LINE1 = "AddressLine1_clean"
-COL_CITY = "CityNM_clean"
-COL_STATE = "StateCD_clean"
-COL_ADDRESS_NORMALIZED = "Address_normalized"
-
 # Candidate-pairs (blocking output) schema
 CP_PATID_A = "PATID_A"
 CP_PATID_B = "PATID_B"
@@ -109,10 +100,7 @@ CANDIDATE_PAIRS_TABLE = "candidate_pairs"
 # Required columns prepare_model_input() must see *after* derivation, i.e. the
 # evidence the FS settings depend on. Missing any => _compute_derived_columns()
 # was not run upstream, or the cleaned parquet is malformed.
-REQUIRED_MODEL_COLUMNS = [
-    COL_PATID, _COL_DOB_STR, COL_SSN_LAST4, COL_ZIP,
-    COL_ADDRESS_LINE1, COL_CITY, COL_STATE,
-]
+REQUIRED_MODEL_COLUMNS = [COL_PATID, _COL_DOB_STR, COL_SSN_LAST4, COL_ZIP]
 
 # Default classification thresholds (plan Section 8 starting points; calibrate
 # against real score distributions before locking these down).
@@ -367,45 +355,17 @@ def build_settings() -> SettingsCreator:
                     cll.ElseLevel(),
                 ],
             ),
-            # Address (plan R2, Branch B — *_clean fields).
-            # Branch B uses the always-populated cleaning-pipeline outputs
-            # (AddressLine1_clean / CityNM_clean / StateCD_clean) so the
-            # comparison degrades gracefully when libpostal is unavailable.
-            # If the validation notebook's Address_normalized null-rate audit
-            # confirms ≥90% libpostal coverage, swap this block for a Branch A
-            # variant keyed on Address_normalized (see plan §R2).
-            #
-            # NOTE (2026-06-15 VM fix): an earlier revision included a
-            # "Same City + State" level. On the geographically concentrated
-            # cohort that level fired on ~40% of random pairs (u≈0.40) and
-            # earned ~+1.2 bits of EM-trained weight, pushing tens of thousands
-            # of borderline non-matches into human_review (count jumped from
-            # 1,369 to 30,162). The level is removed; Address now only carries
-            # positive signal when there's genuine street-level evidence
-            # (exact AL1+City+State, or fuzzy AL1 + same State).
-            cl.CustomComparison(
-                output_column_name="Address",
-                comparison_levels=[
-                    cll.NullLevel(COL_ADDRESS_LINE1),
-                    cll.CustomLevel(
-                        sql_condition=(
-                            f"{COL_ADDRESS_LINE1}_l = {COL_ADDRESS_LINE1}_r "
-                            f"AND {COL_CITY}_l = {COL_CITY}_r "
-                            f"AND {COL_STATE}_l = {COL_STATE}_r"
-                        ),
-                        label_for_charts="Exact AddressLine1 + City + State",
-                    ),
-                    cll.CustomLevel(
-                        sql_condition=(
-                            f"jaro_winkler_similarity("
-                            f"{COL_ADDRESS_LINE1}_l, {COL_ADDRESS_LINE1}_r) >= 0.92 "
-                            f"AND {COL_STATE}_l = {COL_STATE}_r"
-                        ),
-                        label_for_charts="JW(AddressLine1) >= 0.92 + same State",
-                    ),
-                    cll.ElseLevel(),
-                ],
-            ),
+            # NOTE: a brand-new Address comparison was introduced and then
+            # reverted on 2026-06-15. EM trained large positive weights on the
+            # Address levels using u-estimates from random pairs, but candidate
+            # pairs are heavily preselected by the blocking layer for likely-
+            # same-household pairs (families, namesakes, roommates), so Address
+            # agreement is far more common in the candidate pool than in random
+            # pairs. The trained weights over-rewarded address-sharing pairs,
+            # pushing ~30K borderline non-matches into human_review. Until we
+            # have ground-truth labels (from the §9 sampling work) to calibrate
+            # Address m/u directly, the comparison stays out. The R2 plan
+            # remains the target for a follow-up phase.
         ],
         # Phase A: keep full audit detail. Phase B trims both to reduce size.
         retain_intermediate_calculation_columns=True,

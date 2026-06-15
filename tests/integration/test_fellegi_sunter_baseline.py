@@ -66,8 +66,8 @@ def test_run_fs_baseline_separates_truth_from_nonmatch(fs_classified):
 def test_run_fs_baseline_full_output(fs_classified):
     """full_output=True yields the rich calibration frame (gamma_* + weight)."""
     gamma = [c for c in fs_classified.columns if c.startswith("gamma_")]
-    # Post-R2: FirstNM, LastNM, DOB, SSN, Email, Phones, ZIP, Address (8 comparisons).
-    assert len(gamma) == 8
+    # FirstNM, LastNM, DOB, SSN, Email, Phones, ZIP (7 comparisons).
+    assert len(gamma) == 7
     assert "match_weight" in fs_classified.columns
     assert "match_probability" in fs_classified.columns
     assert "classification_tier" in fs_classified.columns

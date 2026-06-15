@@ -70,7 +70,7 @@ First name, last name, DOB and street address (`AddressLine1_clean`) all agree.
 
 ## Results Summary
 
-Full run on `MDM_Population.csv` (163,364 records, 159,440 valid after cleaning).
+Full run on `MDM_Population.csv` (163,364 records, 158,735 valid after cleaning).
 
 ### Match Distribution
 
@@ -95,7 +95,7 @@ Full run on `MDM_Population.csv` (163,364 records, 159,440 valid after cleaning)
 | Distinct clusters | 22,246 |
 | Max cluster size | 9 |
 
-Pairs that no rule confirms (≈171k) are written to `data/non_matches/` as the input to the downstream probabilistic / ML matching stage.
+Pairs that no rule confirms (≈169k) are written to `data/non_matches/` as the input to the downstream probabilistic / ML matching stage.
 
 ---
 
@@ -166,7 +166,7 @@ How often each rule fires, and how often it is the **sole** rule confirming a pa
 Precision is essentially solved; **recall is where the deterministic stage is intentionally incomplete.** Adjudicating 1,500 *rejected* pairs (blocking surfaced them, no rule confirmed) estimates how many true matches the rules miss:
 
 - **18.9%** of rejected pairs look like the same person overall, but the rate is wildly uneven by block:
-  - **Phone-only (B5) rejections: 2.2%** same-person — correctly rejected; a shared phone alone is mostly *different* people (households, clinics). This validates having no phone-only rule.
+  - **Phone-only (B5) rejections: 3.0%** same-person — correctly rejected; a shared phone alone is mostly *different* people (households, clinics). This validates having no phone-only rule.
   - **Non-phone (name/DOB-block) rejections: 67%** same-person — these are genuine deterministic-stage misses.
 
 Two causes, both by design routed to the downstream probabilistic stage:
@@ -224,7 +224,7 @@ Large match clusters can indicate bad blocking keys, unfiltered placeholder valu
 
 ## Appendix: generated evaluation report
 
-Verbatim output of `python -m src.evaluation.rule_eval --run-id eval_fanout --n 400` on the full dataset (run `eval_fanout`, 2026-06-15). Reproducible from any run's artifacts.
+Verbatim output of `python -m src.evaluation.rule_eval --run-id merged_eval --n 400` on the full dataset (run `merged_eval`, 2026-06-15, post-merge with develop). Reproducible from any run's artifacts.
 
 ```
 ============================================================
@@ -278,18 +278,18 @@ NAME_DOB_SEX           3046              5029            1731            9761   
 
   FALSE-NEGATIVE ESTIMATE (rejected pairs adjudicated)
     sampled                 1000
-    SAME                    192
-    DIFFERENT               749
-    UNCERTAIN               59
-    missed_match_rate_pct   19.2
-      B3|B4|B8         n=79    same=79
-      B3|B4|B7|B8      n=17    same=16
-      B5               n=739   same=16
+    SAME                    184
+    DIFFERENT               756
+    UNCERTAIN               60
+    missed_match_rate_pct   18.4
+      B3|B4|B8         n=65    same=64
+      B5               n=749   same=24
+      B3|B4|B7|B8      n=22    same=22
       B3|B8            n=19    same=15
-      B5|B8            n=12    same=12
-      B3|B4|B5|B7|B8   n=6     same=6
+      B8               n=16    same=8
+      B3|B4|B5|B8      n=7     same=7
       B3|B7|B8         n=6     same=6
-      B4               n=12    same=6
+      B5|B8            n=6     same=6
 
   SSN fan-out:   shared=3841, max=6
   Email fan-out: shared=4289, max=7

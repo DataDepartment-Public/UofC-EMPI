@@ -57,3 +57,36 @@ def test_trained_parameters_are_sane(fs_df_clean, fs_candidate_pairs_path):
             f"SSN exact-match weight inverted: m={rec['m_probability']} "
             f"u={rec['u_probability']}"
         )
+
+
+def test_no_weight_inversions_on_high_precision_levels(
+    fs_df_clean, fs_candidate_pairs_path,
+):
+    """
+    Plan R1 guardrail: the exact-match level of every comparison that has one
+    should satisfy m >= u after training. This is the class of bug that the
+    original Phase A diagnostic surfaced (FirstNM JW>=0.7, DOB within-1-year,
+    Email JW>0.88 username, ZIP first-3-digit prefix all had m < u). If a
+    future settings change re-introduces a non-discriminating exact level,
+    this test catches it.
+    """
+    _, diag = fs.run_fs_baseline(
+        fs_candidate_pairs_path, fs_df_clean,
+        u_max_pairs=1e4, return_diagnostics=True,
+    )
+    records = diag.get("parameter_records", []) or []
+    inversions: list[str] = []
+    for rec in records:
+        label = str(rec.get("label_for_charts", "")).lower()
+        m = rec.get("m_probability")
+        u = rec.get("u_probability")
+        if not isinstance(m, (int, float)) or not isinstance(u, (int, float)):
+            continue
+        if "exact" in label and m < u:
+            inversions.append(
+                f"{rec.get('comparison_name')}/{rec.get('label_for_charts')}: "
+                f"m={m:.4g} u={u:.4g}"
+            )
+    assert not inversions, (
+        "Weight inversion on exact-match level(s): " + "; ".join(inversions)
+    )

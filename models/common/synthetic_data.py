@@ -239,6 +239,46 @@ _RECORDS = [
 _FIXTURE_ONLY_COLS = ["_truth_id", "_scenario"]
 
 
+# Synthetic addresses keyed by `_truth_id`. True duplicates share an address
+# (so the Address comparison's "Exact AL1 + City + State" level fires); known
+# non-matches have different cities/states; singletons each have a unique
+# address. _truth_id="T07b_null" is a sentinel inserted by the builder to
+# emit a NULL address on the thin record of pair T07 (exercises NullLevel).
+_ADDRESS_BY_TRUTH: dict[str, tuple] = {
+    "T01": ("123 W FULLERTON AVE",      "CHICAGO",   "IL"),
+    "T02": ("456 N CLARK ST",           "CHICAGO",   "IL"),
+    "T03": ("789 W DIVISION ST",        "CHICAGO",   "IL"),
+    "T04": ("1010 N HALSTED ST",        "CHICAGO",   "IL"),
+    "T05": ("2020 S WABASH AVE",        "CHICAGO",   "IL"),
+    "T06": ("3030 N CLARK ST",          "CHICAGO",   "IL"),
+    "T07": ("4040 W BELMONT AVE",       "CHICAGO",   "IL"),
+    "T08": ("5050 N LINCOLN AVE",       "CHICAGO",   "IL"),
+    # Known non-matches: different addresses (city differs too).
+    "N01a": ("100 N MICHIGAN AVE",      "CHICAGO",   "IL"),
+    "N01b": ("200 W LAKE ST",           "OAK PARK",  "IL"),
+    "N02a": ("300 E ONTARIO ST",        "CHICAGO",   "IL"),
+    "N02b": ("400 W ADAMS ST",          "EVANSTON",  "IL"),
+    # Singletons: unique addresses.
+    "S01": ("1600 PENNSYLVANIA AVE",    "WASHINGTON", "DC"),
+    "S02": ("500 E 53RD ST",            "CHICAGO",   "IL"),
+    "S03": ("700 N STATE ST",           "CHICAGO",   "IL"),
+    "S04": ("900 N MICHIGAN AVE",       "CHICAGO",   "IL"),
+}
+
+
+def _address_for_record(rec: dict) -> tuple:
+    """Pick (AddressLine1_clean, CityNM_clean, StateCD_clean) for a fixture row.
+
+    Pair T07's "thin record" (second row, ZIP prefix only, many nulls) intentionally
+    gets a NULL address so the NullLevel of the Address comparison is exercised
+    against the integration test's expected score gap on this pair.
+    """
+    truth = rec["_truth_id"]
+    if truth == "T07" and rec.get("Email_clean") is None:
+        return (None, None, None)
+    return _ADDRESS_BY_TRUTH.get(truth, (None, None, None))
+
+
 def make_synthetic_patients(include_truth_columns: bool = False) -> pd.DataFrame:
     """
     Build the synthetic cleaned-patient DataFrame.
@@ -257,11 +297,23 @@ def make_synthetic_patients(include_truth_columns: bool = False) -> pd.DataFrame
         (the inputs to `_compute_derived_columns()` plus the non-derived
         identifier columns).
     """
-    df = pd.DataFrame(_RECORDS)
+    # Backfill address columns from the _truth_id-keyed table so we don't have
+    # to edit every record dict in _RECORDS.
+    records = []
+    for rec in _RECORDS:
+        line1, city, state = _address_for_record(rec)
+        records.append(
+            {**rec,
+             "AddressLine1_clean": line1,
+             "CityNM_clean": city,
+             "StateCD_clean": state}
+        )
+    df = pd.DataFrame(records)
     # Enforce string dtype on identifier columns (object), preserving None as NULL.
     str_cols = [
         COL_PATID, COL_FIRST_NM, COL_LAST_NM, COL_BIRTH_DT,
         COL_SSN, COL_SSN_LAST4, COL_ZIP, COL_EMAIL, COL_PHONES,
+        "AddressLine1_clean", "CityNM_clean", "StateCD_clean",
     ]
     for c in str_cols:
         df[c] = df[c].astype("object")

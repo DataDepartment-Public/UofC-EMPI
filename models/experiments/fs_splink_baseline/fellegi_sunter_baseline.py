@@ -89,6 +89,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 COL_PHONES_ARRAY = "Phones_array"  # DuckDB LIST built from _phones_parsed
 
+# Address-bearing columns produced by the cleaning pipeline (src/data/
+# transformations.py). The *_clean siblings are always populated; the
+# libpostal-derived Address_normalized may be NaN when libpostal is not
+# installed — pick Branch A vs. Branch B in build_settings() accordingly.
+COL_ADDRESS_LINE1 = "AddressLine1_clean"
+COL_CITY = "CityNM_clean"
+COL_STATE = "StateCD_clean"
+COL_ADDRESS_NORMALIZED = "Address_normalized"
+
 # Candidate-pairs (blocking output) schema
 CP_PATID_A = "PATID_A"
 CP_PATID_B = "PATID_B"
@@ -100,7 +109,10 @@ CANDIDATE_PAIRS_TABLE = "candidate_pairs"
 # Required columns prepare_model_input() must see *after* derivation, i.e. the
 # evidence the FS settings depend on. Missing any => _compute_derived_columns()
 # was not run upstream, or the cleaned parquet is malformed.
-REQUIRED_MODEL_COLUMNS = [COL_PATID, _COL_DOB_STR, COL_SSN_LAST4, COL_ZIP]
+REQUIRED_MODEL_COLUMNS = [
+    COL_PATID, _COL_DOB_STR, COL_SSN_LAST4, COL_ZIP,
+    COL_ADDRESS_LINE1, COL_CITY, COL_STATE,
+]
 
 # Default classification thresholds (plan Section 8 starting points; calibrate
 # against real score distributions before locking these down).
@@ -274,17 +286,28 @@ def build_settings() -> SettingsCreator:
         unique_id_column_name=COL_PATID,
         blocking_rules_to_generate_predictions=[CANDIDATE_PAIRS_BLOCKING_RULE],
         comparisons=[
-            # Names: fuzzy (exact / Jaro-Winkler bands) + TF adjustments.
-            cl.NameComparison(COL_FIRST_NM).configure(term_frequency_adjustments=True),
+            # FirstNM: tightened JW thresholds + TF.
+            # Plan R1: the previous JW >= 0.7 fuzzy level had m < u on the real
+            # cohort (Phase A diagnostic) because "kinda starts the same" carries
+            # no marginal evidence past the Soundex blocking key. Tightening to
+            # [0.92, 0.85] makes the fuzzy bands correspond to "typo / nickname"
+            # rather than "loosely similar."
+            cl.NameComparison(
+                COL_FIRST_NM,
+                jaro_winkler_thresholds=[0.92, 0.85],
+            ).configure(term_frequency_adjustments=True),
+            # LastNM: default thresholds (this level was not flagged in Phase A).
             cl.NameComparison(COL_LAST_NM).configure(term_frequency_adjustments=True),
-            # DOB: exact / ±1 day / ±1 month / ±1 year / else.
+            # DOB: exact / ±1 day / ±1 month / else.
+            # Plan R1: the ±1-year level had m << u (anti-evidence) — drop it.
+            # ±1 day and ±1 month still cover transposition errors.
             cl.DateOfBirthComparison(
                 _COL_DOB_STR,
                 input_is_string=True,
-                datetime_metrics=["day", "month", "year"],
-                datetime_thresholds=[1, 1, 1],
+                datetime_metrics=["day", "month"],
+                datetime_thresholds=[1, 1],
             ),
-            # SSN: graded — full exact > last-4 match > else.
+            # SSN: graded — full exact > last-4 match > else. (Unchanged from Phase A.)
             cl.CustomComparison(
                 output_column_name="SSN",
                 comparison_levels=[
@@ -301,19 +324,74 @@ def build_settings() -> SettingsCreator:
                     cll.ElseLevel(),
                 ],
             ),
-            # Email: exact / username-match-diff-domain / fuzzy + TF.
-            cl.EmailComparison(COL_EMAIL).configure(term_frequency_adjustments=True),
+            # Email: custom hierarchy that drops the JW>0.88-username fuzzy
+            # band (had m < u on the real cohort).
+            # Levels: null / exact email / exact username (different domain) / else.
+            cl.CustomComparison(
+                output_column_name="Email",
+                comparison_levels=[
+                    cll.NullLevel(COL_EMAIL),
+                    cll.ExactMatchLevel(COL_EMAIL, term_frequency_adjustments=True),
+                    cll.CustomLevel(
+                        sql_condition=(
+                            f"split_part({COL_EMAIL}_l, '@', 1) "
+                            f"= split_part({COL_EMAIL}_r, '@', 1) "
+                            f"AND {COL_EMAIL}_l IS NOT NULL "
+                            f"AND {COL_EMAIL}_r IS NOT NULL"
+                        ),
+                        label_for_charts="Exact username (different domain)",
+                    ),
+                    cll.ElseLevel(),
+                ],
+            ),
             # Phone: array intersection over the consolidated phone set.
             cl.ArrayIntersectAtSizes(COL_PHONES_ARRAY, [2, 1]),
-            # ZIP: 5-digit exact > 3-digit prefix > else.
+            # ZIP: null / 5-digit exact / else.
+            # Plan R1: the 3-digit-prefix level had near-zero discriminating
+            # power on the geographically concentrated cohort (m ≈ u ≈ 0.4).
+            # The new Address comparison (below) carries the partial-geographic
+            # signal more discriminatingly.
             cl.CustomComparison(
                 output_column_name="ZIP",
                 comparison_levels=[
                     cll.NullLevel(COL_ZIP),
                     cll.ExactMatchLevel(COL_ZIP),
+                    cll.ElseLevel(),
+                ],
+            ),
+            # Address (plan R2, Branch B — *_clean fields).
+            # Branch B uses the always-populated cleaning-pipeline outputs
+            # (AddressLine1_clean / CityNM_clean / StateCD_clean) so the
+            # comparison degrades gracefully when libpostal is unavailable.
+            # If the validation notebook's Address_normalized null-rate audit
+            # confirms ≥90% libpostal coverage, swap this block for a Branch A
+            # variant keyed on Address_normalized (see plan §R2).
+            cl.CustomComparison(
+                output_column_name="Address",
+                comparison_levels=[
+                    cll.NullLevel(COL_ADDRESS_LINE1),
                     cll.CustomLevel(
-                        sql_condition=f"left({COL_ZIP}_l, 3) = left({COL_ZIP}_r, 3)",
-                        label_for_charts="First 3 digits match",
+                        sql_condition=(
+                            f"{COL_ADDRESS_LINE1}_l = {COL_ADDRESS_LINE1}_r "
+                            f"AND {COL_CITY}_l = {COL_CITY}_r "
+                            f"AND {COL_STATE}_l = {COL_STATE}_r"
+                        ),
+                        label_for_charts="Exact AddressLine1 + City + State",
+                    ),
+                    cll.CustomLevel(
+                        sql_condition=(
+                            f"jaro_winkler_similarity("
+                            f"{COL_ADDRESS_LINE1}_l, {COL_ADDRESS_LINE1}_r) >= 0.92 "
+                            f"AND {COL_STATE}_l = {COL_STATE}_r"
+                        ),
+                        label_for_charts="JW(AddressLine1) >= 0.92 + same State",
+                    ),
+                    cll.CustomLevel(
+                        sql_condition=(
+                            f"{COL_CITY}_l = {COL_CITY}_r "
+                            f"AND {COL_STATE}_l = {COL_STATE}_r"
+                        ),
+                        label_for_charts="Same City + State",
                     ),
                     cll.ElseLevel(),
                 ],

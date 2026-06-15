@@ -40,7 +40,6 @@ logs/*
 
 # Model artifacts
 models/artifacts/*
-models/experiments/*
 !models/artifacts/.gitkeep
 !models/experiments/.gitkeep
 *.joblib

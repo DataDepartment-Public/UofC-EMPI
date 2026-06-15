@@ -346,16 +346,24 @@ def build_settings() -> SettingsCreator:
             ),
             # Phone: array intersection over the consolidated phone set.
             cl.ArrayIntersectAtSizes(COL_PHONES_ARRAY, [2, 1]),
-            # ZIP: null / 5-digit exact / else.
-            # Plan R1: the 3-digit-prefix level had near-zero discriminating
-            # power on the geographically concentrated cohort (m ≈ u ≈ 0.4).
-            # The new Address comparison (below) carries the partial-geographic
-            # signal more discriminatingly.
+            # ZIP: null / 5-digit exact / first 3 digits match / else.
+            # Plan R1 originally dropped the 3-digit-prefix level on the theory
+            # that its m≈u meant "no signal." The 2026-06-15 VM rerun showed
+            # this was wrong for THIS cohort: ~40% of candidate pairs share a
+            # regional 3-digit ZIP, so removing the prefix level cascades those
+            # pairs into Else (m=0.48 / u=0.99 → -1.04 bits anti-evidence) and
+            # crushes scores for true matches with partial-ZIP overlap. The
+            # 3-digit prefix level carries near-zero weight (which is what we
+            # want) and prevents the negative-evidence cascade.
             cl.CustomComparison(
                 output_column_name="ZIP",
                 comparison_levels=[
                     cll.NullLevel(COL_ZIP),
                     cll.ExactMatchLevel(COL_ZIP),
+                    cll.CustomLevel(
+                        sql_condition=f"left({COL_ZIP}_l, 3) = left({COL_ZIP}_r, 3)",
+                        label_for_charts="First 3 digits match",
+                    ),
                     cll.ElseLevel(),
                 ],
             ),
@@ -366,6 +374,15 @@ def build_settings() -> SettingsCreator:
             # If the validation notebook's Address_normalized null-rate audit
             # confirms ≥90% libpostal coverage, swap this block for a Branch A
             # variant keyed on Address_normalized (see plan §R2).
+            #
+            # NOTE (2026-06-15 VM fix): an earlier revision included a
+            # "Same City + State" level. On the geographically concentrated
+            # cohort that level fired on ~40% of random pairs (u≈0.40) and
+            # earned ~+1.2 bits of EM-trained weight, pushing tens of thousands
+            # of borderline non-matches into human_review (count jumped from
+            # 1,369 to 30,162). The level is removed; Address now only carries
+            # positive signal when there's genuine street-level evidence
+            # (exact AL1+City+State, or fuzzy AL1 + same State).
             cl.CustomComparison(
                 output_column_name="Address",
                 comparison_levels=[
@@ -385,13 +402,6 @@ def build_settings() -> SettingsCreator:
                             f"AND {COL_STATE}_l = {COL_STATE}_r"
                         ),
                         label_for_charts="JW(AddressLine1) >= 0.92 + same State",
-                    ),
-                    cll.CustomLevel(
-                        sql_condition=(
-                            f"{COL_CITY}_l = {COL_CITY}_r "
-                            f"AND {COL_STATE}_l = {COL_STATE}_r"
-                        ),
-                        label_for_charts="Same City + State",
                     ),
                     cll.ElseLevel(),
                 ],

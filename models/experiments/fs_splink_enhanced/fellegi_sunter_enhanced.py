@@ -82,6 +82,15 @@ from src.features.blocking import (
     _COL_PHONES_SET,
 )
 
+# Veto layer — applied after FS scoring, before tier classification. The four
+# rules and their precedence live in deterministic_vetoes.py; see that module's
+# docstring for the design rationale and the relationship to develop's
+# positive-rule stage in src/models/deterministic_rules.py.
+from models.experiments.fs_splink_enhanced.deterministic_vetoes import (
+    apply_vetoes,
+    VETO_REASON_COL,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -567,6 +576,11 @@ def classify_pairs(
     tier = pd.Series("no_match", index=df_predictions.index, dtype="object")
     tier = tier.mask(p >= review_floor, "human_review")
     tier = tier.mask(p >= auto_merge_threshold, "auto_merge")
+    # Veto override: any pair with a non-null veto_reason lands in no_match
+    # regardless of probabilistic score. See deterministic_vetoes.apply_vetoes.
+    if VETO_REASON_COL in df_predictions.columns:
+        vetoed = df_predictions[VETO_REASON_COL].notna()
+        tier = tier.mask(vetoed, "no_match")
     out = df_predictions.copy()
     out["classification_tier"] = tier
     logger.info(
@@ -688,6 +702,11 @@ def run_fs_enhanced(
     linker = build_linker(df_model, candidate_pairs)
     train_model(linker, u_max_pairs=u_max_pairs)
     predictions = predict_pairs(linker, candidate_pairs)
+    # Patient-safety veto layer — see deterministic_vetoes.apply_vetoes. Runs
+    # after FS scoring so vetoed pairs still carry their probabilistic score
+    # for audit/debugging in full_output=True; classify_pairs forces them to
+    # no_match regardless of score.
+    predictions = apply_vetoes(predictions, df_clean)
     classified = classify_pairs(predictions, auto_merge_threshold, review_floor)
 
     result = classified if full_output else to_evaluation_schema(classified)

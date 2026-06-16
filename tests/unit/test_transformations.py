@@ -108,18 +108,24 @@ class TestCleanEmail:
 
 class TestCleanFirstName:
     def test_unicode_and_uppercase(self):
-        assert clean_first_name("josé") == ("JOSE", False)
+        value, invalid, suffix = clean_first_name("josé")
+        assert (value, invalid) == ("JOSE", False) and pd.isna(suffix)
 
     def test_strips_title(self):
-        assert clean_first_name("Mr Smith") == ("SMITH", False)
+        value, invalid, suffix = clean_first_name("Mr Smith")
+        assert (value, invalid) == ("SMITH", False) and pd.isna(suffix)
 
     def test_text_null_to_nan(self):
-        value, invalid = clean_first_name("UNKNOWN")
-        assert pd.isna(value) and invalid is False
+        value, invalid, suffix = clean_first_name("UNKNOWN")
+        assert pd.isna(value) and invalid is False and pd.isna(suffix)
 
     def test_flags_invalid_placeholder(self):
-        value, invalid = clean_first_name("BABYBOY")
-        assert value == "BABYBOY" and invalid is True
+        value, invalid, suffix = clean_first_name("BABYBOY")
+        assert value == "BABYBOY" and invalid is True and pd.isna(suffix)
+
+    def test_moves_generational_suffix(self):
+        value, invalid, suffix = clean_first_name("John Jr")
+        assert value == "JOHN" and suffix == "JR" and invalid is False
 
 
 class TestCleanBirthDate:

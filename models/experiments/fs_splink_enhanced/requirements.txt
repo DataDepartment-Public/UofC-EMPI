@@ -1,0 +1,12 @@
+# Fellegi-Sunter Splink baseline — runtime dependencies.
+splink==4.0.16
+
+# DuckDB is the Splink backend used here. Splink 4.0.16 bundles a compatible
+# DuckDB; this floor just guards against an unexpectedly old system install.
+duckdb>=1.0,<2.0
+
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0        # parquet I/O for candidate pairs + cleaned index
+jellyfish>=1.0
+phonetics>=1.0.5

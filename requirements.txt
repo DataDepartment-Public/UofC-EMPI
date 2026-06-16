@@ -1,4 +1,8 @@
 pandas
+pyarrow
+pandera>=0.20
+pydantic>=2
+pydantic-settings>=2
 matplotlib
 numpy
 openpyxl
@@ -11,5 +15,6 @@ pytest>=8.0
 postal
 jellyfish
 phonetics
-
-
+# python-stdnum: structural US SSN validation (area/group/serial + known-bogus
+# advertising SSNs) used by src/data/transformations.clean_ssn.
+python-stdnum

@@ -11,10 +11,12 @@ pipeline consumes (`last_4_SSN`, `ZipCD_clean_base`/`_ext`,
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from stdnum.us import ssn as _us_ssn
 from unidecode import unidecode
 
 try:
@@ -42,6 +44,7 @@ INVALID_CONTAINS = (
     'DOUBLE ACCOUNT', 'DONOT USED',
     'DO NOT USE', 'DONOTUSE', 'DONT USE', "DON'T USE",
     'DUPLICATE', 'DO NOT', 'MEDICARE', 'ACCOUNT', '<MRG>',
+    'INACTIVE', 'UPRR',
 )
 
 INVALID_EQUALS = frozenset({'TEST', 'BABY'})
@@ -54,7 +57,7 @@ NUMERIC_NAME_PATTERN = re.compile(r"^\d+$|^[Ii][Dd]\d+$")
 ADDRESS_PLACEHOLDERS = frozenset({
     'HOMELESS', 'TRANSIENT', 'BAD ADDRESS', 'NO ADDRESS', '?',
     'NO MAIL', 'GENERAL DELIVERY', 'NKA', '.', 'NOT TAKEN',
-    'ZOCDOC', 'GET', 'HOPE CENTER', 'INCORRECT ADDRESS', '<MRG>',
+    'ZOCDOC', 'GET', 'HOPE CENTER', 'INCORRECT ADDRESS', '<MRG>', 'X',
 })
 
 ADDRESS2_PLACEHOLDERS = frozenset({
@@ -193,9 +196,40 @@ JUNK_EMAIL_DOMAINS = frozenset({
 JUNK_SSN_EXACT = frozenset({
     '010101010', '090909090', '000000001', '999999998',
     '111223333', '219099999', '457555462',
+    '333333330', '003333333', '333333300', '033333333',
+    '333333339', '099999999', '333333000',
 })
 
-SEQUENTIAL_SSN = frozenset({'123456789', '987654321'})
+# A structurally valid SSN whose digits carry almost no information is a
+# placeholder a clerk typed to satisfy a required field (e.g. 333333330,
+# 003333333, 012345678). These pass area/group/serial structural checks AND
+# stdnum.us.ssn validation, yet on the real AllianceChicago data a single such
+# value (333333330) chained 22 unrelated patients into one EXACT_SSN cluster.
+# We treat an SSN as a placeholder when it has <=2 distinct digits, one digit
+# fills >=7 of the 9 positions, or it is a full ascending/descending digit run.
+# A genuine SSN essentially never looks like this.
+_SSN_MAX_DIGIT_DOMINANCE = 7
+
+
+def _is_sequential_ssn(digits: str) -> bool:
+    """True for a full ascending or descending consecutive-digit run (mod 10).
+
+    Catches 012345678, 123456789, 234567890, 987654321, ... generically rather
+    than relying on a hardcoded enumeration.
+    """
+    d = [int(c) for c in digits]
+    asc = all((d[i + 1] - d[i]) % 10 == 1 for i in range(len(d) - 1))
+    desc = all((d[i] - d[i + 1]) % 10 == 1 for i in range(len(d) - 1))
+    return asc or desc
+
+
+def _is_placeholder_ssn(digits: str) -> bool:
+    """True for low-entropy SSNs that are clerical placeholders, not identities."""
+    if len(set(digits)) <= 2:
+        return True
+    if Counter(digits).most_common(1)[0][1] >= _SSN_MAX_DIGIT_DOMINANCE:
+        return True
+    return _is_sequential_ssn(digits)
 
 INVALID_NPA_N11 = frozenset({'211', '311', '411', '511', '611', '711', '811', '911'})
 SEQUENTIAL_PHONES = frozenset({
@@ -272,10 +306,13 @@ def _strip_leading_zeros_first_token(text: str) -> str:
 # PER-FIELD CLEANERS
 # =============================================================================
 
-def clean_first_name(value) -> Tuple[Optional[str], bool]:
-    """Clean a `FirstNM` value. Returns (cleaned, is_invalid)."""
+def clean_first_name(value) -> Tuple[Optional[str], bool, Optional[str]]:
+    """Clean a `FirstNM` value. Returns (cleaned, is_invalid, moved_suffix).
+
+    A trailing generational suffix is removed from the first name and returned
+    as `moved_suffix` so the orchestrator can move it into `SuffixNM_clean`."""
     if pd.isna(value):
-        return np.nan, False
+        return np.nan, False, np.nan
 
     raw = str(value).strip()
     is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
@@ -290,7 +327,7 @@ def clean_first_name(value) -> Tuple[Optional[str], bool]:
     text = _collapse_ws(text)
 
     if text in NAME_NULL_VALUES:
-        return np.nan, is_invalid
+        return np.nan, is_invalid, np.nan
 
     if text in INVALID_EQUALS:
         is_invalid = True
@@ -300,17 +337,28 @@ def clean_first_name(value) -> Tuple[Optional[str], bool]:
             text = text[len(title) + 1:]
             break
 
+    moved_suffix = np.nan
+    for suffix in LASTNM_TRAILING_SUFFIXES:
+        sentinel = f' {suffix}'
+        if text.endswith(sentinel):
+            text = text[: -len(sentinel)]
+            moved_suffix = suffix
+            break
+
     text = _collapse_ws(text)
     if not text:
-        return np.nan, is_invalid
+        return np.nan, is_invalid, moved_suffix
 
-    return text, is_invalid
+    return text, is_invalid, moved_suffix
 
 
-def clean_last_name(value) -> Tuple[Optional[str], bool]:
-    """Clean a `LastNM` value. Returns (cleaned, is_invalid)."""
+def clean_last_name(value) -> Tuple[Optional[str], bool, Optional[str]]:
+    """Clean a `LastNM` value. Returns (cleaned, is_invalid, moved_suffix).
+
+    A trailing generational suffix is removed from the surname and returned as
+    `moved_suffix` so the orchestrator can move it into `SuffixNM_clean`."""
     if pd.isna(value):
-        return np.nan, False
+        return np.nan, False, np.nan
 
     raw = str(value).strip()
     is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
@@ -325,28 +373,33 @@ def clean_last_name(value) -> Tuple[Optional[str], bool]:
     text = _collapse_ws(text)
 
     if text in NAME_NULL_VALUES:
-        return np.nan, is_invalid
+        return np.nan, is_invalid, np.nan
 
     if text in INVALID_EQUALS:
         is_invalid = True
 
+    moved_suffix = np.nan
     for suffix in LASTNM_TRAILING_SUFFIXES:
         sentinel = f' {suffix}'
         if text.endswith(sentinel):
             text = text[: -len(sentinel)]
+            moved_suffix = suffix
             break
 
     text = _collapse_ws(text)
     if not text:
-        return np.nan, is_invalid
+        return np.nan, is_invalid, moved_suffix
 
-    return text, is_invalid
+    return text, is_invalid, moved_suffix
 
 
-def clean_middle_name(value) -> Tuple[Optional[str], bool]:
-    """Clean a `MiddleNM` value. Returns (cleaned, is_invalid)."""
+def clean_middle_name(value) -> Tuple[Optional[str], bool, Optional[str]]:
+    """Clean a `MiddleNM` value. Returns (cleaned, is_invalid, moved_suffix).
+
+    A trailing generational suffix is removed from the middle name and returned
+    as `moved_suffix` so the orchestrator can move it into `SuffixNM_clean`."""
     if pd.isna(value):
-        return np.nan, False
+        return np.nan, False, np.nan
 
     raw = str(value).strip()
     is_invalid = bool(NUMERIC_NAME_PATTERN.match(raw))
@@ -361,15 +414,27 @@ def clean_middle_name(value) -> Tuple[Optional[str], bool]:
         is_invalid = True
 
     if text in MIDDLE_NULL_VALUES:
-        return np.nan, is_invalid
+        return np.nan, is_invalid, np.nan
 
     text = re.sub(r"[^A-Z \-']", '', text)
     text = _collapse_ws(text)
 
     if not text or text in MIDDLE_NULL_VALUES:
-        return np.nan, is_invalid
+        return np.nan, is_invalid, np.nan
 
-    return text, is_invalid
+    moved_suffix = np.nan
+    for suffix in LASTNM_TRAILING_SUFFIXES:
+        sentinel = f' {suffix}'
+        if text.endswith(sentinel):
+            text = text[: -len(sentinel)]
+            moved_suffix = suffix
+            break
+
+    text = _collapse_ws(text)
+    if not text:
+        return np.nan, is_invalid, moved_suffix
+
+    return text, is_invalid, moved_suffix
 
 
 def clean_suffix(value) -> Optional[str]:
@@ -436,9 +501,6 @@ def clean_ssn(value) -> Tuple[Optional[str], Optional[str]]:
     if digits[:3] == digits[3:6] == digits[6:9]:
         return np.nan, np.nan
 
-    if digits in SEQUENTIAL_SSN:
-        return np.nan, np.nan
-
     area = digits[:3]
     if area == '000' or area == '666':
         return np.nan, np.nan
@@ -452,9 +514,19 @@ def clean_ssn(value) -> Tuple[Optional[str], Optional[str]]:
     if digits in JUNK_SSN_EXACT:
         return np.nan, np.nan
 
-    # Extract last 4 only from a fully validated SSN
-    last_4 = digits[-4:]
+    # Low-entropy placeholders (e.g. 333333330) and full ascending/descending
+    # digit runs (e.g. 012345678) pass every structural check above but are not
+    # real identities — reject them before they create EXACT_SSN false-merges.
+    if _is_placeholder_ssn(digits):
+        return np.nan, np.nan
 
+    # Final gate: stdnum's US SSN validator (known-bogus advertising SSNs,
+    # invalid area/group/serial combinations the rules above don't enumerate).
+    if not _us_ssn.is_valid(digits):
+        return np.nan, np.nan
+
+    # Extract last 4 only from a fully validated SSN.
+    last_4 = digits[-4:]
     return digits, last_4
 
 
@@ -773,27 +845,46 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         nonlocal valid
         valid = valid & ~series.fillna(False).astype(bool)
 
+    # Generational suffixes moved out of FirstNM/LastNM/MiddleNM, merged into
+    # SuffixNM_clean below. The first non-null suffix in field order (First,
+    # Last, Middle) wins; a record carries a generational suffix in at most one
+    # of these fields in practice, so the order only matters for pathological rows.
+    moved_suffix = pd.Series(np.nan, index=out.index, dtype=object)
+
     # ---- FirstNM ----
     if 'FirstNM_raw' in out.columns:
         res = out['FirstNM_raw'].apply(clean_first_name)
         out['FirstNM_clean'] = res.apply(lambda x: x[0])
         _flag(res.apply(lambda x: x[1]))
+        first_suffix = res.apply(lambda x: x[2])
+        moved_suffix = moved_suffix.where(moved_suffix.notna(), first_suffix)
 
     # ---- LastNM ----
     if 'LastNM_raw' in out.columns:
         res = out['LastNM_raw'].apply(clean_last_name)
         out['LastNM_clean'] = res.apply(lambda x: x[0])
         _flag(res.apply(lambda x: x[1]))
+        last_suffix = res.apply(lambda x: x[2])
+        moved_suffix = moved_suffix.where(moved_suffix.notna(), last_suffix)
 
     # ---- MiddleNM ----
     if 'MiddleNM_raw' in out.columns:
         res = out['MiddleNM_raw'].apply(clean_middle_name)
         out['MiddleNM_clean'] = res.apply(lambda x: x[0])
         _flag(res.apply(lambda x: x[1]))
+        mid_suffix = res.apply(lambda x: x[2])
+        moved_suffix = moved_suffix.where(moved_suffix.notna(), mid_suffix)
 
     # ---- SuffixNM ----
     if 'SuffixNM_raw' in out.columns:
         out['SuffixNM_clean'] = out['SuffixNM_raw'].apply(clean_suffix)
+    else:
+        out['SuffixNM_clean'] = pd.Series(np.nan, index=out.index, dtype=object)
+
+    # Move generational suffixes pulled off LastNM/MiddleNM into SuffixNM_clean,
+    # only filling rows where SuffixNM_clean is still null.
+    out['SuffixNM_clean'] = out['SuffixNM_clean'].where(
+        out['SuffixNM_clean'].notna(), moved_suffix)
 
     # ---- BirthDT ----
     if 'BirthDT_raw' in out.columns:
@@ -867,12 +958,12 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if 'FirstNM_clean' in out.columns and 'LastNM_clean' in out.columns:
         middle = out['MiddleNM_clean'] if 'MiddleNM_clean' in out.columns else pd.Series(np.nan, index=out.index)
         out['full_name_tokens'] = [
-            derive_full_name_tokens(f, m, l)
-            for f, m, l in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
+            derive_full_name_tokens(first, mid, last)
+            for first, mid, last in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
         ]
         out['full_name_compact'] = [
-            derive_full_name_compact(f, m, l)
-            for f, m, l in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
+            derive_full_name_compact(first, mid, last)
+            for first, mid, last in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
         ]
 
     # ---- Derived: Phones_set ----

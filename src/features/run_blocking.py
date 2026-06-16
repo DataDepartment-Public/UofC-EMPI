@@ -57,8 +57,11 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent.parent               # UofC-EMPI/
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
  
-import pandas as pd
-from src.features.blocking import (
+# Imports below must follow the sys.path insertion above, hence noqa: E402.
+import pandas as pd  # noqa: E402
+from src.config.config import settings  # noqa: E402
+from src.contracts import CandidatePairs, CleanedRecords, validate  # noqa: E402
+from src.features.blocking import (  # noqa: E402
     run_batch_blocking,
     get_blocking_stats,
     save_candidate_pairs,
@@ -72,13 +75,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
  
-# ── Default paths ─────────────────────────────────────────────────────────
-# Update these defaults to match your project's directory structure.
-# Both can also be overridden at runtime via CLI arguments (see USAGE above).
- 
-DEFAULT_INPUT_DIR = _PROJECT_ROOT / "data" / "processed"
-DEFAULT_INPUT_STEM = "MDM_Population_cleaned"
-DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "data" / "blocking"
+# ── Default paths (sourced from the central config) ─────────────────────────
+# All can be overridden at runtime via CLI arguments (see USAGE above) or via
+# EMPI_* environment variables (see src/config/config.py).
+DEFAULT_INPUT_DIR = settings.processed_dir
+DEFAULT_INPUT_STEM = settings.cleaned_stem
+DEFAULT_OUTPUT_DIR = settings.blocking_dir
 
 
 def _latest_cleaned_parquet(input_dir: Path, stem: str) -> Path:
@@ -154,12 +156,12 @@ def _validate_columns(df: pd.DataFrame) -> None:
     missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing:
         raise ValueError(
-            f"The following required columns are missing from the dataset:\n"
+            "The following required columns are missing from the dataset:\n"
             + "\n".join(f"  - {col}" for col in missing)
-            + f"\n\nColumns present in dataset:\n"
+            + "\n\nColumns present in dataset:\n"
             + "\n".join(f"  - {col}" for col in sorted(df.columns))
-            + f"\n\nUpdate the column name constants in blocking.py to match "
-            f"your cleaned dataset's column names."
+            + "\n\nUpdate the column name constants in blocking.py to match "
+            "your cleaned dataset's column names."
         )
     logger.info("Column validation passed — all %d required columns present",
                 len(REQUIRED_COLUMNS))
@@ -170,31 +172,31 @@ def _print_stats_report(stats: dict, n_records: int, version: str) -> None:
     divider = "─" * 60
 
     print(f"\n{divider}")
-    print(f"  eMPI BLOCKING PIPELINE — AUDIT REPORT")
+    print("  eMPI BLOCKING PIPELINE — AUDIT REPORT")
     print(f"  Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print(f"  Pipeline version: {version}")
     print(divider)
  
-    print(f"\n  INPUT")
+    print("\n  INPUT")
     print(f"    Records processed:        {n_records:>12,}")
  
-    print(f"\n  OUTPUT")
+    print("\n  OUTPUT")
     print(f"    Total unique pairs:       {stats['total_unique_pairs']:>12,}")
     print(f"    Naive comparison space:   {stats.get('naive_pairs', 'N/A'):>12,}"
           if isinstance(stats.get('naive_pairs'), int)
           else f"    Naive comparison space:   {'~13,343,816,566':>12}")
     print(f"    Blocking reduction:       {stats['reduction_pct']:>11.4f}%"
           if 'reduction_pct' in stats
-          else f"    Blocking reduction:              99.9955%")
+          else "    Blocking reduction:              99.9955%")
     print(f"    Overlap across blocks:    {stats['overlap_pct']:>11.1f}%")
  
-    print(f"\n  PER-BLOCK PAIR COUNTS")
+    print("\n  PER-BLOCK PAIR COUNTS")
     for block, count in sorted(stats["per_block"].items()):
         bar = "█" * min(int(count / 5000), 30)
         print(f"    {block}: {count:>10,}  {bar}")
  
-    print(f"\n  PAIR CAPTURE REDUNDANCY")
-    print(f"  (how many blocks captured each pair)")
+    print("\n  PAIR CAPTURE REDUNDANCY")
+    print("  (how many blocks captured each pair)")
     for n_blocks, count in sorted(stats["n_blocks_distribution"].items()):
         pct = 100 * count / stats["total_unique_pairs"]
         print(f"    Captured by {n_blocks} block(s): {count:>8,}  ({pct:.1f}%)")
@@ -248,6 +250,7 @@ def main(input_path: Path, output_dir: Path) -> None:
 
     # ── Step 2: Validate ──────────────────────────────────────────────────
     _validate_columns(df_clean)
+    df_clean = validate(df_clean, CleanedRecords)  # contract: input schema
 
     # ── Step 3: Run blocking ──────────────────────────────────────────────
     logger.info("Running batch blocking on %d records...", len(df_clean))
@@ -262,6 +265,7 @@ def main(input_path: Path, output_dir: Path) -> None:
     _print_stats_report(stats, n_records=len(df_clean), version=version)
 
     # ── Step 5: Save output ───────────────────────────────────────────────
+    validate(candidate_pairs, CandidatePairs)  # contract: output schema
     output_path = save_candidate_pairs(candidate_pairs, output_dir, version)
     logger.info("Candidate pairs saved to: %s", output_path)
  

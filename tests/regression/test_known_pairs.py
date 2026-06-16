@@ -49,7 +49,6 @@ FAILURE INTERPRETATION:
 
 import pytest
 import pandas as pd
-import numpy as np
 
 from src.features.blocking import run_batch_blocking
 

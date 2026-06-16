@@ -17,16 +17,12 @@ WHY THIS MATTERS:
     against itself (which always produces a perfect match score).
 """
 
-import pytest
 import numpy as np
 import pandas as pd
 
 from src.features.blocking import (
     run_batch_blocking,
-    _compute_derived_columns,
     _pairs_from_index,
-    _build_key_index,
-    _pair_blocks_to_dataframe,
 )
 
 # Column name constants

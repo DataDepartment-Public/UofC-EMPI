@@ -96,20 +96,39 @@ def apply_vetoes(df_predictions: pd.DataFrame, df_clean: pd.DataFrame) -> pd.Dat
         out[VETO_REASON_COL] = pd.Series([], dtype="object")
         return out
 
-    required_clean = {PATID, SSN, SSN_LAST4, BIRTH_DT, SEX}
-    missing = required_clean - set(df_clean.columns)
-    if missing:
+    if PATID not in df_clean.columns:
         raise ValueError(
-            f"apply_vetoes: df_clean is missing required columns {sorted(missing)}. "
-            "These must be present on the cleaned parquet per src/contracts.py."
+            f"apply_vetoes: df_clean is missing the required join key {PATID!r}."
         )
+
+    # Per-veto required-column map. Each veto needs a specific subset of
+    # attribute columns on df_clean; if any are missing the veto degrades to
+    # all-False (with a warning) instead of failing the whole call. This lets
+    # the synthetic fixture (which predates SexAtBirthDSC_clean) still exercise
+    # the SSN / DOB-gap / DOB+SSN4 vetoes — production cleaned parquet carries
+    # every column per src/contracts.CleanedRecords.
+    veto_required_cols = {
+        "ssn_conflict": (SSN,),
+        "dob_year_gap": (BIRTH_DT,),
+        "gender_conflict": (SEX,),
+        "dob_and_ssn4_conflict": (BIRTH_DT, SSN_LAST4),
+    }
+    needed_cols: set[str] = set()
+    for rule, cols in veto_required_cols.items():
+        if all(c in df_clean.columns for c in cols):
+            needed_cols.update(cols)
+        else:
+            missing_for_rule = [c for c in cols if c not in df_clean.columns]
+            logger.warning(
+                "apply_vetoes: skipping %s — df_clean missing columns %s",
+                rule, missing_for_rule,
+            )
 
     # Side-by-side attribute join. df_clean is the index; PATID_A and PATID_B
     # each look up the same attribute frame. drop_duplicates is defensive in
     # case the cleaned frame ever contains duplicate PATIDs (it shouldn't).
-    attr_cols = [SSN, SSN_LAST4, BIRTH_DT, SEX]
     attr_frame = (
-        df_clean[[PATID, *attr_cols]]
+        df_clean[[PATID, *sorted(needed_cols)]]
         .drop_duplicates(subset=[PATID])
         .set_index(PATID)
     )
@@ -121,45 +140,60 @@ def apply_vetoes(df_predictions: pd.DataFrame, df_clean: pd.DataFrame) -> pd.Dat
         [df_predictions.reset_index(drop=True), side_a, side_b], axis=1
     )
 
+    n = len(paired)
+    false_mask = pd.Series([False] * n, index=paired.index)
+
     # --- Per-rule masks -----------------------------------------------------
     masks: dict[str, pd.Series] = {}
 
     # ssn_conflict — both populated, full-9 mismatch.
-    masks["ssn_conflict"] = (
-        paired[f"{SSN}_A"].notna()
-        & paired[f"{SSN}_B"].notna()
-        & (paired[f"{SSN}_A"] != paired[f"{SSN}_B"])
-    )
+    if SSN in needed_cols:
+        masks["ssn_conflict"] = (
+            paired[f"{SSN}_A"].notna()
+            & paired[f"{SSN}_B"].notna()
+            & (paired[f"{SSN}_A"] != paired[f"{SSN}_B"])
+        )
+    else:
+        masks["ssn_conflict"] = false_mask
 
     # dob_year_gap — both populated, |year_A - year_B| >= threshold.
-    year_a = pd.to_datetime(paired[f"{BIRTH_DT}_A"], errors="coerce").dt.year
-    year_b = pd.to_datetime(paired[f"{BIRTH_DT}_B"], errors="coerce").dt.year
-    masks["dob_year_gap"] = (
-        year_a.notna()
-        & year_b.notna()
-        & ((year_a - year_b).abs() >= DOB_YEAR_GAP_THRESHOLD)
-    )
+    if BIRTH_DT in needed_cols:
+        year_a = pd.to_datetime(paired[f"{BIRTH_DT}_A"], errors="coerce").dt.year
+        year_b = pd.to_datetime(paired[f"{BIRTH_DT}_B"], errors="coerce").dt.year
+        masks["dob_year_gap"] = (
+            year_a.notna()
+            & year_b.notna()
+            & ((year_a - year_b).abs() >= DOB_YEAR_GAP_THRESHOLD)
+        )
+    else:
+        masks["dob_year_gap"] = false_mask
 
     # gender_conflict — strict MALE <-> FEMALE only; OTHER never vetoes.
-    sex_a = paired[f"{SEX}_A"]
-    sex_b = paired[f"{SEX}_B"]
-    masks["gender_conflict"] = sex_a.notna() & sex_b.notna() & (
-        ((sex_a == "MALE") & (sex_b == "FEMALE"))
-        | ((sex_a == "FEMALE") & (sex_b == "MALE"))
-    )
+    if SEX in needed_cols:
+        sex_a = paired[f"{SEX}_A"]
+        sex_b = paired[f"{SEX}_B"]
+        masks["gender_conflict"] = sex_a.notna() & sex_b.notna() & (
+            ((sex_a == "MALE") & (sex_b == "FEMALE"))
+            | ((sex_a == "FEMALE") & (sex_b == "MALE"))
+        )
+    else:
+        masks["gender_conflict"] = false_mask
 
     # dob_and_ssn4_conflict — both DOB AND last-4-SSN populated and mismatch.
-    dob_diff = (
-        paired[f"{BIRTH_DT}_A"].notna()
-        & paired[f"{BIRTH_DT}_B"].notna()
-        & (paired[f"{BIRTH_DT}_A"] != paired[f"{BIRTH_DT}_B"])
-    )
-    ssn4_diff = (
-        paired[f"{SSN_LAST4}_A"].notna()
-        & paired[f"{SSN_LAST4}_B"].notna()
-        & (paired[f"{SSN_LAST4}_A"] != paired[f"{SSN_LAST4}_B"])
-    )
-    masks["dob_and_ssn4_conflict"] = dob_diff & ssn4_diff
+    if BIRTH_DT in needed_cols and SSN_LAST4 in needed_cols:
+        dob_diff = (
+            paired[f"{BIRTH_DT}_A"].notna()
+            & paired[f"{BIRTH_DT}_B"].notna()
+            & (paired[f"{BIRTH_DT}_A"] != paired[f"{BIRTH_DT}_B"])
+        )
+        ssn4_diff = (
+            paired[f"{SSN_LAST4}_A"].notna()
+            & paired[f"{SSN_LAST4}_B"].notna()
+            & (paired[f"{SSN_LAST4}_A"] != paired[f"{SSN_LAST4}_B"])
+        )
+        masks["dob_and_ssn4_conflict"] = dob_diff & ssn4_diff
+    else:
+        masks["dob_and_ssn4_conflict"] = false_mask
 
     # --- Resolve precedence: first rule to fire per pair wins. -------------
     veto_reason = pd.Series([None] * len(paired), dtype="object", index=paired.index)

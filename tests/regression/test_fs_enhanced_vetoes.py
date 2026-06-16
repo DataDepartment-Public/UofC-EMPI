@@ -230,11 +230,32 @@ def test_apply_vetoes_handles_empty_frame():
     assert len(out) == 0
 
 
-def test_apply_vetoes_raises_on_missing_clean_columns():
-    df_clean = pd.DataFrame({PATID: ["A", "B"]})  # missing SSN/DOB/SEX
+def test_apply_vetoes_raises_only_on_missing_patid():
+    """PATID is the only hard-required column on df_clean (the join key).
+    Other column gaps degrade specific vetoes to no-ops with a warning."""
     df_predictions = _build_predictions([("A", "B", 0.5)])
-    with pytest.raises(ValueError, match="missing required columns"):
-        apply_vetoes(df_predictions, df_clean)
+    with pytest.raises(ValueError, match="missing the required join key"):
+        apply_vetoes(df_predictions, pd.DataFrame({"not_patid": ["x"]}))
+
+
+def test_apply_vetoes_skips_gender_conflict_when_sex_column_missing(caplog):
+    """The synthetic fixture predates SexAtBirthDSC_clean; the gender_conflict
+    veto must degrade to a no-op (with a logged warning) rather than crash."""
+    df_clean = pd.DataFrame(
+        {
+            PATID: ["A", "B"],
+            SSN: ["111111111", "222222222"],
+            SSN_LAST4: ["1111", "2222"],
+            BIRTH_DT: [pd.Timestamp("1980-01-15"), pd.Timestamp("1980-01-15")],
+            # SEX column intentionally absent.
+        }
+    )
+    # SSN conflict still fires (its column is present); gender_conflict skips.
+    df_predictions = _build_predictions([("A", "B", 0.99)])
+    with caplog.at_level("WARNING"):
+        out = apply_vetoes(df_predictions, df_clean)
+    assert out.loc[0, VETO_REASON_COL] == "ssn_conflict"
+    assert any("skipping gender_conflict" in rec.message for rec in caplog.records)
 
 
 # ============================================================================

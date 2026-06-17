@@ -90,6 +90,15 @@ from models.experiments.fs_splink_enhanced.deterministic_vetoes import (
     apply_vetoes,
     VETO_REASON_COL,
 )
+from models.experiments.fs_splink_enhanced.manual_priors import apply_manual_priors
+
+# Address comparison column constants. These come from the cleaned parquet
+# (src/data/transformations.py produces them) but are not all in the
+# CleanedRecords contract — synthetic fixtures may lack them. build_settings
+# accepts include_address=False to skip the Address comparison cleanly.
+COL_ADDRESS1 = "AddressLine1_clean"
+COL_CITY = "CityNM_clean"
+COL_STATE = "StateCD_clean"
 
 logger = logging.getLogger(__name__)
 
@@ -262,10 +271,22 @@ def _validate_required_columns(df: pd.DataFrame) -> None:
 # ===========================================================================
 # 2. Settings (plan Section 4)
 # ===========================================================================
-def build_settings() -> SettingsCreator:
+def build_settings(include_address: bool = True) -> dict:
     """
     Build the Splink settings: dedupe_only, candidate-pairs blocking rule, and
     the graded multi-field comparison vector with TF adjustments on names/email.
+
+    Returns a settings DICT (not a SettingsCreator) so manual_priors.apply_manual_priors
+    can lock m/u on Address + Phones levels before the dict is handed to the
+    Linker. Splink Linker accepts the dict form directly.
+
+    Parameters
+    ----------
+    include_address : bool, default True
+        Add the 4-level Address CustomComparison. Set False when df_model
+        lacks `AddressLine1_clean` / `CityNM_clean` / `StateCD_clean` (e.g.,
+        the synthetic sandbox fixture, which predates the deterministic-rules
+        merge that added these columns to the cleaned-records contract).
 
     Notes
     -----
@@ -277,8 +298,13 @@ def build_settings() -> SettingsCreator:
     * `_dob_str` is "YYYY-MM-DD"; verified directly compatible with
       `input_is_string=True` (Splink emits TRY_STRPTIME(..., '%Y-%m-%d')) — no
       explicit `datetime_format` needed.
+    * E3 reintroduces the R2 Address comparison that was reverted on 2026-06-15.
+      The fix from last time: instead of letting EM train Address m/u against
+      random-pair u (which over-rewards address agreement because candidate
+      pairs are preselected for likely household neighbors), we lock m/u to
+      candidate-pool-aware priors via manual_priors.ADDRESS_MU.
     """
-    return SettingsCreator(
+    creator = SettingsCreator(
         link_type="dedupe_only",
         unique_id_column_name=COL_PATID,
         blocking_rules_to_generate_predictions=[CANDIDATE_PAIRS_BLOCKING_RULE],
@@ -364,22 +390,54 @@ def build_settings() -> SettingsCreator:
                     cll.ElseLevel(),
                 ],
             ),
-            # NOTE: a brand-new Address comparison was introduced and then
-            # reverted on 2026-06-15. EM trained large positive weights on the
-            # Address levels using u-estimates from random pairs, but candidate
-            # pairs are heavily preselected by the blocking layer for likely-
-            # same-household pairs (families, namesakes, roommates), so Address
-            # agreement is far more common in the candidate pool than in random
-            # pairs. The trained weights over-rewarded address-sharing pairs,
-            # pushing ~30K borderline non-matches into human_review. Until we
-            # have ground-truth labels (from the §9 sampling work) to calibrate
-            # Address m/u directly, the comparison stays out. The R2 plan
-            # remains the target for a follow-up phase.
         ],
         # Phase A: keep full audit detail. Phase B trims both to reduce size.
         retain_intermediate_calculation_columns=True,
         retain_matching_columns=True,
     )
+
+    settings_dict = creator.get_settings("duckdb").as_dict()
+
+    # E3: append the Address comparison directly to the dict — keeps the
+    # CustomComparison level construction terse and avoids re-running the
+    # SettingsCreator round trip after the priors injection.
+    if include_address:
+        settings_dict["comparisons"].append(
+            {
+                "output_column_name": "Address",
+                "comparison_levels": [
+                    {
+                        "sql_condition": (
+                            f"{COL_ADDRESS1}_l IS NULL OR {COL_ADDRESS1}_r IS NULL"
+                        ),
+                        "label_for_charts": f"{COL_ADDRESS1} is NULL",
+                        "is_null_level": True,
+                    },
+                    {
+                        "sql_condition": f"{COL_ADDRESS1}_l = {COL_ADDRESS1}_r",
+                        "label_for_charts": f"Exact match on {COL_ADDRESS1}",
+                    },
+                    {
+                        "sql_condition": (
+                            f"{COL_CITY}_l = {COL_CITY}_r "
+                            f"AND {COL_STATE}_l = {COL_STATE}_r "
+                            f"AND {COL_ZIP}_l = {COL_ZIP}_r "
+                            f"AND {COL_CITY}_l IS NOT NULL "
+                            f"AND {COL_STATE}_l IS NOT NULL "
+                            f"AND {COL_ZIP}_l IS NOT NULL"
+                        ),
+                        "label_for_charts": "Same City + State + Zip",
+                    },
+                    {"sql_condition": "ELSE", "label_for_charts": "All other comparisons"},
+                ],
+            }
+        )
+
+    # Lock candidate-pool-aware m/u on Address + Phones levels. See
+    # manual_priors.apply_manual_priors for the rationale and the prior values.
+    apply_manual_priors(settings_dict)
+
+    return settings_dict
 
 
 # ===========================================================================
@@ -396,10 +454,25 @@ def build_linker(
     """
     db_api = db_api or DuckDBAPI()
     _register_candidate_pairs(db_api, candidate_pairs_df)
-    linker = Linker(df_model, build_settings(), db_api=db_api)
+    # Address comparison opts out cleanly when df_model lacks the columns —
+    # primarily the synthetic-sandbox path. Production cleaned parquet carries
+    # all three address columns per src/data/transformations.py.
+    address_cols_present = all(
+        c in df_model.columns for c in (COL_ADDRESS1, COL_CITY, COL_STATE)
+    )
+    if not address_cols_present:
+        logger.warning(
+            "build_linker: dropping Address comparison — df_model missing one of %s",
+            [COL_ADDRESS1, COL_CITY, COL_STATE],
+        )
+    linker = Linker(
+        df_model,
+        build_settings(include_address=address_cols_present),
+        db_api=db_api,
+    )
     logger.info(
-        "Linker built: %d records, %d candidate pairs registered",
-        len(df_model), len(candidate_pairs_df),
+        "Linker built: %d records, %d candidate pairs registered (address=%s)",
+        len(df_model), len(candidate_pairs_df), address_cols_present,
     )
     return linker
 

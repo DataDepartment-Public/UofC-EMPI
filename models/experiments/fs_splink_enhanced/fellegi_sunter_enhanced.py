@@ -60,6 +60,7 @@ import multiprocessing
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from splink import DuckDBAPI, Linker, SettingsCreator
@@ -120,10 +121,21 @@ CANDIDATE_PAIRS_TABLE = "candidate_pairs"
 # was not run upstream, or the cleaned parquet is malformed.
 REQUIRED_MODEL_COLUMNS = [COL_PATID, _COL_DOB_STR, COL_SSN_LAST4, COL_ZIP]
 
-# Default classification thresholds (plan Section 8 starting points; calibrate
-# against real score distributions before locking these down).
-DEFAULT_AUTO_MERGE_THRESHOLD = 0.90
-DEFAULT_REVIEW_FLOOR = 0.50
+# Default classification thresholds — E5 retuned for healthcare deployment.
+# Auto-merge raised from 0.90 to 0.95: the 42-label sample showed 0.85–0.95
+# strict precision was ~9%; the higher floor + the deterministic vetoes + the
+# household-discount comparison together aim for ≥95% strict precision at
+# auto-merge. Review floor lowered from 0.50 to 0.40 to catch name-change
+# pairs that previously fell just below 0.50 (the §9 sample had one such
+# `same` pair at 0.4958).
+DEFAULT_AUTO_MERGE_THRESHOLD = 0.95
+DEFAULT_REVIEW_FLOOR = 0.40
+
+# n_blocks score bump — pairs that hit many blocking groups carry independent
+# corroborating evidence. Convert match_probability -> log-odds weight, add
+# +1 bit per block above the threshold, capped at +4 bits, convert back.
+DEFAULT_N_BLOCKS_BUMP_THRESHOLD = 2
+DEFAULT_N_BLOCKS_BUMP_MAX_BITS = 4.0
 
 # ---------------------------------------------------------------------------
 # Standardized evaluation output contract.
@@ -744,31 +756,65 @@ def classify_pairs(
     df_predictions: pd.DataFrame,
     auto_merge_threshold: float = DEFAULT_AUTO_MERGE_THRESHOLD,
     review_floor: float = DEFAULT_REVIEW_FLOOR,
+    n_blocks_bump_threshold: int = DEFAULT_N_BLOCKS_BUMP_THRESHOLD,
+    n_blocks_bump_max_bits: float = DEFAULT_N_BLOCKS_BUMP_MAX_BITS,
 ) -> pd.DataFrame:
     """
     Add a `classification_tier` column. Pure post-processing — no retraining —
     so thresholds can be tuned cheaply and unit-tested in isolation.
 
-    Tier boundaries (plan Section 8):
+    E5 changes:
+      1. n_blocks bump: rewards cross-block agreement. For each pair with
+         n_blocks > n_blocks_bump_threshold, +1 bit of match_weight per
+         block above the threshold (capped at +max_bits). The bumped
+         probability is what's stored in match_probability and used for
+         tier assignment, so downstream eval-schema sees the adjusted score.
+      2. Thresholds default to 0.95 (auto_merge) / 0.40 (review_floor) —
+         see DEFAULT_AUTO_MERGE_THRESHOLD docstring.
+
+    Tier boundaries:
         match_probability >= auto_merge_threshold        -> "auto_merge"
         review_floor <= match_probability < auto_merge   -> "human_review"
         match_probability < review_floor                 -> "no_match"
+
+    Veto override (preserved from E2): any pair with a non-null veto_reason
+    lands in no_match regardless of probabilistic score.
     """
     if not 0.0 <= review_floor <= auto_merge_threshold <= 1.0:
         raise ValueError(
             f"Need 0 <= review_floor ({review_floor}) <= auto_merge_threshold "
             f"({auto_merge_threshold}) <= 1."
         )
-    p = df_predictions["match_probability"]
-    tier = pd.Series("no_match", index=df_predictions.index, dtype="object")
+    out = df_predictions.copy()
+
+    # n_blocks bump applied in log-odds (bit) space, before tier assignment.
+    # No-op when n_blocks column absent (synthetic sandbox) or when no pair
+    # exceeds the threshold.
+    if "n_blocks" in out.columns:
+        bump_bits = (out["n_blocks"] - n_blocks_bump_threshold).clip(
+            lower=0, upper=n_blocks_bump_max_bits
+        )
+        if bool((bump_bits > 0).any()):
+            p_safe = out["match_probability"].clip(lower=1e-12, upper=1 - 1e-12)
+            weight = np.log2(p_safe / (1.0 - p_safe))
+            weight_bumped = weight + bump_bits
+            out["match_probability"] = 1.0 / (1.0 + np.power(2.0, -weight_bumped))
+            if "match_weight" in out.columns:
+                out["match_weight"] = weight_bumped
+            n_bumped = int((bump_bits > 0).sum())
+            logger.info(
+                "classify_pairs: n_blocks bump applied to %d/%d pairs "
+                "(max bump %.1f bits)",
+                n_bumped, len(out), float(bump_bits.max()),
+            )
+
+    p = out["match_probability"]
+    tier = pd.Series("no_match", index=out.index, dtype="object")
     tier = tier.mask(p >= review_floor, "human_review")
     tier = tier.mask(p >= auto_merge_threshold, "auto_merge")
-    # Veto override: any pair with a non-null veto_reason lands in no_match
-    # regardless of probabilistic score. See deterministic_vetoes.apply_vetoes.
-    if VETO_REASON_COL in df_predictions.columns:
-        vetoed = df_predictions[VETO_REASON_COL].notna()
+    if VETO_REASON_COL in out.columns:
+        vetoed = out[VETO_REASON_COL].notna()
         tier = tier.mask(vetoed, "no_match")
-    out = df_predictions.copy()
     out["classification_tier"] = tier
     logger.info(
         "classify_pairs: %s",
@@ -817,6 +863,64 @@ def to_evaluation_schema(df_classified: pd.DataFrame) -> pd.DataFrame:
         }
     )
     return out[EVAL_SCHEMA_COLUMNS]
+
+
+# E5: ProbabilisticMatches contract columns, in declared order. Matches
+# src/contracts.ProbabilisticMatches.
+PROBABILISTIC_MATCHES_COLUMNS = (
+    "PATID_A", "PATID_B", "match_source", "score", "match_weight",
+    "classification_tier", "veto_reason", "source_blocks", "n_blocks",
+)
+
+
+def to_probabilistic_matches(df_classified: pd.DataFrame) -> pd.DataFrame:
+    """Project the rich classified frame down to ProbabilisticMatches contract.
+
+    This is the Stage 4 on-disk artifact written to
+    `data/matches_model/<run_id>.parquet`. Differs from the 5-col eval-schema
+    output in that it preserves match_weight, veto_reason, source_blocks, and
+    n_blocks — enough for the validation notebook §10 head-to-head and for a
+    future Stage 5 clustering step (which can project further to the Edges
+    contract via confidence=score, evidence=veto_reason).
+    """
+    required = {
+        CP_PATID_A, CP_PATID_B, "match_probability", "match_weight",
+        "classification_tier",
+    }
+    missing = required - set(df_classified.columns)
+    if missing:
+        raise ValueError(
+            f"to_probabilistic_matches is missing columns {sorted(missing)}; "
+            "expected the output of classify_pairs() with full_output=True."
+        )
+
+    n = len(df_classified)
+    out = pd.DataFrame(
+        {
+            "PATID_A": df_classified[CP_PATID_A].values,
+            "PATID_B": df_classified[CP_PATID_B].values,
+            "match_source": ["model"] * n,
+            "score": df_classified["match_probability"].values,
+            "match_weight": df_classified["match_weight"].values,
+            "classification_tier": df_classified["classification_tier"].values,
+            "veto_reason": (
+                df_classified[VETO_REASON_COL].values
+                if VETO_REASON_COL in df_classified.columns
+                else [None] * n
+            ),
+            "source_blocks": (
+                df_classified["source_blocks"].values
+                if "source_blocks" in df_classified.columns
+                else [None] * n
+            ),
+            "n_blocks": (
+                df_classified["n_blocks"].values
+                if "n_blocks" in df_classified.columns
+                else [None] * n
+            ),
+        }
+    )
+    return out[list(PROBABILISTIC_MATCHES_COLUMNS)]
 
 
 # ===========================================================================

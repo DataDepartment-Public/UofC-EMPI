@@ -166,8 +166,37 @@ def run_pipeline(
     non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
 
-    # ── Stages 4–5 (model, clustering): add here, feeding the uniform Edges
-    #    contract into a terminal clustering step over all confirmed edges. ──
+    # ── Stage 4: probabilistic matching (FS enhanced) ─────────────────────
+    # Scores the non_matches that the deterministic rules could not confirm.
+    # Lazy import keeps splink/duckdb out of the import path when the model
+    # stage is disabled.
+    matches_model_path: Path | None = None
+    if not non_matches.empty:
+        logger.info("[4/5] MODEL — scoring %d non-match pairs with FS enhanced...",
+                    len(non_matches))
+        from models.experiments.fs_splink_enhanced.fellegi_sunter_enhanced import (
+            run_fs_enhanced,
+            to_probabilistic_matches,
+        )
+        from src.contracts import ProbabilisticMatches
+        classified = run_fs_enhanced(
+            candidate_pairs_path=non_matches_path,
+            df_clean=cleaned,
+            full_output=True,
+        )
+        prob_matches = to_probabilistic_matches(classified)
+        validate(prob_matches, ProbabilisticMatches)
+        matches_model_path = settings.matches_model_dir / f"matches_model_{run_id}.parquet"
+        prob_matches.to_parquet(matches_model_path, index=False)
+        model_tier_counts = prob_matches["classification_tier"].value_counts().to_dict()
+        logger.info("[4/5] MODEL — tier breakdown: %s -> %s",
+                    {k: int(v) for k, v in model_tier_counts.items()},
+                    _rel(matches_model_path, settings.project_root))
+    else:
+        logger.info("[4/5] MODEL — skipped (no non-match pairs to score)")
+
+    # ── Stage 5 (clustering): add here, feeding deterministic Matches and
+    #    ProbabilisticMatches into a uniform Edges projection for clustering. ──
 
     # ── Manifest ──────────────────────────────────────────────────────────
     root = settings.project_root

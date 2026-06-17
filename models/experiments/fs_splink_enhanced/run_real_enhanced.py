@@ -146,32 +146,52 @@ def main() -> None:
         args.u_max_pairs, args.auto_merge_threshold, args.review_floor,
     )
     try:
-        result, diagnostics = fs.run_fs_enhanced(
+        classified, diagnostics = fs.run_fs_enhanced(
             args.candidate_pairs,
             df_clean,
             auto_merge_threshold=args.auto_merge_threshold,
             review_floor=args.review_floor,
             u_max_pairs=args.u_max_pairs,
+            full_output=True,
             return_diagnostics=True,
         )
     except RuntimeError as exc:
         # Single-CPU u-sampling salting issue (NEW ISSUE A). Should not occur
         # on the VM, but handle it gracefully if it does.
         logger.warning("Retrying with u_max_pairs=1e4 due to: %s", exc)
-        result, diagnostics = fs.run_fs_enhanced(
+        classified, diagnostics = fs.run_fs_enhanced(
             args.candidate_pairs,
             df_clean,
             auto_merge_threshold=args.auto_merge_threshold,
             review_floor=args.review_floor,
             u_max_pairs=1e4,
+            full_output=True,
             return_diagnostics=True,
         )
 
-    # --- Write the standardized evaluation output ---------------------------
+    # --- Dual-output projection from the rich classified frame --------------
+    # 1) Legacy 5-col eval-schema parquet — head-to-head input for notebook §10.
+    # 2) ProbabilisticMatches parquet — union-ready Stage 4 contract, validated
+    #    against src.contracts.ProbabilisticMatches.
+    result = fs.to_evaluation_schema(classified)
+    prob_matches = fs.to_probabilistic_matches(classified)
+    from src.contracts import ProbabilisticMatches, validate as validate_contract
+    prob_matches = validate_contract(prob_matches, ProbabilisticMatches)
+
+    # --- Write both artifacts ----------------------------------------------
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = OUTPUTS_DIR / f"{fs.MODEL_NAME}__{args.data_version}.parquet"
     result.to_parquet(out_path, index=False)
-    logger.info("Wrote %d scored pairs -> %s", len(result), out_path)
+    logger.info("Wrote %d scored pairs -> %s (eval_schema)", len(result), out_path)
+
+    from src.config.config import settings as _empi_settings
+    _empi_settings.matches_model_dir.mkdir(parents=True, exist_ok=True)
+    pm_path = _empi_settings.matches_model_dir / (
+        f"{fs.MODEL_NAME}_matches_model__{args.data_version}.parquet"
+    )
+    prob_matches.to_parquet(pm_path, index=False)
+    logger.info("Wrote %d scored pairs -> %s (ProbabilisticMatches)",
+                len(prob_matches), pm_path)
 
     # --- Write Phase A diagnostics (non-PHI: m/u parameters only) -----------
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)

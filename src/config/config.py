@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     processed_dir: Path = _DATA / "processed"
     blocking_dir: Path = _DATA / "blocking"
     matches_dir: Path = _DATA / "matches"
+    matches_model_dir: Path = _DATA / "matches_model"
     non_matches_dir: Path = _DATA / "non_matches"
     runs_dir: Path = _DATA / "runs"
 
@@ -85,6 +86,7 @@ class Settings(BaseSettings):
             self.processed_dir,
             self.blocking_dir,
             self.matches_dir,
+            self.matches_model_dir,
             self.non_matches_dir,
             self.runs_dir,
         ):

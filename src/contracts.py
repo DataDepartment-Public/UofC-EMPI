@@ -171,6 +171,44 @@ class Matches(pa.DataFrameModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Stages 4–5 — PROPOSED target contracts (no stage emits these yet)
 # ═══════════════════════════════════════════════════════════════════════════════
+class ProbabilisticMatches(pa.DataFrameModel):
+    """Stage 4 output of the Fellegi-Sunter enhanced matcher.
+
+    Produced by `models/experiments/fs_splink_enhanced/fellegi_sunter_enhanced.py`
+    after scoring `data/non_matches/<run_id>.parquet` and applying the
+    deterministic-veto layer + classification thresholds. Written to
+    `data/matches_model/<run_id>.parquet`.
+
+    Compatible-by-projection with `Edges` (set `confidence = score`,
+    `match_source = "model"`) so a future Stage 5 clustering step can
+    concatenate deterministic + probabilistic edges into one frame.
+    """
+
+    PATID_A: Series[str] = pa.Field(nullable=False, coerce=True)
+    PATID_B: Series[str] = pa.Field(nullable=False, coerce=True)
+    match_source: Series[str] = pa.Field(
+        nullable=False, coerce=True, isin=["model"],
+    )
+    score: Series[float] = pa.Field(nullable=False, coerce=True, ge=0.0, le=1.0)
+    match_weight: Series[float] = pa.Field(nullable=False, coerce=True)
+    classification_tier: Series[str] = pa.Field(
+        nullable=False,
+        coerce=True,
+        isin=["auto_merge", "human_review", "no_match"],
+    )
+    veto_reason: Series[str] = pa.Field(nullable=True, coerce=True)
+    source_blocks: Series[str] = pa.Field(nullable=True, coerce=True)
+    n_blocks: Series[int] = pa.Field(nullable=True, coerce=True, ge=1)
+
+    class Config:
+        strict = True
+        coerce = True
+
+    @pa.dataframe_check
+    def _canonical_order(cls, df: pd.DataFrame) -> bool:  # noqa: N805
+        return bool((df[PATID_A] < df[PATID_B]).all())
+
+
 class Edges(pa.DataFrameModel):
     """Uniform edge schema emitted by BOTH the rules and the model stages, so
     clustering consumes one concatenated frame. PROPOSED — see Data-Contract.md.

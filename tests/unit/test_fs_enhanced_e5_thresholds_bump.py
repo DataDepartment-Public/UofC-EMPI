@@ -115,7 +115,11 @@ def test_to_probabilistic_matches_columns_and_values():
     assert list(out.columns) == list(fs.PROBABILISTIC_MATCHES_COLUMNS)
     assert (out["match_source"] == "model").all()
     assert out["score"].tolist() == [0.97, 0.20]
-    assert out["veto_reason"].tolist() == [None, "ssn_conflict"]
+    # pandas DataFrame construction may convert Python None -> NaN on object
+    # columns. Either is valid (contract is nullable=True). Test on null-ness
+    # for the empty slot and equality for the populated one.
+    assert pd.isna(out["veto_reason"].iloc[0])
+    assert out["veto_reason"].iloc[1] == "ssn_conflict"
 
 
 def test_to_probabilistic_matches_handles_missing_optional_columns():

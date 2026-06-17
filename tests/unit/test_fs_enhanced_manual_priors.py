@@ -37,8 +37,8 @@ def test_build_settings_default_includes_address():
     for required in ("FirstNM_clean", "LastNM_clean", "_dob_str", "SSN", "Email",
                      "Phones_array", "ZIP"):
         assert required in ocns, f"missing {required}"
-    # 8 comparisons total (was 7 in baseline; +Address)
-    assert len(settings["comparisons"]) == 8
+    # 9 comparisons total (baseline 7 + E3 Address + E4 Household_discount).
+    assert len(settings["comparisons"]) == 9
 
 
 def test_build_settings_include_address_false_drops_it():

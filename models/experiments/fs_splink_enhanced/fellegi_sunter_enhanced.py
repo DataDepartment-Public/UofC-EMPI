@@ -271,6 +271,31 @@ def _validate_required_columns(df: pd.DataFrame) -> None:
 # ===========================================================================
 # 2. Settings (plan Section 4)
 # ===========================================================================
+def _insert_level_before_else(
+    settings_dict: dict,
+    output_column_name: str,
+    new_level: dict,
+) -> None:
+    """Insert `new_level` immediately before the ElseLevel of the named comparison.
+
+    Splink's NameComparison / CustomComparison emit dicts whose last level is
+    conventionally the catch-all `ElseLevel`. We surgically add the new level
+    at position -1 so it gets evaluated before Else but after the more specific
+    earlier levels. Mutates settings_dict in place.
+
+    Raises ValueError if the named comparison isn't present.
+    """
+    for comp in settings_dict.get("comparisons", []):
+        if comp.get("output_column_name") == output_column_name:
+            comp["comparison_levels"].insert(-1, new_level)
+            return
+    raise ValueError(
+        f"_insert_level_before_else: comparison {output_column_name!r} not found "
+        f"in settings (available: "
+        f"{[c.get('output_column_name') for c in settings_dict.get('comparisons', [])]})."
+    )
+
+
 def build_settings(include_address: bool = True) -> dict:
     """
     Build the Splink settings: dedupe_only, candidate-pairs blocking rule, and
@@ -397,6 +422,95 @@ def build_settings(include_address: bool = True) -> dict:
     )
 
     settings_dict = creator.get_settings("duckdb").as_dict()
+
+    # ── E4: explicit name-mismatch levels (FirstNM / LastNM JW < 0.5) ─────────
+    # Inserted immediately before the trailing ElseLevel of the existing
+    # NameComparison-generated dicts. The default NameComparison's "all other"
+    # bucket lumped "typo-similar" and "completely different name" together
+    # and assigned them the same anti-evidence weight; this split lets the
+    # truly-different cases carry stronger negative weight.
+    _insert_level_before_else(
+        settings_dict,
+        output_column_name=COL_FIRST_NM,
+        new_level={
+            "sql_condition": (
+                f"jaro_winkler_similarity({COL_FIRST_NM}_l, {COL_FIRST_NM}_r) < 0.5 "
+                f"AND {COL_FIRST_NM}_l IS NOT NULL AND {COL_FIRST_NM}_r IS NOT NULL"
+            ),
+            "label_for_charts": f"Jaro-Winkler distance of {COL_FIRST_NM} < 0.5",
+        },
+    )
+    _insert_level_before_else(
+        settings_dict,
+        output_column_name=COL_LAST_NM,
+        new_level={
+            "sql_condition": (
+                f"jaro_winkler_similarity({COL_LAST_NM}_l, {COL_LAST_NM}_r) < 0.5 "
+                f"AND {COL_LAST_NM}_l IS NOT NULL AND {COL_LAST_NM}_r IS NOT NULL"
+            ),
+            "label_for_charts": f"Jaro-Winkler distance of {COL_LAST_NM} < 0.5",
+        },
+    )
+
+    # ── E4: explicit SSN 5-9 mismatch level (defense in depth vs the veto) ────
+    # Both populated, full 9-digit mismatch. The veto layer already rejects
+    # these pairs, but this level ensures the FS score itself reflects the
+    # conflict in any diagnostic mode that bypasses the veto layer.
+    _insert_level_before_else(
+        settings_dict,
+        output_column_name="SSN",
+        new_level={
+            "sql_condition": (
+                f"{COL_SSN}_l IS NOT NULL AND {COL_SSN}_r IS NOT NULL "
+                f"AND {COL_SSN}_l != {COL_SSN}_r"
+            ),
+            "label_for_charts": "Both populated, full 9-digit mismatch",
+        },
+    )
+
+    # ── E4: Household-discount composite comparison ───────────────────────────
+    # Fires when the pair carries a clear household indicator (shared address
+    # OR shared phone) but the identity fields disagree (different first
+    # name + different DOB). This is the negative-interaction signal the
+    # per-field comparisons cannot express, and the single biggest expected
+    # mover for the family-same-household FP class (19/42 in the labeled set).
+    # Gated on include_address: the comparison needs AddressLine1_clean to
+    # check the address branch of the OR. The phone branch alone would still
+    # work but the semantics change — keep it gated for consistency.
+    if include_address:
+        settings_dict["comparisons"].append(
+            {
+                "output_column_name": "Household_discount",
+                "comparison_levels": [
+                    {
+                        "sql_condition": (
+                            f"{COL_FIRST_NM}_l IS NULL OR {COL_FIRST_NM}_r IS NULL "
+                            f"OR {_COL_DOB_STR}_l IS NULL OR {_COL_DOB_STR}_r IS NULL"
+                        ),
+                        "label_for_charts": "Household_discount is NULL",
+                        "is_null_level": True,
+                    },
+                    {
+                        "sql_condition": (
+                            "("
+                            f"  ({COL_ADDRESS1}_l = {COL_ADDRESS1}_r "
+                            f"   AND {COL_ADDRESS1}_l IS NOT NULL)"
+                            "  OR "
+                            "  ("
+                            f"     {COL_PHONES_ARRAY}_l IS NOT NULL "
+                            f"     AND {COL_PHONES_ARRAY}_r IS NOT NULL "
+                            f"     AND len(list_intersect({COL_PHONES_ARRAY}_l, {COL_PHONES_ARRAY}_r)) >= 1"
+                            "  )"
+                            ") "
+                            f"AND jaro_winkler_similarity({COL_FIRST_NM}_l, {COL_FIRST_NM}_r) < 0.7 "
+                            f"AND {_COL_DOB_STR}_l != {_COL_DOB_STR}_r"
+                        ),
+                        "label_for_charts": "Household indicator without identity match",
+                    },
+                    {"sql_condition": "ELSE", "label_for_charts": "All other comparisons"},
+                ],
+            }
+        )
 
     # E3: append the Address comparison directly to the dict — keeps the
     # CustomComparison level construction terse and avoids re-running the

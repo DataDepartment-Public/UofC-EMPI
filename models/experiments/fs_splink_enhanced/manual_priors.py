@@ -71,10 +71,62 @@ PHONES_MU: dict[str, tuple[float, float]] = {
 }
 
 
+# E4 — Explicit name-mismatch levels (inserted between JW>=0.85 and Else by
+# build_settings). The baseline NameComparison's "All other comparisons"
+# bucket lumped "typo-similar" and "completely different name" together; this
+# splits the truly-different cases out and assigns strong anti-evidence.
+FIRSTNM_JW_LT_05_MU: dict[str, tuple[float, float]] = {
+    # ~3 bits anti-evidence: two records with very dissimilar first names are
+    # almost never the same person in a clinical context.
+    "Jaro-Winkler distance of FirstNM_clean < 0.5": (0.005, 0.30),
+}
+
+LASTNM_JW_LT_05_MU: dict[str, tuple[float, float]] = {
+    # ~4-5 bits anti-evidence: last names in our candidate pool already cluster
+    # (regional cohort + blocking on phonetic last name), so a JW<0.5 last
+    # name is a stronger signal than for first names.
+    "Jaro-Winkler distance of LastNM_clean < 0.5": (0.005, 0.15),
+}
+
+
+# E4 — Explicit SSN 5-9 conflict level (defense in depth alongside the
+# ssn_conflict veto). Both SSNs populated, full 9-digit mismatch but the
+# pair is still being scored (e.g., the veto layer is bypassed in some
+# diagnostic mode or fails to load on a partial-schema dataset). Strong
+# anti-evidence so the FS score itself reflects the conflict.
+SSN_FULL_MISMATCH_MU: dict[str, tuple[float, float]] = {
+    "Both populated, full 9-digit mismatch": (0.01, 0.05),  # ~-2.3 bits
+}
+
+
+# E4 — Household-discount composite. Fires when the candidate pair carries a
+# clear household indicator (shared address OR shared phone) but the identity
+# fields disagree (different first name + different DOB). Captures the
+# negative-interaction pattern the per-field comparisons cannot express:
+# "I see the household signature without the same-person signature." Strong
+# anti-evidence; this is the single biggest expected mover for the
+# family-same-household false-positive class (19/42 of the labeled sample).
+HOUSEHOLD_DISCOUNT_MU: dict[str, tuple[float, float]] = {
+    # m ~0.05  — real same-person pairs almost never look like this
+    # u ~0.45  — ~half of our candidate-pool non-matches ARE this pattern
+    # m/u ~0.11 -> ~-3.2 bits anti-evidence
+    "Household indicator without identity match": (0.05, 0.45),
+}
+
+
 # Map: comparison output_column_name -> prior dict. Drives apply_manual_priors.
+# Multiple comparisons (FirstNM_clean, LastNM_clean, SSN) carry only a partial
+# label-set in their prior dicts — apply_manual_priors locks only the labels
+# that match, leaving EM-trained values alone on the rest. That's intentional:
+# the explicit-mismatch levels are the only ones we're locking; the
+# "JW>=0.92 / JW>=0.85 / exact" levels still benefit from EM training.
 _TARGET_COMPARISONS = {
-    "Address":      ADDRESS_MU,
-    "Phones_array": PHONES_MU,
+    "Address":           ADDRESS_MU,
+    "Phones_array":      PHONES_MU,
+    "FirstNM_clean":     FIRSTNM_JW_LT_05_MU,
+    "LastNM_clean":      LASTNM_JW_LT_05_MU,
+    "SSN":               SSN_FULL_MISMATCH_MU,
+    "Household_discount": HOUSEHOLD_DISCOUNT_MU,
 }
 
 
@@ -114,10 +166,13 @@ def apply_manual_priors(
         The same settings_dict (returned for chaining convenience). Mutation
         happens in place.
     """
-    priors_by_ocn = {
-        "Address":      address_mu if address_mu is not None else ADDRESS_MU,
-        "Phones_array": phones_mu  if phones_mu  is not None else PHONES_MU,
-    }
+    # Start from the module-level map (covers all 6 target comparisons), then
+    # override individual entries from kwargs for ad-hoc experiments.
+    priors_by_ocn: dict[str, dict[str, tuple[float, float]]] = dict(_TARGET_COMPARISONS)
+    if address_mu is not None:
+        priors_by_ocn["Address"] = address_mu
+    if phones_mu is not None:
+        priors_by_ocn["Phones_array"] = phones_mu
 
     comparisons = settings_dict.get("comparisons", [])
     n_locked = 0

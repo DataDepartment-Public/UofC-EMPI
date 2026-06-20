@@ -204,33 +204,42 @@ B2 was removed (subsumed by B3). A per-key **governance cap**
 |---|---|---|---|
 | `PATID_A` | string | no | Carried unchanged from blocking. |
 | `PATID_B` | string | no | Carried unchanged from blocking. |
-| `match_rule` | string | no | Highest-confidence rule that fired (∈ the 6 below). |
+| `match_rule` | string | no | Highest-confidence rule that fired (∈ the 5 below). |
 | `confidence` | float64 | no | Confidence of `match_rule`, in `[0.970, 1.000]`. |
 | `rules_fired` | string | no | Pipe-delimited list of **every** rule that fired. |
 | `is_suspicious` | bool | no | `True` if DOB, last name, or (both-present) SSN disagree. |
+| `high_fanout_ssn` | bool | no | `True` if the pair's shared SSN is carried by ≥ `EMPI_SSN_FANOUT_THRESHOLD` patients. |
 | `cluster_id` | int64 | no | Connected-component id, stamped by the writer. |
 | `source_blocks` | string | no | Passthrough from blocking. |
 | `n_blocks` | int64 | no | Passthrough from blocking. |
 
-**Rules** (descending confidence; first to fire wins `match_rule`):
+**Rules** (descending confidence; first to fire wins `match_rule`). First/last
+name predicates are **fuzzy** (Jaro-Winkler ≥ 0.92 or Damerau-Levenshtein ≤ 1);
+all other predicates are exact. Kept in sync with `contracts.RULE_NAMES`.
 
 | Rule | Confidence | Agreement predicate |
 |---|---|---|
-| `EXACT_SSN` | 1.000 | `SSN_clean` |
-| `EMAIL_EXACT` | 0.995 | `Email_clean` |
+| `SSN_DOB` | 1.000 | `SSN_clean` + `BirthDT_clean` |
 | `NAME_DOB_EMAIL` | 0.990 | First + Last + DOB + Email |
 | `NAME_DOB_PHONE` | 0.985 | First + Last + DOB + phone-set intersection |
 | `NAME_DOB_SEX` | 0.980 | First + Last + DOB + Sex |
 | `NAME_DOB_ADDRESS` | 0.970 | First + Last + DOB + `AddressLine1_clean` |
 
-### 3b — Non-matches
+### 3b — Three-way decision: review (non-matches) and reject
 
-- **Contract:** `contracts.NonMatches` (identical schema to `CandidatePairs`).
-- **Location:** `data/non_matches/non_matches_*.parquet`
-- **Grain:** the candidate pairs that **no** deterministic rule confirmed — the
-  input to the probabilistic/ML stage. Full blocking provenance preserved.
-- **Invariant:** `matches ∪ non_matches == candidate_pairs` and
-  `matches ∩ non_matches == ∅`, keyed on `(PATID_A, PATID_B)`.
+Pairs no rule confirmed are split by `classify_non_matches` into two buckets:
+
+- **review** — `contracts.NonMatches` (identical schema to `CandidatePairs`),
+  written to `data/non_matches/non_matches_*.parquet`. The candidate pairs with
+  **< 3** strong-identifier contradictions — the input to the probabilistic/ML
+  stage. Full blocking provenance preserved.
+- **reject** — written to `data/rejects/rejects_*.parquet` (adds `decision` and
+  `n_contradictions` columns). Confident non-matches (**≥ 3** of {full SSN, first,
+  last, DOB} strictly disagree — calibrated: 2 conflicts still carry ~10%
+  true matches, 3 carry ~0%); **dropped** from the pipeline, kept only for audit.
+- **Invariant:** `matches ⊎ review ⊎ reject == candidate_pairs` (disjoint union),
+  keyed on `(PATID_A, PATID_B)`. (Note: `review` alone no longer equals
+  `candidate_pairs − matches` — the `reject` set is the difference.)
 
 ---
 

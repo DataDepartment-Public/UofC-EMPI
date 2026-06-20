@@ -71,8 +71,8 @@ from src.contracts import (  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
     apply_rules,
     assign_clusters,
+    classify_non_matches,
     get_match_stats,
-    get_non_matches,
 )
 
 logging.basicConfig(
@@ -202,7 +202,11 @@ def main(
 
     matches = apply_rules(candidate_pairs, df_clean)
 
-    stats = get_match_stats(matches, n_records=len(df_clean))
+    # Three-way split of the pairs no rule confirmed:
+    #   review -> downstream probabilistic matching; reject -> dropped (audited).
+    decided = classify_non_matches(candidate_pairs, matches, df_clean)
+
+    stats = get_match_stats(matches, n_records=len(df_clean), decided=decided)
     _print_report(stats, version)
 
     # Attach cluster ids so downstream consumers get linked-entity groupings.
@@ -218,23 +222,37 @@ def main(
     matches.to_parquet(output_path, index=False)
     logger.info("Matches saved to %s (%d rows)", output_path, len(matches))
 
-    # Candidate pairs no rule confirmed — the input to downstream matching.
-    non_matches = get_non_matches(candidate_pairs, matches)
-    validate(non_matches, NonMatches)  # contract: non-matches output
+    review = decided[decided["decision"] == "review"]
+    rejects = decided[decided["decision"] == "reject"]
+
+    non_matches = review[list(candidate_pairs.columns)].reset_index(drop=True)
+    validate(non_matches, NonMatches)  # contract: non-matches (review) output
     nm_version = _next_version(non_match_dir, stem="non_matches")
     non_match_path = non_match_dir / f"non_matches_{nm_version}_{date_tag}.parquet"
     non_matches.to_parquet(non_match_path, index=False)
     logger.info(
-        "Non-matches saved to %s (%d rows) for downstream matching.",
+        "Review pairs saved to %s (%d rows) for downstream matching.",
         non_match_path,
         len(non_matches),
+    )
+
+    settings.rejects_dir.mkdir(parents=True, exist_ok=True)
+    rj_version = _next_version(settings.rejects_dir, stem="rejects")
+    reject_path = settings.rejects_dir / f"rejects_{rj_version}_{date_tag}.parquet"
+    rejects.reset_index(drop=True).to_parquet(reject_path, index=False)
+    logger.info(
+        "Rejected (confident non-match) pairs saved to %s (%d rows); not routed "
+        "downstream.",
+        reject_path,
+        len(rejects),
     )
 
     elapsed = (datetime.utcnow() - run_start).total_seconds()
     logger.info("=" * 60)
     logger.info("Pipeline complete in %.1f seconds", elapsed)
     logger.info("Matches:     %s", output_path)
-    logger.info("Non-matches: %s", non_match_path)
+    logger.info("Review:      %s", non_match_path)
+    logger.info("Rejects:     %s", reject_path)
     logger.info("=" * 60)
 
 

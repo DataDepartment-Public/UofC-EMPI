@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     blocking_dir: Path = _DATA / "blocking"
     matches_dir: Path = _DATA / "matches"
     non_matches_dir: Path = _DATA / "non_matches"
+    rejects_dir: Path = _DATA / "rejects"
     runs_dir: Path = _DATA / "runs"
 
     # ── Defaults ────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ class Settings(BaseSettings):
     # ── Rules ───────────────────────────────────────────────────────────────
     ssn_fanout_threshold: int = Field(
         default=4,
-        description="Flag EXACT_SSN matches whose shared SSN is carried by at "
+        description="Flag SSN_DOB matches whose shared SSN is carried by at "
         "least this many distinct patients (likely shared/fraudulent SSN).",
     )
 
@@ -86,6 +87,7 @@ class Settings(BaseSettings):
             self.blocking_dir,
             self.matches_dir,
             self.non_matches_dir,
+            self.rejects_dir,
             self.runs_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)

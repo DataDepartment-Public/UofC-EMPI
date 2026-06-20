@@ -54,7 +54,7 @@ CLEANED_REQUIRED_COLUMNS: tuple[str, ...] = (
 
 #: Deterministic rule names — keep in sync with deterministic_rules.RULES.
 RULE_NAMES: tuple[str, ...] = (
-    "EXACT_SSN", "NAME_DOB_EMAIL",
+    "SSN_DOB", "NAME_DOB_EMAIL",
     "NAME_DOB_PHONE", "NAME_DOB_SEX", "NAME_DOB_ADDRESS",
 )
 
@@ -270,6 +270,7 @@ class RunManifest(BaseModel):
     candidate_pairs: ArtifactRef
     matches: ArtifactRef
     non_matches: ArtifactRef
+    rejects: ArtifactRef | None = None
     counts: dict[str, int] = Field(default_factory=dict)
 
 

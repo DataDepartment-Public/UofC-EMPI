@@ -1,0 +1,55 @@
+Loaded 40,000 labeled pairs from synthetic_train_v3.csv
+  positives: 16,000
+  negatives: 24,000
+
+Coverage report written to /Users/sachinpatel/Desktop/UofC-EMPI/data/synthetic/coverage_report.csv
+
+── MiddleNM ──
+  OK exact                positives=  2543  negatives=    25  [OK]
+  OK initial_match        positives=   376  negatives=     3  [OK]
+  OK mismatch             positives=   665  negatives=   694  [OK]
+  OK null_either          positives= 12416  negatives= 23278  [OK]
+
+── Sex_positive ──
+  !! M_vs_F               positives=     0  negatives=  6702  [RISK_OF_MISCALIBRATION]
+  OK OTHER_either         positives=   346  negatives=    74  [OK]
+  OK exact                positives= 12457  negatives=  8324  [OK]
+  OK null_either          positives=  3197  negatives=  8900  [OK]
+
+── LastNM_DM ──
+  OK mismatch             positives=  4894  negatives= 14033  [OK]
+  OK phonetic_equal       positives= 11106  negatives=  9967  [OK]
+
+── FirstNM_DM ──
+  OK mismatch             positives=  2071  negatives= 20688  [OK]
+  !! null_either          positives=    10  negatives=     0  [RISK_OF_MISCALIBRATION]
+  OK phonetic_equal       positives= 13919  negatives=  3312  [OK]
+
+── LastNM_Soundex ──
+  OK mismatch             positives=  3838  negatives= 14007  [OK]
+  OK phonetic_equal       positives= 12162  negatives=  9993  [OK]
+
+── DOB_swap ──
+  OK exact                positives= 15006  negatives=  6604  [OK]
+  OK mismatch             positives=   499  negatives= 16906  [OK]
+  OK month_day_swap       positives=    67  negatives=     1  [OK]
+  OK null_either          positives=    66  negatives=     0  [OK]
+  OK same_year            positives=   362  negatives=   489  [OK]
+
+── ZipBase ──
+  OK exact                positives= 14322  negatives=  9362  [OK]
+  OK mismatch             positives=    61  negatives=  6145  [OK]
+  OK null_either          positives=   604  negatives=  1287  [OK]
+  OK prefix3_match        positives=  1013  negatives=  7206  [OK]
+
+── FullNameCompact ──
+  OK compact_exact        positives=  6916  negatives=  1844  [OK]
+  OK mismatch             positives=  9084  negatives= 22156  [OK]
+
+── Email_local ──
+  OK exact                positives=  4136  negatives=   272  [OK]
+  OK local_only           positives=   392  negatives=     0  [OK]
+  OK mismatch             positives=   360  negatives=  2031  [OK]
+  OK null_either          positives= 11112  negatives= 21697  [OK]
+
+=== Summary: 2 level(s) below the 20-positive threshold (flagged 'RISK_OF_MISCALIBRATION — additional coverage may be needed'; not dropped) ===

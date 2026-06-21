@@ -53,15 +53,61 @@ raw → clean → block → deterministic rules ─┬─► data/matches/      
 
 ## Object-oriented architecture (`models/common/fs_base.py`)
 
-*(Placeholder — fills in Phase E2-1.)*
+Phase E2-1 introduces a shared OO base at `models/common/fs_base.py` that enhanced_2 (and future FS experiments) consume. Five concepts:
 
-The shared base provides:
-- `FSModel` (ABC): owns Splink-linker boilerplate, n_blocks bump, classify, output projections.
-- `TrainingStrategy` (ABC) with concrete subclasses `EMTraining` (used by baseline / enhanced) and `SupervisedTraining` (used by enhanced_2).
-- `ComparisonSpec` + `ComparisonRegistry`: declarative, ordered, mutable-by-copy.
-- `ClassificationConfig`: thresholds + n_blocks-bump constants in one dataclass.
+### `ComparisonSpec` + `ComparisonRegistry`
 
-`fs_splink_enhanced_2/` is a thin composition over this base — see "Module layout" once Phase E2-3 ships.
+A `ComparisonSpec` is a frozen dataclass with `(name, builder, notes)` where `builder` is a zero-arg callable returning the comparison's Splink dict form. Lazy invocation lets the registry live at module-import time without paying Splink's import cost.
+
+`ComparisonRegistry` is an ordered, **immutable-by-copy** collection. Mutation methods (`with_added`, `with_removed`, `with_replaced`) return new registries — the original is never modified, so a subclass's class-level registry constant is safe under concurrent runs and tests. Duplicate names raise at construction. Ordering is preserved: the order specs are declared is the order Splink sees them in `settings["comparisons"]`.
+
+### `TrainingStrategy` (ABC) + `EMTraining` / `SupervisedTraining`
+
+`TrainingStrategy.train(linker, df_clean)` is the single abstract method. Concrete strategies:
+
+- **`EMTraining(em_blocking_rules, prior_rules, recall, u_max_pairs, seed)`** — random u-sampling + one EM session per blocking rule + (optional) `estimate_probability_two_random_records_match`. Used by baseline/enhanced; not refactored onto the base yet.
+- **`SupervisedTraining(labels_df, label_col, u_max_pairs, seed, labels_table_name)`** — random u-sampling (still on the **real** cohort, not synthetic) + `register_labels_table` + `estimate_m_from_pairwise_labels`. Used by enhanced_2.
+
+Both strategies call the shared `_estimate_u_with_guard` (converting Splink's single-CPU salting error into an actionable RuntimeError) and `_warn_on_weight_inversions` (m<u sign-flip diagnostic).
+
+### `ClassificationConfig`
+
+```python
+@dataclass
+class ClassificationConfig:
+    auto_merge_threshold: float = 0.95
+    review_floor: float = 0.40
+    n_blocks_bump_threshold: int = 2
+    n_blocks_bump_max_bits: float = 4.0
+```
+
+`__post_init__` enforces `0 ≤ review_floor ≤ auto_merge_threshold ≤ 1` and `n_blocks_bump_max_bits ≥ 0`. Enhanced_2's thresholds will be retuned in E2-4; for now the base defaults match enhanced.
+
+### `FSModel` (ABC)
+
+Subclasses configure:
+- `model_name: str` — self-identifying tag for the eval-schema output
+- `registry: ComparisonRegistry` — assembled from `ComparisonSpec`s
+- `classification_config: ClassificationConfig`
+- `training: TrainingStrategy` — set in `__init__`
+- (optional overrides) `candidate_pairs_table_name`, `unique_id_column`, `eval_schema_columns`, `probabilistic_matches_columns`
+
+Subclasses implement:
+- `prepare_model_input(df_clean) -> pd.DataFrame` — project-specific derived-column logic (Splink shim columns, phone arrays, etc.)
+- `build_settings() -> dict` — full Splink settings dict assembly from the registry
+
+Base provides:
+- `build_linker(df_model, candidate_pairs_df)` — registers candidate_pairs in DuckDB, instantiates Linker
+- `train(linker, df_clean)` — delegates to `self.training`
+- `predict(linker, candidate_pairs_df)` — runs `linker.inference.predict()`, canonicalizes PATID_A/B, merges source_blocks/n_blocks back on
+- `classify(df_predictions)` — applies n_blocks log-odds bump, then thresholds → tier
+- `to_evaluation_schema(df_classified)` — 5-col cross-model projection
+- `to_probabilistic_matches(df_classified)` — `ProbabilisticMatches` projection (omits `veto_reason` by default; subclass + `probabilistic_matches_columns` override re-adds it)
+- `run(candidate_pairs_df, df_clean, full_output)` — train + predict + classify in one call
+
+### Why this shape
+
+The functional baseline + enhanced modules accumulated ~1,000 lines each of Splink boilerplate (linker construction, prediction post-processing, threshold logic, projection helpers) that all three FS experiments share. The OO base lifts that shared mass out, leaving each `fs_splink_*` experiment as ~200 lines of project-specific differences (registry contents, EM rules, custom derived columns). Refactoring baseline + enhanced onto this base is a deferred follow-up.
 
 ## Module layout
 
@@ -103,10 +149,27 @@ Same scoring algebra as baseline / enhanced. The `n_blocks` log-odds bump (+1 bi
 
 ## Output contracts
 
-*(Placeholder — fills in Phase E2-1 / E2-5.)*
+Two artifacts per real-data run:
 
-- **`models/outputs/fs_splink_enhanced_2__<v>.parquet`**: 5-col cross-model eval schema (PATID_A, PATID_B, model_name, score, predicted_tier). Identical contract to baseline and enhanced; the validation notebook §11 reads all three via this contract.
-- **`data/matches_model_v2/matches_model_<run_id>.parquet`**: `ProbabilisticMatches` projection. `veto_reason` becomes **optional** in `src/contracts.py` (E2-1 contract change) so this module's projection can omit it.
+### `models/outputs/fs_splink_enhanced_2__<v>.parquet` — cross-model eval schema
+
+```
+PATID_A | PATID_B | model_name | score | predicted_tier
+```
+
+Identical 5-column shape used by `fs_splink_baseline` and `fs_splink_enhanced`. The validation notebook §11 (Phase E2-6) reads all three through this contract for head-to-head. `model_name == "fs_splink_enhanced_2"`. `score` is `match_probability ∈ [0, 1]` post-`n_blocks` bump.
+
+### `data/matches_model_v2/matches_model_<run_id>.parquet` — ProbabilisticMatches
+
+Schema enforced by `src.contracts.ProbabilisticMatches`. Column order from `FSModel.probabilistic_matches_columns`:
+
+```
+PATID_A | PATID_B | match_source | score | match_weight | classification_tier | source_blocks | n_blocks
+```
+
+**Contract change in E2-1: `veto_reason` is now optional.** Producers that don't apply a veto layer (enhanced_2) omit the column entirely; producers that do (enhanced) include it as `Series[str]` with nullable values. Both pass `validate(df, ProbabilisticMatches)`. The optionality is encoded as `Optional[Series[str]]` in pandera — see `tests/unit/test_contracts_probabilistic_optional_veto.py` for the three cases (absent / present-null / present-populated).
+
+The default `FSModel.to_probabilistic_matches` projection omits `veto_reason`. A subclass that wants it back overrides `probabilistic_matches_columns` to include it and overrides the projection method to populate it from `df_classified[VETO_REASON_COL]`.
 
 ## How to run
 

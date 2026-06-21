@@ -234,19 +234,29 @@ B2 was removed (subsumed by B3). A per-key **governance cap**
 
 ---
 
-## Stage 4 — Probabilistic / ML matching  `[PROPOSED — not yet built]`
+## Stage 4 — Probabilistic / ML matching  `[IMPLEMENTED — fs_splink_enhanced; fs_splink_enhanced_2 in development]`
 
-Target contract; no stage emits this yet.
+- **Input:** `non_matches` (stage 3b) **+** the cleaned dataset.
+- **Outputs:** two artifacts per run — the rich **`contracts.ProbabilisticMatches`** parquet (model-stage native) and the uniform **`contracts.Edges`** projection (for clustering convergence; see below).
+- **Splink** fits this slot directly.
 
-- **Input:** `non_matches` (stage 3b) **+** the cleaned dataset, joined to
-  materialize comparison features. Factor `deterministic_rules._materialize_pairs`
-  into a shared `pairs.py` and reuse it here so rules and the model build
-  features from the identical join.
-- **Output:** the uniform **`contracts.Edges`** schema below, so stages 3 and 4
-  emit the *same* shape and clustering consumes one concatenated frame.
-- **Splink** fits this slot: its pairwise predictions map directly onto `Edges`.
+### `contracts.ProbabilisticMatches` schema
 
-### Uniform edge schema (`contracts.Edges`)
+| Column | Dtype | Required | Notes |
+|---|---|---|---|
+| `PATID_A` | string | yes | Canonical lower PATID. |
+| `PATID_B` | string | yes | Canonical higher PATID. |
+| `match_source` | string == `"model"` | yes | Provenance tag. |
+| `score` | float64 ∈ [0, 1] | yes | `match_probability` post-`n_blocks` bump. |
+| `match_weight` | float64 | yes | log₂(p/(1-p)) at the same bumped p. |
+| `classification_tier` | string ∈ {`auto_merge`, `human_review`, `no_match`} | yes | Threshold-derived tier. |
+| `veto_reason` | string, nullable | **optional** | Present on `fs_splink_enhanced` output (deterministic-veto layer); absent on `fs_splink_enhanced_2` output (vetoes moved to upstream deterministic stage). Pandera validates both. |
+| `source_blocks` | string, nullable | yes | Pipe-joined block names that produced the candidate pair. |
+| `n_blocks` | int ≥ 1, nullable | yes | Count of blocks that produced the pair. |
+
+**E2-1 change:** `veto_reason` is now `Optional[Series[str]]` in pandera — producers without a veto layer omit the column entirely. See `tests/unit/test_contracts_probabilistic_optional_veto.py`.
+
+### Uniform edge schema (`contracts.Edges`)  `[PROPOSED — for Stage 5 union]`
 
 | Column | Dtype | Notes |
 |---|---|---|

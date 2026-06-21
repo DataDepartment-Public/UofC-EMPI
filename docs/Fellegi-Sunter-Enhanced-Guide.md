@@ -180,6 +180,8 @@ The enhanced runner writes **two artifacts** per run, each for a different downs
 | `source_blocks` | str \| null | pipe-delimited list from blocking |
 | `n_blocks` | int \| null | number of blocks that emitted this pair |
 
+> **Contract change (Phase E2-1, 2026-06-21):** `veto_reason` is now **optional** in `ProbabilisticMatches` so the `fs_splink_enhanced_2` matcher (which has no veto layer — vetoes moved to the upstream deterministic-rules stage) can omit it. `fs_splink_enhanced` continues to emit the column unchanged. Pandera validates frames with or without the column present.
+
 This is the union-ready artifact for a future Stage 5 (clustering) — combine with Stage 3's `Matches` frame via the `Edges` projection (`confidence=score`, `evidence=veto_reason`).
 
 3. **Diagnostics JSON** (non-PHI) at `models/artifacts/fs_splink_enhanced/diagnostics__<data-version>.json`. Trained m/u, per-EM-session estimates, match-prevalence prior. Used by the validation notebook for calibration audits.

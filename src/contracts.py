@@ -22,6 +22,8 @@ the matching model here in the same change.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import pandera.pandas as pa
@@ -172,16 +174,23 @@ class Matches(pa.DataFrameModel):
 # Stages 4–5 — PROPOSED target contracts (no stage emits these yet)
 # ═══════════════════════════════════════════════════════════════════════════════
 class ProbabilisticMatches(pa.DataFrameModel):
-    """Stage 4 output of the Fellegi-Sunter enhanced matcher.
+    """Stage 4 output of the Fellegi-Sunter probabilistic matcher.
 
     Produced by `models/experiments/fs_splink_enhanced/fellegi_sunter_enhanced.py`
-    after scoring `data/non_matches/<run_id>.parquet` and applying the
-    deterministic-veto layer + classification thresholds. Written to
-    `data/matches_model/<run_id>.parquet`.
+    (which populates `veto_reason`) and by
+    `models/experiments/fs_splink_enhanced_2/` (which omits `veto_reason` —
+    vetoes were removed from the FS scoring stage in Phase E2-1 and move to
+    the deterministic-rules layer in a separate workstream). Written to
+    `data/matches_model{,_v2}/<run_id>.parquet`.
 
     Compatible-by-projection with `Edges` (set `confidence = score`,
     `match_source = "model"`) so a future Stage 5 clustering step can
     concatenate deterministic + probabilistic edges into one frame.
+
+    `veto_reason` is **optional** as of Phase E2-1: producers that don't apply
+    a veto layer can omit the column entirely; pandera validates the schema
+    with or without it present. Producers that DO emit a veto column must
+    leave it nullable.
     """
 
     PATID_A: Series[str] = pa.Field(nullable=False, coerce=True)
@@ -196,7 +205,9 @@ class ProbabilisticMatches(pa.DataFrameModel):
         coerce=True,
         isin=["auto_merge", "human_review", "no_match"],
     )
-    veto_reason: Series[str] = pa.Field(nullable=True, coerce=True)
+    # Optional: present on fs_splink_enhanced output, absent on
+    # fs_splink_enhanced_2 output. Validation passes either way.
+    veto_reason: Optional[Series[str]] = pa.Field(nullable=True, coerce=True)
     source_blocks: Series[str] = pa.Field(nullable=True, coerce=True)
     n_blocks: Series[int] = pa.Field(nullable=True, coerce=True, ge=1)
 

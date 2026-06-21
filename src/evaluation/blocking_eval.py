@@ -41,8 +41,8 @@ from pathlib import Path
 import jellyfish
 import pandas as pd
 
-from src.config.config import settings
-from src.features.blocking import run_batch_blocking
+from src.config import configure_logging, settings
+from src.preprocessing.blocking import run_batch_blocking
 from src.models.deterministic_rules import apply_rules
 
 logger = logging.getLogger(__name__)
@@ -258,7 +258,10 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=500,
                     help="Sample size for method=sample (kept small: O(S^2))")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--log-level", type=str, default=None,
+                    help="Override EMPI_LOG_LEVEL (DEBUG/INFO/WARNING/...).")
     args = ap.parse_args()
+    configure_logging(level=args.log_level)
 
     root = Path(__file__).resolve().parents[2]
     cleaned = _load_cleaned(args.run_id, root)

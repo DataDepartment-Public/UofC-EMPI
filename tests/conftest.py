@@ -4,7 +4,7 @@ test layers (unit, integration, regression).
 
 PATH SETUP:
     Adds the project root (EMPI_latest/) to sys.path so that imports
-    like `from src.features.blocking import ...` resolve correctly
+    like `from src.preprocessing.blocking import ...` resolve correctly
     regardless of where pytest is invoked from.
 """
 

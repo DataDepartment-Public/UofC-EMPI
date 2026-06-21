@@ -10,8 +10,8 @@ USAGE:
     python scripts/verify_pipeline.py
 
 NOTE — format bridge:
-    The cleaning CLI (src/data/clean.py) writes CSV, but the blocking CLI
-    (src/features/run_blocking.py) reads a versioned Parquet named
+    The cleaning CLI (src/preprocessing/clean.py) writes CSV, but the blocking CLI
+    (src/preprocessing/run_blocking.py) reads a versioned Parquet named
     `MDM_Population_cleaned_v<N>_<date>.parquet`. This script writes that
     Parquet directly from the cleaned DataFrame so the downstream CLIs can
     pick it up. See the printed SUMMARY for the recommended permanent fix.
@@ -30,7 +30,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
-from src.data.transformations import transform_dataframe  # noqa: E402
+from src.preprocessing.transformations import transform_dataframe  # noqa: E402
 
 RAW = _PROJECT_ROOT / "data" / "raw" / "MDM_Population.csv"
 PROCESSED_DIR = _PROJECT_ROOT / "data" / "processed"

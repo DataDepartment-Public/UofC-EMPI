@@ -37,7 +37,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
-from src.config.config import Settings, settings as default_settings  # noqa: E402
+from src.config import (  # noqa: E402
+    Settings,
+    configure_logging,
+    settings as default_settings,
+)
 from src.contracts import (  # noqa: E402
     ArtifactRef,
     CandidatePairs,
@@ -48,9 +52,9 @@ from src.contracts import (  # noqa: E402
     assert_patid_coverage,
     validate,
 )
-from src.data.clean import _load as _read_raw, write_cleaned  # noqa: E402
-from src.data.transformations import transform_dataframe  # noqa: E402
-from src.features.blocking import run_batch_blocking  # noqa: E402
+from src.preprocessing.clean import _load as _read_raw, write_cleaned  # noqa: E402
+from src.preprocessing.transformations import transform_dataframe  # noqa: E402
+from src.preprocessing.blocking import run_batch_blocking  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
     apply_rules,
     assign_clusters,
@@ -58,11 +62,6 @@ from src.models.deterministic_rules import (  # noqa: E402
     get_match_stats,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger("eMPI.pipeline")
 
 
@@ -112,6 +111,7 @@ def run_pipeline(
     run_id: str | None = None,
 ) -> RunManifest:
     """Run clean → block → rules for one input and return the run manifest."""
+    configure_logging(settings)
     run_id = run_id or _new_run_id()
     raw_input = Path(raw_input) if raw_input is not None else settings.raw_input
     settings.ensure_dirs()
@@ -221,7 +221,12 @@ def main() -> None:
         "--run-id", type=str, default=None,
         help="Override the generated run id (default: UTC timestamp).",
     )
+    parser.add_argument(
+        "--log-level", type=str, default=None,
+        help="Override EMPI_LOG_LEVEL for this run (DEBUG/INFO/WARNING/...).",
+    )
     args = parser.parse_args()
+    configure_logging(level=args.log_level)
     run_pipeline(raw_input=args.input, run_id=args.run_id)
 
 

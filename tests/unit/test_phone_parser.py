@@ -25,7 +25,7 @@ import pytest
 import numpy as np
 import pandas as pd
 
-from src.features.blocking import _parse_phone_set
+from src.preprocessing.blocking import _parse_phone_set
 
 
 class TestParsePhoneSetValidFormats:

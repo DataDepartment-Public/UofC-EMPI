@@ -60,7 +60,7 @@ import pandas as pd
 import numpy as np
 import phonetics
 
-from src.config.config import settings
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 

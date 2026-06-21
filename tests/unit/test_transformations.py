@@ -1,5 +1,5 @@
 """Unit tests for the per-field cleaners and orchestrator in
-src/data/transformations.py — previously the largest untested module.
+src/preprocessing/transformations.py — previously the largest untested module.
 
 Coverage is representative, not exhaustive: the highest-risk standardization
 logic (leading-zero preservation, structural SSN/phone/zip rules, junk-value
@@ -12,7 +12,7 @@ Requires: pandas, numpy, unidecode (per requirements.txt).
 import pandas as pd
 import pytest
 
-from src.data.transformations import (
+from src.preprocessing.transformations import (
     clean_birth_date,
     clean_email,
     clean_first_name,

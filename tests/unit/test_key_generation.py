@@ -20,7 +20,7 @@ WHY THIS MATTERS:
 
 import pandas as pd
 
-from src.features.blocking import _compute_derived_columns
+from src.preprocessing.blocking import _compute_derived_columns
 
 # Column name constants (must match blocking.py)
 COL_PATID    = "PATID"

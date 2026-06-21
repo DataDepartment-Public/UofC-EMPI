@@ -18,7 +18,7 @@ WHY THIS MATTERS:
 import pytest
 import numpy as np
 
-from src.features.blocking import _dm_primary, _soundex
+from src.preprocessing.blocking import _dm_primary, _soundex
 
 
 # ═══════════════════════════════════════════════════════════════════════════

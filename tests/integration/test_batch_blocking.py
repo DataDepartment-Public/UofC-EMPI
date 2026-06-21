@@ -46,7 +46,7 @@ KNOWN PAIR DESIGN:
 import pytest
 import pandas as pd
 
-from src.features.blocking import run_batch_blocking
+from src.preprocessing.blocking import run_batch_blocking
 
 # ── Column name constants ─────────────────────────────────────────────────
 COL_PATID    = "PATID"

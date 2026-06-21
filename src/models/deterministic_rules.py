@@ -2,13 +2,13 @@
 Deterministic matching-rule engine for the AllianceChicago eMPI pipeline.
 
 This module consumes the candidate-pair output of the blocking stage
-(`src/features/blocking.py`) and applies the exact-match rules documented in
+(`src/preprocessing/blocking.py`) and applies the exact-match rules documented in
 `docs/Deterministic-Rules-Guide.md` to decide which candidate pairs are
 confirmed deterministic matches.
 
 PIPELINE POSITION:
-    raw → src/data/clean.py → cleaned dataset (PATID + *_clean fields)
-        → src/features/blocking.py → candidate pairs (PATID_A, PATID_B, ...)
+    raw → src/preprocessing/clean.py → cleaned dataset (PATID + *_clean fields)
+        → src/preprocessing/blocking.py → candidate pairs (PATID_A, PATID_B, ...)
         → THIS MODULE → confirmed matches (+ rule, confidence, clusters)
 
 INPUTS:
@@ -61,7 +61,7 @@ import jellyfish
 import numpy as np
 import pandas as pd
 
-from src.config.config import settings
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -163,11 +163,11 @@ RULES: tuple[MatchRule, ...] = (
 )
 
 
-# ── Phone-set parsing (kept in sync with src/features/blocking._parse_phone_set)
+# ── Phone-set parsing (kept in sync with src/preprocessing/blocking._parse_phone_set)
 def _parse_phone_set(value) -> frozenset[str]:
     """Parse the pipeline's serialized `Phones_set` into a frozenset of strings.
 
-    Mirrors the parser in `src/features/blocking.py` but is duplicated here so
+    Mirrors the parser in `src/preprocessing/blocking.py` but is duplicated here so
     this module stays dependency-light (no jellyfish/phonetics import).
     """
     if isinstance(value, (set, frozenset, list, tuple, np.ndarray)):

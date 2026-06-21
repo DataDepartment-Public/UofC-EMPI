@@ -20,7 +20,7 @@ WHY THIS MATTERS:
 import numpy as np
 import pandas as pd
 
-from src.features.blocking import (
+from src.preprocessing.blocking import (
     run_batch_blocking,
     _pairs_from_index,
 )

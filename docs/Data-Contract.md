@@ -138,6 +138,10 @@ columns the contract validates (what downstream depends on):
 | `AddressLine1_clean` | string | yes | rules (NAME_DOB_ADDRESS) |
 | `SexAtBirthDSC_clean` | string ∈ {MALE,FEMALE,OTHER} | yes | rules (NAME_DOB_SEX) |
 | `Phones_set` | list&lt;string&gt; (see serialization) | yes | blocking (B5), rules (phone agreement) |
+| `_dm_LastNM` | string (optional) | yes | blocking (B3), `fs_splink_enhanced_2` phonetic comparison |
+| `_dm_FirstNM` | string (optional) | yes | `fs_splink_enhanced_2` phonetic comparison |
+
+`_dm_LastNM` and `_dm_FirstNM` are **optional** in the pandera contract — cleaned parquets written before Phase E2-2 may omit them, in which case blocking recomputes them transparently via its fallback path.
 
 ### Other cleaned / derived columns (produced, not yet consumed downstream)
 

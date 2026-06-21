@@ -58,7 +58,6 @@ from pathlib import Path
 import jellyfish
 import pandas as pd
 import numpy as np
-import phonetics
 
 from src.config.config import settings
 
@@ -77,6 +76,7 @@ COL_PHONES       = "Phones_set"          # string-serialized set from pipeline
  
 # Derived column names (computed internally)
 _COL_DM_LN      = "_dm_LastNM"
+_COL_DM_FN      = "_dm_FirstNM"
 _COL_SX_LN      = "_sx_LastNM"
 _COL_SX_FN      = "_sx_FirstNM"
 _COL_DOB_STR    = "_dob_str"
@@ -125,17 +125,14 @@ def _filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:
 
 #-------Phonetic Encoding Functions----------------
 
-def _dm_primary(name: str) -> str | None:
-    """Double Metaphone primary code. Returns None on invalid input."""
-    if not isinstance(name, str) or name.strip() == "":
-        return None
-    try:
-        result = phonetics.dmetaphone(name)
-        return result[0] if result[0] else None
-    except Exception:
-        return None
- 
- 
+# DM is the authoritative cleaning-stage helper from src/data/transformations.py
+# as of Phase E2-2: cleaning emits `_dm_LastNM` and `_dm_FirstNM` into the
+# CleanedRecords contract, and blocking reads them from the cleaned frame.
+# Importing here keeps the encoding identical across stages and gives a
+# fallback path when the cleaned frame predates the contract change.
+from src.data.transformations import _dm_primary  # noqa: E402
+
+
 def _soundex(name: str) -> str | None:
     """Soundex code. Returns None on invalid input."""
     if not isinstance(name, str) or name.strip() == "":
@@ -198,9 +195,16 @@ def _compute_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
  
     # Name-derived
     out[_COL_FN_PRE3] = out[COL_FIRST_NM].str[:3]
-    out[_COL_DM_LN]   = out[COL_LAST_NM].apply(
-        lambda x: _dm_primary(x) if pd.notna(x) else None
-    )
+    # DM codes: cleaning persists `_dm_LastNM` / `_dm_FirstNM` as of Phase E2-2.
+    # Reuse them when present; recompute as a fallback for older cleaned parquets.
+    if _COL_DM_LN not in out.columns:
+        out[_COL_DM_LN] = out[COL_LAST_NM].apply(
+            lambda x: _dm_primary(x) if pd.notna(x) else None
+        )
+    if _COL_DM_FN not in out.columns:
+        out[_COL_DM_FN] = out[COL_FIRST_NM].apply(
+            lambda x: _dm_primary(x) if pd.notna(x) else None
+        )
     out[_COL_SX_LN]   = out[COL_LAST_NM].apply(
         lambda x: _soundex(x) if pd.notna(x) else None
     )

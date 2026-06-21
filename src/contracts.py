@@ -102,6 +102,12 @@ class CleanedRecords(pa.DataFrameModel):
     AddressLine1_clean: Series[str] = pa.Field(nullable=True)
     SexAtBirthDSC_clean: Series[str] = pa.Field(nullable=True, isin=list(SEX_VALUES))
     Phones_set: Series[object] = pa.Field(nullable=True, coerce=True)
+    # Double-Metaphone primary codes — emitted by cleaning (Phase E2-2) and
+    # consumed by both blocking (`src.features.blocking`) and Stage 4 FS
+    # phonetic comparisons (`fs_splink_enhanced_2`). Optional for backward
+    # compatibility with cleaned parquets written before E2-2.
+    _dm_LastNM: Optional[Series[str]] = pa.Field(nullable=True)
+    _dm_FirstNM: Optional[Series[str]] = pa.Field(nullable=True)
     valid_record: Series[bool] = pa.Field(nullable=False, coerce=True)
 
     class Config:

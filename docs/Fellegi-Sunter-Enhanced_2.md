@@ -109,6 +109,21 @@ Base provides:
 
 The functional baseline + enhanced modules accumulated ~1,000 lines each of Splink boilerplate (linker construction, prediction post-processing, threshold logic, projection helpers) that all three FS experiments share. The OO base lifts that shared mass out, leaving each `fs_splink_*` experiment as ~200 lines of project-specific differences (registry contents, EM rules, custom derived columns). Refactoring baseline + enhanced onto this base is a deferred follow-up.
 
+## Cleaning prerequisites (Phase E2-2)
+
+The phonetic-name comparisons (`LastNM_Phonetic`, `FirstNM_Phonetic`) need Double-Metaphone codes for every cleaned record. As of Phase E2-2, the cleaning stage emits them directly:
+
+| Column | Producer | Notes |
+|---|---|---|
+| `_dm_LastNM` | `src.data.transformations.transform_dataframe` | Double-Metaphone primary code of `LastNM_clean`. `None` for null/empty input. |
+| `_dm_FirstNM` | `src.data.transformations.transform_dataframe` | Double-Metaphone primary code of `FirstNM_clean`. `None` for null/empty input. |
+
+Both are **optional** in the `CleanedRecords` pandera contract so cleaned parquets written before E2-2 still validate. `src/features/blocking.py::_compute_derived_columns` checks for these columns on the input frame and only recomputes them when absent — the regression test `tests/regression/test_dm_codes_persisted.py` pins byte-identical blocking output between the two code paths.
+
+The authoritative `_dm_primary` implementation lives in `src/data/transformations.py`. Blocking imports it from there, so the encoding can never drift between stages.
+
+`fs_splink_enhanced_2` reads these columns directly off the cleaned parquet — no derivation needed inside the FS module. This is the cleanest division: cleaning owns derived columns; matching owns m/u estimation.
+
 ## Module layout
 
 *(Placeholder — fills in Phase E2-3.)*

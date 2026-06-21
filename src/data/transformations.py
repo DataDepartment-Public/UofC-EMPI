@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import phonetics
 from stdnum.us import ssn as _us_ssn
 from unidecode import unidecode
 
@@ -756,6 +757,24 @@ def clean_sex_at_birth(value) -> Optional[str]:
 # CROSS-FIELD DERIVATIONS
 # =============================================================================
 
+def _dm_primary(name) -> Optional[str]:
+    """Double-Metaphone primary code. Returns None on empty / non-string input.
+
+    Authoritative implementation: `src/features/blocking.py::_dm_primary` was
+    moved here in Phase E2-2 so the cleaning stage emits `_dm_LastNM` and
+    `_dm_FirstNM` into the `CleanedRecords` contract — Stage 4 matchers
+    (`fs_splink_enhanced_2`) read them directly off the cleaned parquet
+    without re-computing. Blocking imports this function from here.
+    """
+    if not isinstance(name, str) or name.strip() == "":
+        return None
+    try:
+        result = phonetics.dmetaphone(name)
+        return result[0] if result[0] else None
+    except Exception:
+        return None
+
+
 def derive_full_name_tokens(first_clean, middle_clean, last_clean) -> list:
     """Split each name field on whitespace and hyphens, union the tokens.
     Apostrophes are not split. Returns a sorted list for canonical serialization."""
@@ -965,6 +984,19 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             derive_full_name_compact(first, mid, last)
             for first, mid, last in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
         ]
+
+    # ---- Derived: Double-Metaphone phonetic codes (Phase E2-2) ----
+    # Emitted into the cleaned parquet so Stage 4 (FS) can read them directly
+    # rather than recomputing on every run. Blocking imports `_dm_primary`
+    # from here; both stages share the same encoding.
+    if 'LastNM_clean' in out.columns:
+        out['_dm_LastNM'] = out['LastNM_clean'].apply(
+            lambda x: _dm_primary(x) if pd.notna(x) else None
+        )
+    if 'FirstNM_clean' in out.columns:
+        out['_dm_FirstNM'] = out['FirstNM_clean'].apply(
+            lambda x: _dm_primary(x) if pd.notna(x) else None
+        )
 
     # ---- Derived: Phones_set ----
     phone_clean_cols = [

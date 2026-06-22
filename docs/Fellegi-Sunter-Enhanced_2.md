@@ -312,19 +312,74 @@ The default `FSModel.to_probabilistic_matches` projection omits `veto_reason`. A
 
 ## How to run
 
-*(Placeholder — fills in Phase E2-5.)*
+### Sandbox (any host)
 
 ```bash
-# Sandbox smoke (any host)
-python models/experiments/fs_splink_enhanced_2/run_synthetic_enhanced_2.py
+python -m models.experiments.fs_splink_enhanced_2.run_synthetic_enhanced_2
+```
 
-# Real cohort (VM)
-python models/experiments/fs_splink_enhanced_2/run_real_enhanced_2.py
+Loads `data/synthetic/synthetic_blocking_testing.csv` (records, deconstructed from the paired CSVs), `data/synthetic/synthetic_train_v3.csv` (40k labels), and `data/synthetic/synthetic_test_v3.csv` (10k labels). Runs with `include_address=False` (the records frame lacks `CityNM_clean` / `StateCD_clean`) and `u_max_pairs=1e4` (stays under Splink's single-CPU salting limit). Prints tier breakdown + confusion matrix; validates `ProbabilisticMatches` round-trip. No on-disk artifacts (sandbox).
+
+Used as the integration-test fixture (`tests/integration/test_fs_enhanced_2_sandbox.py`).
+
+### VM — production scoring (real cohort)
+
+```bash
+# Default: score the post-Stage-3 non_matches pool.
+python -m models.experiments.fs_splink_enhanced_2.run_real_enhanced_2
+```
+
+Inputs (auto-resolved to the highest-versioned file via `models.common.versioning.latest_versioned`):
+- `data/processed/MDM_Population_cleaned_v*_*.parquet` — records (real PHI)
+- `data/non_matches/non_matches_v*_*.parquet` — Stage-3 output (~169k pairs the rules did not confirm)
+- `data/synthetic/synthetic_train_v3.csv` — labels for supervised m-training
+
+Outputs:
+- `models/outputs/fs_splink_enhanced_2__<data-version>.parquet` — 5-col eval schema (head-to-head input for the validation notebook §11)
+- `data/matches_model_v2/fs_splink_enhanced_2_matches_model__<data-version>.parquet` — ProbabilisticMatches contract (validated, union-ready for Stage 5)
+- `models/artifacts/fs_splink_enhanced_2/diagnostics__<data-version>.json` — non-PHI counts + score quantiles
+
+`<data-version>` is auto-parsed from the input filename (e.g. `v4_2026_06_11`) so refreshes don't overwrite earlier runs.
+
+### VM — silver-labels validation (full candidate pool)
+
+```bash
+python -m models.experiments.fs_splink_enhanced_2.run_real_enhanced_2 \
+    --score-full-candidate-pool
+```
+
+Scores `src/features/outputs/blocking/candidate_pairs_v*_*.parquet` (the FULL pre-rules pool, ~205k pairs on the current cohort) instead of `non_matches`. Required because silver-labeled pairs (Stage-3 deterministic confirmations from `data/silver_labels/`) were *removed* from `non_matches` by Stage 3 — they need to be back in the scoring pool to be evaluable. Output filenames get a `_full_pool` suffix:
+- `models/outputs/fs_splink_enhanced_2__<v>_full_pool.parquet`
+- `data/matches_model_v2/fs_splink_enhanced_2_matches_model__<v>_full_pool.parquet`
+
+### Expected logs
+
+Aggregate-only — never PHI. Example trailing lines:
+
+```
+INFO Training FSEnhanced2 (u_max_pairs=1e+06, include_address=True)...
+INFO FSModel[fs_splink_enhanced_2]: linker built (N records, M candidate pairs)
+INFO SupervisedTraining: registering 16000 positive labels for m-training (columns: PATID_l, PATID_r)
+INFO FSModel[fs_splink_enhanced_2]: training complete
+INFO FSModel[fs_splink_enhanced_2]: scored M pairs
+INFO FSModel[fs_splink_enhanced_2]: classify {'no_match': ..., 'human_review': ..., 'auto_merge': ...}
+INFO Wrote N rows -> models/outputs/fs_splink_enhanced_2__<v>.parquet (eval_schema)
+INFO Wrote N rows -> data/matches_model_v2/fs_splink_enhanced_2_matches_model__<v>.parquet (ProbabilisticMatches)
+INFO Tier breakdown: {...}
+INFO Score distribution: min=...  p25=...  median=...  p75=...  max=...
 ```
 
 ## Troubleshooting
 
-*(Placeholder — fills in Phase E2-5.)*
+| Symptom | Cause | Fix |
+|---|---|---|
+| `RuntimeError: u-estimation failed because this host reports a single CPU and u_max_pairs=1e+06 (>1e4) triggers Splink's salted DuckDB sampling path...` | Single-CPU host. | The runner auto-retries with `u_max_pairs=1e4`; you'll see the retry log. To suppress entirely, pass `--u-max-pairs 1e4` explicitly. |
+| `FileNotFoundError: Cleaned index not found` (or non_matches / candidate_pairs) | Auto-resolution couldn't find a versioned file in the expected directory. | Confirm Stages 1 + 2 (+ 3) have been run. Pass the path explicitly via `--cleaned-index` / `--non-matches` / `--candidate-pairs`. |
+| `Labels CSV not found: data/synthetic/synthetic_train_v3.csv` | The synthetic training set isn't on this host. | `git pull` to fetch `data/synthetic/*.csv` (whitelisted in `.gitignore`); confirm both `synthetic_train_v3.csv` and `synthetic_test_v3.csv` are present. |
+| `Splink: m probability not trained for X — comparison level was never observed in the training data` | Some comparison level had 0 positive labels in `synthetic_train_v3.csv`. | Expected for `Sex_positive[MALE↔FEMALE]` (synthetic has 0 sex-swap positives by design) and a handful of rare-level / DOB-swap cases. The strong-negative weight still comes from the high u. To eliminate, expand the synthetic generator to cover those levels. |
+| `Splink: Weight inversion (m < u) on comparison X level Y` | m landed below u for that level — informational. | The level still scores correctly. Inspect the diagnostics JSON to see which comparisons + levels are affected; if many, the labels set may need broader coverage. |
+| `Splink: Invalid table names provided (only l. and r. are valid): cp.PATID_A, cp.PATID_B` | Splink's static settings validator doesn't know about the runtime-registered `candidate_pairs` table. | Benign warning — by design. The candidate-pairs blocking rule uses an EXISTS subquery DuckDB decorrelates at runtime. Unchanged since the baseline. |
+| `ProbabilisticMatches validation fails on n_blocks` | Scoring pool had `n_blocks` as float instead of int. | Pandera contract enforces `int ≥ 1`. Re-run blocking to refresh the candidate-pairs parquet, or coerce `n_blocks = n_blocks.astype("int64")` before passing to the runner. |
 
 ## Tests
 

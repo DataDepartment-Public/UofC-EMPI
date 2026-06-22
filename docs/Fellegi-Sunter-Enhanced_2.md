@@ -266,6 +266,8 @@ python scripts/sweep_enhanced_2_thresholds.py --mode real \
 
 ## Prediction & classification (Phase E2-3)
 
+> **⚠ Calibration depends on upstream vetoes** — see [Required upstream deterministic vetoes](#required-upstream-deterministic-vetoes-blocking-dependency) for the full diagnosis. Stage-4 scoring assumes pairs with anti-evidence patterns (SSN populated mismatch, M↔F sex mismatch, DOB year-gap, DOB+SSN4 mismatch, household contamination) have been filtered out by Stage 3. Until that veto work ships in `src/models/deterministic_rules.py`, real-cohort scoring is known miscalibrated (E2-5 VM run: 62% auto_merge rate vs. realistic expectation of ~3–6%). The sandbox and integration-test paths are unaffected because synthetic test pairs don't broadly trigger anti-evidence levels.
+
 Inherited from `FSModel`. Three phases:
 
 ### Prediction
@@ -410,9 +412,53 @@ INFO Score distribution: min=...  p25=...  median=...  p75=...  max=...
 
 *(Placeholder — fills in Phase E2-6.)*
 
+## Required upstream deterministic vetoes (blocking dependency)
+
+Phase E2-5 surfaced a structural calibration gap: **enhanced_2's supervised m-training cannot learn m values for anti-evidence levels** (levels that fire only on negatives). `splink.training.estimate_m_from_pairwise_labels` learns m from positive observations only — levels positives never fire fall back to Splink's Bayesian floor (~0.05). For anti-evidence levels where u is small (random pairs rarely fire them either), this produces an inverted weight: log2(0.05/0.001) = **+5.6 bits of POSITIVE evidence** when the level fires, exactly the opposite of the intent.
+
+On the 2026-06-21 VM run against the 169,180-pair `non_matches` pool, this produced:
+- 105,528 auto_merges (62% of the pool) — uncalibrated
+- score median 0.998 — a bimodal peak at the top
+- evidence of household-contamination FPs scoring high because `Household_discount[fires]` contributes +5.6 bits instead of -5.6 bits
+
+**This is an upstream-stage problem, not a Stage-4 problem.** The team's architectural decision (E2-1) was that veto logic belongs in the deterministic-rules layer (Stage 3), *before* candidates reach the FS scorer. Pairs with anti-evidence patterns should never appear in `data/non_matches/<run_id>.parquet` in the first place — the rules stage should route them to a separate `vetoed` artifact (or simply exclude them from `non_matches`).
+
+### The four vetoes that need to live upstream in `src/models/deterministic_rules.py`
+
+Carried forward from `models/experiments/fs_splink_enhanced/deterministic_vetoes.py` (the location they lived before E2-1 removed them from the FS scoring stage). Precedence is **first match wins**:
+
+| # | Veto name | Trigger | Rationale |
+|---|---|---|---|
+| 1 | `ssn_conflict` | Both `SSN_clean` populated; full 9-digit mismatch | An SSN is essentially unique per person; populated mismatch is a near-certain non-match. Real-data exceptions (identity theft, miskeyed SSN) are rare enough to accept the FP cost in adjudication. |
+| 2 | `dob_year_gap` | `BirthDT_clean_l` and `BirthDT_clean_r` both populated; `\|year_A − year_B\| ≥ 5` | A 5+ year DOB gap rules out same-person under normal circumstances (rare exceptions: DOB transcription error in one record across 5+ digits, which is implausible). |
+| 3 | `gender_conflict` | Both `SexAtBirthDSC_clean` populated; **strict MALE ↔ FEMALE only** | MALE ↔ OTHER and FEMALE ↔ OTHER do **not** veto — the carve-out preserves records for trans/nonbinary patients where `OTHER` may be paired with `MALE` or `FEMALE` in a legitimate same-person merge. |
+| 4 | `dob_and_ssn4_conflict` | `BirthDT_clean` differs AND `last_4_SSN` mismatch (both populated) | DOB mismatch alone could be a typo; SSN-last-4 mismatch alone could be a typo; both together is a near-certain non-match. |
+
+Implementation suggestion: add `apply_vetoes(df_pairs, df_clean) -> df_pairs` to `src/models/deterministic_rules.py` that annotates each pair with a `veto_reason: str | None` column. Vetoed pairs route to a separate `data/vetoed/<run_id>.parquet` artifact for adjudicator review and are excluded from `data/non_matches/<run_id>.parquet`. The FS Stage-4 scorer (enhanced or enhanced_2) then sees only pairs that survived both positive rules AND vetoes.
+
+### Optional fifth: household-pattern veto / quarantine
+
+The `Household_discount` comparison in enhanced_2 detects pairs that share `(Address OR Phones)` but disagree on `(FirstNM JW < 0.7 AND DOB differs)` — the family-same-household FP class. This pattern is **highly suggestive of non-match** but not certain (real records with messy data could legitimately match). Recommended treatment in the rules stage: route to a separate `data/household_review/<run_id>.parquet` artifact for adjudicator review rather than a hard veto. The FS scoring stage would not see these either.
+
+### Once vetoes ship upstream, what changes in enhanced_2?
+
+1. **`Household_discount`, `Sex_positive[M↔F]`, and the SSN 9-digit-conflict level can be dropped** from `ENHANCED_2_REGISTRY` — they would never fire because vetoed pairs are filtered out before FS sees them. Removing them simplifies the model and eliminates the m-can't-be-learned problem.
+2. **`Sex_positive` could be dropped entirely** (the M↔F level was the only point of it; the exact-match level is informationally weak when retained on its own).
+3. **Score calibration should snap back into the expected range** — synthetic-trained m on the surviving comparison vectors corresponds to real-data positive patterns; auto_merge counts on the real cohort should drop from 105k to single-digit thousands (estimate based on Stage 3 catching ~35k high-precision matches, plus another ~5–10k FS-detectable ambiguous matches).
+
+### Current status (until vetoes ship)
+
+The enhanced_2 scored artifacts (`models/outputs/fs_splink_enhanced_2__<v>.parquet` and `data/matches_model_v2/...`) produced by `run_real_enhanced_2.py` are **known miscalibrated**: they score the full `non_matches` pool including pairs with anti-evidence patterns the rules stage should have filtered. The 62% auto_merge rate is a direct symptom. **Do not promote enhanced_2 to the production pipeline (`src/pipeline.py`) until the upstream veto work ships** and a re-run produces a sensible tier distribution.
+
+For validation purposes during this interim period, the threshold sweep (`scripts/sweep_enhanced_2_thresholds.py`) against the 42 reviewer labels and silver labels (E2-6) can still surface useful precision/recall signal at the *very top* of the score distribution — where the miscalibration matters less because the matching evidence outweighs the anti-evidence inversion.
+
 ## Known limitations + what's next
 
-*(Placeholder — fills in Phase E2-6.)*
+1. **Upstream vetoes are a blocking dependency** (see section above). Without them, real-cohort scoring is miscalibrated. Sandbox + integration-test paths are unaffected because synthetic test pairs don't broadly trigger anti-evidence levels.
+2. **42 reviewer labels is a small calibration set.** Phase E2-6 threshold sweep against them may not have enough statistical power to detect small precision/recall differences. Add 30–50 more pairs at the new boundaries before promoting.
+3. **Synthetic positives may over-represent corruption.** m values for "All other" / mismatch levels are higher than real-data positives would justify (because synthetic positives are deliberately corrupted at high rates). The downstream effect is weaker negative weights on these levels in real scoring. Mitigation: silver labels (real-PATID positives, ~99% precision) can complement synthetic in a future m-training pass.
+4. **OO base is not yet adopted by baseline / enhanced.** Refactoring those onto `models/common/fs_base.py` is deferred to a separate workstream.
+5. **No Stage 5 clustering yet.** The `ProbabilisticMatches` artifact is union-ready for a future clustering step that combines deterministic + probabilistic edges.
 
 ## See also
 

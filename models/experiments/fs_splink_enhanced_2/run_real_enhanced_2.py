@@ -68,18 +68,86 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 # ── Paths + naming conventions ────────────────────────────────────────────────
+# Two naming conventions coexist in the repo (see CLAUDE.md "Architecture"):
+#   * Standalone CLIs           — `<stem>_v<N>_<YYYY_MM_DD>.parquet`
+#   * Pipeline orchestrator     — `<stem>_<run_id>.parquet`  (UTC timestamp)
+# The resolvers below try the standalone pattern via latest_versioned first,
+# and fall back to lex-sorted run-id glob when that fails.
 OUTPUTS_DIR = PROJECT_ROOT / "models" / "outputs"
 ARTIFACTS_DIR = PROJECT_ROOT / "models" / "artifacts" / MODEL_NAME
 MATCHES_MODEL_V2_DIR = PROJECT_ROOT / "data" / "matches_model_v2"
 
 CLEANED_DIR = PROJECT_ROOT / "data" / "processed"
-CLEANED_GLOB = "MDM_Population_cleaned_v*_*.parquet"
+CLEANED_GLOBS = (
+    "MDM_Population_cleaned_v*_*.parquet",  # standalone CLI
+    "cleaned_*Z.parquet",                    # pipeline orchestrator
+)
 
 NON_MATCHES_DIR = PROJECT_ROOT / "data" / "non_matches"
-NON_MATCHES_GLOB = "non_matches_v*_*.parquet"
+NON_MATCHES_GLOBS = (
+    "non_matches_v*_*.parquet",   # standalone CLI
+    "non_matches_*Z.parquet",     # pipeline orchestrator
+)
 
-CANDIDATE_PAIRS_DIR = PROJECT_ROOT / "src" / "features" / "outputs" / "blocking"
-CANDIDATE_PAIRS_GLOB = "candidate_pairs_v*_*.parquet"
+# Candidate pairs may live in either of two directories — `data/blocking/` is
+# the pipeline orchestrator + run_blocking.py default; `src/features/outputs/blocking/`
+# is the VM-notebook convention. Try data/blocking/ first.
+CANDIDATE_PAIRS_DIRS = (
+    PROJECT_ROOT / "data" / "blocking",
+    PROJECT_ROOT / "src" / "features" / "outputs" / "blocking",
+)
+CANDIDATE_PAIRS_GLOBS = (
+    "candidate_pairs_v*_*.parquet",   # standalone CLI
+    "candidate_pairs_*Z.parquet",     # pipeline orchestrator
+)
+
+
+_RUN_ID_RE = __import__("re").compile(r"(\d{8}T\d{6}Z)")
+
+
+def _derive_data_version(path: Path) -> str:
+    """Return a filename-safe version tag for `path`.
+    Tries the standalone `v<N>_<YYYY_MM_DD>` pattern first, then the pipeline
+    run-id `<YYYYMMDDTHHMMSSZ>` pattern. Falls back to the file stem."""
+    tag = version_tag_from_filename(path)
+    if tag != "unversioned":
+        return tag
+    m = _RUN_ID_RE.search(path.name)
+    if m:
+        return m.group(1)
+    return path.stem
+
+
+def _resolve_with_fallback(dirs, globs) -> Path:
+    """Try each (dir, glob) pair; return the highest-versioned standalone match
+    if any, else the lex-last run-id match if any, else FileNotFoundError listing
+    what was searched."""
+    if isinstance(dirs, Path):
+        dirs = (dirs,)
+    searched: list[str] = []
+    # First pass: prefer standalone versioned pattern (deterministic ordering).
+    for d in dirs:
+        searched.append(str(d))
+        if not d.is_dir():
+            continue
+        try:
+            return latest_versioned(d, globs[0])
+        except FileNotFoundError:
+            pass
+    # Second pass: pipeline orchestrator run-id glob; lex-sort picks the newest
+    # timestamp (run_ids sort lexicographically).
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for pattern in globs[1:]:
+            candidates = sorted(d.glob(pattern))
+            if candidates:
+                return candidates[-1]
+    raise FileNotFoundError(
+        f"No files matching {globs} in any of {searched}. "
+        "Confirm the upstream pipeline stage has been run, or pass the path "
+        "explicitly via --cleaned-index / --non-matches / --candidate-pairs."
+    )
 
 DEFAULT_LABELS = PROJECT_ROOT / "data" / "synthetic" / "synthetic_train_v3.csv"
 
@@ -141,7 +209,7 @@ def _resolve_scoring_pool(args: argparse.Namespace) -> Path:
     """Pick non_matches OR candidate_pairs based on --score-full-candidate-pool."""
     if args.score_full_candidate_pool:
         if args.candidate_pairs is None:
-            path = latest_versioned(CANDIDATE_PAIRS_DIR, CANDIDATE_PAIRS_GLOB)
+            path = _resolve_with_fallback(CANDIDATE_PAIRS_DIRS, CANDIDATE_PAIRS_GLOBS)
             logger.info("Auto-resolved --candidate-pairs -> %s", path)
         else:
             path = args.candidate_pairs
@@ -149,7 +217,7 @@ def _resolve_scoring_pool(args: argparse.Namespace) -> Path:
             raise FileNotFoundError(f"Candidate-pairs parquet not found: {path}")
         return path
     if args.non_matches is None:
-        path = latest_versioned(NON_MATCHES_DIR, NON_MATCHES_GLOB)
+        path = _resolve_with_fallback(NON_MATCHES_DIR, NON_MATCHES_GLOBS)
         logger.info("Auto-resolved --non-matches -> %s", path)
     else:
         path = args.non_matches
@@ -163,14 +231,14 @@ def main() -> None:
 
     # ── Resolve inputs ────────────────────────────────────────────────────────
     if args.cleaned_index is None:
-        args.cleaned_index = latest_versioned(CLEANED_DIR, CLEANED_GLOB)
+        args.cleaned_index = _resolve_with_fallback(CLEANED_DIR, CLEANED_GLOBS)
         logger.info("Auto-resolved --cleaned-index -> %s", args.cleaned_index)
     elif not args.cleaned_index.exists():
         raise FileNotFoundError(f"Cleaned index not found: {args.cleaned_index}")
 
     scoring_pool_path = _resolve_scoring_pool(args)
     if args.data_version is None:
-        args.data_version = version_tag_from_filename(scoring_pool_path)
+        args.data_version = _derive_data_version(scoring_pool_path)
         logger.info("Auto-resolved --data-version -> %s", args.data_version)
 
     if not args.labels.exists():

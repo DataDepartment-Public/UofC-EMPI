@@ -173,8 +173,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--candidate-pairs", type=Path, default=None,
         help=(
-            f"Candidate-pairs parquet (full pre-rules pool). Used only with "
-            f"--score-full-candidate-pool. Default: latest in {CANDIDATE_PAIRS_DIR}."
+            "Candidate-pairs parquet (full pre-rules pool). Used only with "
+            "--score-full-candidate-pool. Default: latest match in "
+            f"{', '.join(str(d) for d in CANDIDATE_PAIRS_DIRS)}."
         ),
     )
     p.add_argument(

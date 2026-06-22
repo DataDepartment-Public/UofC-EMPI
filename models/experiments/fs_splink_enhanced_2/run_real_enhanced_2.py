@@ -150,6 +150,9 @@ def _resolve_with_fallback(dirs, globs) -> Path:
     )
 
 DEFAULT_LABELS = PROJECT_ROOT / "data" / "synthetic" / "synthetic_train_v3.csv"
+DEFAULT_LABELS_RECORDS = (
+    PROJECT_ROOT / "data" / "synthetic" / "synthetic_blocking_testing.csv"
+)
 
 # Production default (multi-core VM). FSEnhanced2's underlying
 # _estimate_u_with_guard auto-raises a clear RuntimeError if this turns out to
@@ -194,6 +197,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--label-col", default="label",
         help="Binary label column in --labels (default: 'label'; values in {0, 1}).",
+    )
+    p.add_argument(
+        "--labels-records", type=Path, default=DEFAULT_LABELS_RECORDS,
+        help=(
+            "Records frame (CSV) whose PATIDs the --labels reference. Used to "
+            "build a separate auxiliary linker for m-training (split-training "
+            "pattern) when the production --cleaned-index does not contain the "
+            "labels' PATIDs. Pass --labels-records '' to disable split training "
+            "(single-linker mode; labels must resolve in --cleaned-index). "
+            f"Default: {DEFAULT_LABELS_RECORDS}."
+        ),
     )
     p.add_argument(
         "--data-version", default=None,
@@ -266,15 +280,49 @@ def main() -> None:
         len(labels_df), n_pos,
     )
 
+    # Optional auxiliary records frame for split-training (records whose PATIDs
+    # the labels reference). Pass --labels-records '' to disable.
+    labels_records_df: pd.DataFrame | None = None
+    if args.labels_records is not None and str(args.labels_records) != "":
+        if not args.labels_records.exists():
+            raise FileNotFoundError(
+                f"Labels-records frame not found: {args.labels_records}. "
+                "Pass --labels-records '' to disable split training."
+            )
+        logger.info(
+            "Loading labels-records frame (for split-training m-estimation) from %s",
+            args.labels_records,
+        )
+        labels_records_df = pd.read_csv(args.labels_records, dtype=str)
+        # Coerce columns the cleaning contract expects so prepare_model_input
+        # can run on this frame.
+        if "BirthDT_clean" in labels_records_df.columns:
+            labels_records_df["BirthDT_clean"] = pd.to_datetime(
+                labels_records_df["BirthDT_clean"], errors="coerce",
+            )
+        if "valid_record" not in labels_records_df.columns:
+            labels_records_df["valid_record"] = True
+        logger.info(
+            "Labels-records frame: %d rows. Split-training enabled.",
+            len(labels_records_df),
+        )
+    else:
+        logger.info(
+            "No --labels-records provided. Single-linker training; labels must "
+            "resolve in --cleaned-index PATIDs.",
+        )
+
     # ── Train + score ─────────────────────────────────────────────────────────
     logger.info(
-        "Training FSEnhanced2 (u_max_pairs=%.0e, include_address=True)...",
-        args.u_max_pairs,
+        "Training FSEnhanced2 (u_max_pairs=%.0e, include_address=True, "
+        "split_training=%s)...",
+        args.u_max_pairs, labels_records_df is not None,
     )
     try:
         scored, prob_matches, eval_schema = _train_and_score(
             df_clean, scoring_pool, labels_df,
             label_col=args.label_col, u_max_pairs=args.u_max_pairs,
+            labels_records_df=labels_records_df,
         )
     except RuntimeError as exc:
         # Single-CPU u-sampling salting issue. Should not occur on the VM,
@@ -283,6 +331,7 @@ def main() -> None:
         scored, prob_matches, eval_schema = _train_and_score(
             df_clean, scoring_pool, labels_df,
             label_col=args.label_col, u_max_pairs=1e4,
+            labels_records_df=labels_records_df,
         )
 
     # ── Validate + write ──────────────────────────────────────────────────────
@@ -347,6 +396,7 @@ def _train_and_score(
     labels_df: pd.DataFrame,
     label_col: str,
     u_max_pairs: float,
+    labels_records_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Run the full FSEnhanced2 pipeline. Returns (classified, prob_matches, eval_schema)."""
     model = FSEnhanced2(
@@ -354,6 +404,7 @@ def _train_and_score(
         label_col=label_col,
         include_address=True,
         u_max_pairs=u_max_pairs,
+        labels_records_df=labels_records_df,
     )
     df_model = model.prepare_model_input(df_clean)
     linker = model.build_linker(df_model, scoring_pool)

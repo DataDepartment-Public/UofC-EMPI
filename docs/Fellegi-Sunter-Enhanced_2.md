@@ -178,17 +178,39 @@ The synthetic sandbox runs with `include_address=False` (records frame lacks `Ci
 
 The `MALE↔FEMALE` finding is **expected**: a sex-mismatch true positive would be extremely rare in real records, so synthetic doesn't generate any. The model will still penalize MALE↔FEMALE pairs heavily because u is large (6,702 random-pair occurrences) and m is manually clamped low.
 
-## Supervised training procedure (Phase E2-3)
+## Supervised training procedure (Phase E2-3 + E2-5-fix3)
 
-Implemented in `models/common/fs_base.py::SupervisedTraining.train()`. Three steps in order:
+Implemented in `models/common/fs_base.py::SupervisedTraining.train()`. Two paths exist depending on whether the labels' PATIDs resolve in the production records frame.
 
-1. **Random u-estimation on the real cohort.** `linker.training.estimate_u_using_random_sampling(max_pairs=u_max_pairs, seed=seed)`. Random pairs from the production records — *not* synthetic — because synthetic negatives don't capture blocking-induced household co-occurrence in real data.
-2. **Filter labels to positives.** Splink's `estimate_m_from_pairwise_labels` treats every row in the labels table as a positive match (it ignores any score column). The labels frame is filtered to `label == 1` rows.
-3. **Rename to Splink's labels-table schema.** The labels table needs `<unique_id_column>_l` / `<unique_id_column>_r` columns — for our `PATID` unique-id setting that's `PATID_l` / `PATID_r`. The fs_base helper handles the rename from `PATID_A` / `PATID_B`. (Splink's docstring shows "unique_id_l" but that's placeholder text — the real names follow the configured `unique_id_column_name`. Verified against `splink==4.0.16` in `splink/internals/block_from_labels.py`.)
+### The PATID-resolution constraint (the bug E2-5-fix3 addresses)
+
+`splink.training.estimate_m_from_pairwise_labels` computes m by **looking up each labeled pair in the records table bound to the linker**, computing its comparison vector, and tallying frequencies per level. If labels reference PATIDs not in the records table, the inner-join produces zero rows and Splink silently falls back to **Bayesian floor m values** (typically `1/N` where N is small), giving a model that scores from u alone. The output looks plausible (bimodal distribution from u variance) but is uncalibrated.
+
+`SupervisedTraining` guards against this with a pre-flight check: if the labels' positive PATIDs do not resolve in the records frame the linker is bound to AND no `labels_records_df` is provided, it raises a clear `ValueError` before invoking Splink.
+
+### Path A — single-linker (sandbox / when labels' PATIDs ARE in `df_clean`)
+
+1. **Validate** that every PATID referenced by `label == 1` rows of `labels_df` exists in `df_clean`. Otherwise raise.
+2. **Filter labels to positives.** Splink ignores any score column; every registered row is treated as a positive.
+3. **Rename to Splink's schema.** Labels table needs `<unique_id_column>_l` / `_r` columns (for `PATID` that's `PATID_l` / `PATID_r`). The fs_base helper handles the `PATID_A`/`PATID_B` → `_l`/`_r` rename. (Splink's docstring says "unique_id_l" but the real names follow the configured `unique_id_column_name` — verified against `splink==4.0.16` in `splink/internals/block_from_labels.py`.)
 4. **Register + train.** `linker.table_management.register_table(positives, "synthetic_labels", overwrite=True)` then `linker.training.estimate_m_from_pairwise_labels("synthetic_labels")`.
-5. **Weight-inversion diagnostic.** `_warn_on_weight_inversions(linker)` logs any comparison level where m<u (sign-flipped) — typically a sign that a level had insufficient positive labels.
+5. **Random u-estimation on the live linker.** Same `linker.training.estimate_u_using_random_sampling(max_pairs=u_max_pairs, seed=seed)` as enhanced/baseline.
+6. **Weight-inversion diagnostic** logs levels where m<u (sign-flipped) — usually a sign that the level had insufficient positive labels.
 
-No EM session is run. No manual priors are applied. Splink computes m by looking up each labeled positive pair in the records table, computing the full comparison vector, and tallying frequencies per level — the canonical Fellegi-Sunter supervised estimator.
+### Path B — split-training (production: synthetic labels, real cohort)
+
+This is the **typical production case** — the synthetic training labels reference synthetic PATIDs (e.g. `S000098581`) which do not exist in the real cohort. `SupervisedTraining.__init__` accepts a `labels_records_df` parameter: the records frame whose PATIDs the labels DO reference (`data/synthetic/synthetic_blocking_testing.csv` for the standard synthetic-train-v3 label set).
+
+1. **Validate** that the labels' positive PATIDs resolve in `labels_records_df`.
+2. **Build an auxiliary "m-training" linker** bound to `labels_records_df` with the same settings as the production linker (registry, candidate-pairs blocking rule, retain flags). Splink requires the candidate-pairs table to exist for binding; an empty `pd.DataFrame` is registered since the m-training procedure never calls predict.
+3. **Train m on the auxiliary linker.** Same register-labels + `estimate_m_from_pairwise_labels` as Path A, but resolving against `labels_records_df`.
+4. **Estimate u on the live (production) linker.** u must reflect the real-cohort distribution — random sampling from synthetic would mis-calibrate the negative-class baseline.
+5. **Copy trained m values** from the auxiliary linker's `_settings_obj.comparisons` to the live linker's, level-by-level, via `_copy_m_probabilities` (writes `_m_probability` on each `ComparisonLevel` — same private-attribute pattern Splink itself uses internally and that `manual_priors.apply_manual_priors` uses in the enhanced module).
+6. **Weight-inversion diagnostic** runs on the live linker post-merge.
+
+The two-linker pattern is the standard FS recipe for "supervised m + cohort u" — m carries the positive-class distribution learned from labels, u carries the random-pair distribution learned from the production frame. Cross-pollination at step 5 unifies them.
+
+**Why not just train m on the real cohort directly?** Because we don't have real-data labels at scale. The synthetic generator produces 16,000 deliberately-engineered positives (with rich case_type coverage) — orders of magnitude more than the 42 reviewer labels. Split-training lets us use the rich synthetic signal for m while preserving the real-cohort signal for u.
 
 ## Threshold-tuning rationale (Phase E2-4)
 
@@ -333,6 +355,7 @@ Inputs (auto-resolved to the highest-versioned file via `models.common.versionin
 - `data/processed/MDM_Population_cleaned_v*_*.parquet` — records (real PHI)
 - `data/non_matches/non_matches_v*_*.parquet` — Stage-3 output (~169k pairs the rules did not confirm)
 - `data/synthetic/synthetic_train_v3.csv` — labels for supervised m-training
+- `data/synthetic/synthetic_blocking_testing.csv` — labels-records frame for split-training (m trains here; pass `--labels-records ''` to disable)
 
 Outputs:
 - `models/outputs/fs_splink_enhanced_2__<data-version>.parquet` — 5-col eval schema (head-to-head input for the validation notebook §11)
@@ -377,6 +400,8 @@ INFO Score distribution: min=...  p25=...  median=...  p75=...  max=...
 | `FileNotFoundError: No files matching ('non_matches_v*_*.parquet', 'non_matches_*Z.parquet')` (or cleaned / candidate_pairs equivalent) | Auto-resolution checks both naming conventions (standalone CLI `v<N>_<date>` and pipeline orchestrator `<run_id>`) and neither produced a match. | Confirm Stages 1 + 2 (+ 3) have been run on this host. The runner also looks in `data/blocking/` AND `src/features/outputs/blocking/` for candidate pairs. Pass `--cleaned-index` / `--non-matches` / `--candidate-pairs` to pin a specific file. |
 | `Labels CSV not found: data/synthetic/synthetic_train_v3.csv` | The synthetic training set isn't on this host. | `git pull` to fetch `data/synthetic/*.csv` (whitelisted in `.gitignore`); confirm both `synthetic_train_v3.csv` and `synthetic_test_v3.csv` are present. |
 | `Splink: m probability not trained for X — comparison level was never observed in the training data` | Some comparison level had 0 positive labels in `synthetic_train_v3.csv`. | Expected for `Sex_positive[MALE↔FEMALE]` (synthetic has 0 sex-swap positives by design) and a handful of rare-level / DOB-swap cases. The strong-negative weight still comes from the high u. To eliminate, expand the synthetic generator to cover those levels. |
+| `ValueError: SupervisedTraining: N/N labeled PATIDs are absent from the 'df_clean' records frame` | Single-linker training was attempted but the labels' PATIDs don't exist in the production records (the silent-broken case fixed in E2-5-fix3). | Pass `--labels-records data/synthetic/synthetic_blocking_testing.csv` so m-training runs on a separate auxiliary linker. The runner's default already does this; explicit `--labels-records ''` disables it. |
+| `Splink: m probability not trained for X` reported on **every** level of **every** comparison (run with no `--labels-records`) | Labels' PATIDs unresolvable in `df_clean` → m at floor values for the whole model. | Same fix as the row above. Always supply `--labels-records` when the labels and the production records come from disjoint PATID spaces. |
 | `Splink: Weight inversion (m < u) on comparison X level Y` | m landed below u for that level — informational. | The level still scores correctly. Inspect the diagnostics JSON to see which comparisons + levels are affected; if many, the labels set may need broader coverage. |
 | `Splink: Invalid table names provided (only l. and r. are valid): cp.PATID_A, cp.PATID_B` | Splink's static settings validator doesn't know about the runtime-registered `candidate_pairs` table. | Benign warning — by design. The candidate-pairs blocking rule uses an EXISTS subquery DuckDB decorrelates at runtime. Unchanged since the baseline. |
 | `ProbabilisticMatches validation fails on n_blocks` | Scoring pool had `n_blocks` as float instead of int. | Pandera contract enforces `int ≥ 1`. Re-run blocking to refresh the candidate-pairs parquet, or coerce `n_blocks = n_blocks.astype("int64")` before passing to the runner. |

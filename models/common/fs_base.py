@@ -129,12 +129,24 @@ class ComparisonRegistry:
 # ═══════════════════════════════════════════════════════════════════════════════
 class TrainingStrategy(ABC):
     """Strategy interface for m/u estimation. Implementations train the Splink
-    linker in place; they do not return a new linker."""
+    linker in place; they do not return a new linker.
+
+    `model` is the calling FSModel — needed by strategies that build auxiliary
+    linkers (e.g., split-training where m comes from a separate records frame
+    that holds the labels' PATIDs).
+    """
 
     @abstractmethod
-    def train(self, linker: Any, df_clean: pd.DataFrame | None = None) -> None:
+    def train(
+        self,
+        linker: Any,
+        df_clean: pd.DataFrame | None = None,
+        model: "FSModel | None" = None,
+    ) -> None:
         """Train `linker` in place. `df_clean` is provided for strategies that
-        need the underlying cleaned records (e.g., custom u-sampling)."""
+        need the underlying cleaned records (e.g., custom u-sampling).
+        `model` is provided for strategies that need to construct a secondary
+        linker via `model.build_settings()` / `model.prepare_model_input()`."""
 
 
 class EMTraining(TrainingStrategy):
@@ -159,7 +171,12 @@ class EMTraining(TrainingStrategy):
         self.u_max_pairs = u_max_pairs
         self.seed = seed
 
-    def train(self, linker: Any, df_clean: pd.DataFrame | None = None) -> None:
+    def train(
+        self,
+        linker: Any,
+        df_clean: pd.DataFrame | None = None,
+        model: "FSModel | None" = None,
+    ) -> None:
         _estimate_u_with_guard(linker, self.u_max_pairs, self.seed)
         for rule in self.em_blocking_rules:
             linker.training.estimate_parameters_using_expectation_maximisation(rule)
@@ -175,10 +192,27 @@ class SupervisedTraining(TrainingStrategy):
     """Supervised m-estimation from a labeled-pairs frame.
 
     `labels_df` is a pandas DataFrame whose rows are pre-paired records — one
-    row per pair, with the FS feature columns suffixed `_l` / `_r` and a
-    binary `label_col` indicating ground truth. u-estimation is still done
-    via random sampling on the real cohort (synthetic negatives don't reflect
-    blocking-induced household co-occurrence).
+    row per pair, with `PATID_A` / `PATID_B` columns and a `label_col` taking
+    {0, 1}. Splink's `estimate_m_from_pairwise_labels` treats every row in the
+    registered labels table as a POSITIVE match (it ignores score columns), so
+    we filter to `label == 1` before registering.
+
+    SPLIT-TRAINING (`labels_records_df` provided)
+    ---------------------------------------------
+    If the labels' PATIDs DO NOT exist in the production records frame
+    (`df_clean` passed to `train()`), Splink's m-training silently produces
+    floor-value m's because the labels-to-records JOIN drops every row. To
+    handle this, pass `labels_records_df` — a records frame whose PATIDs
+    the labels DO reference (e.g., `synthetic_blocking_testing.csv` for the
+    `synthetic_train_v3.csv` label set). The strategy then:
+
+      1. Builds a temporary "m-training" linker bound to `labels_records_df`.
+      2. Registers labels + calls `estimate_m_from_pairwise_labels` there.
+      3. Copies trained m_probability values level-by-level into the live linker.
+      4. Estimates u on the live linker (real cohort).
+
+    The two linkers share the same `build_settings()` output (registry +
+    candidate-pairs blocking rule), so comparison level structure is identical.
 
     See `data/synthetic/synthetic_train_v3.csv` for the expected schema and
     `data/synthetic/coverage_report.csv` for the per-comparison-level audit.
@@ -192,6 +226,7 @@ class SupervisedTraining(TrainingStrategy):
         seed: int = 42,
         labels_table_name: str = "synthetic_labels",
         unique_id_column: str = "PATID",
+        labels_records_df: pd.DataFrame | None = None,
     ):
         if label_col not in labels_df.columns:
             raise ValueError(
@@ -204,31 +239,124 @@ class SupervisedTraining(TrainingStrategy):
         self.seed = seed
         self.labels_table_name = labels_table_name
         self.unique_id_column = unique_id_column
+        self.labels_records_df = labels_records_df
 
-    def train(self, linker: Any, df_clean: pd.DataFrame | None = None) -> None:
-        _estimate_u_with_guard(linker, self.u_max_pairs, self.seed)
-        # Splink's estimate_m_from_pairwise_labels treats every row in the
-        # labels table as a POSITIVE match (it ignores any score column), so
-        # filter to label == 1 first. The labels table column names must
-        # match the linker's unique_id_column with `_l`/`_r` suffixes — the
-        # docstring's "unique_id_l" is placeholder text; the real names use
-        # the configured unique_id_column_name. Verified against splink==4.0.16
-        # (src: splink/internals/block_from_labels.py).
+    # ─── PATID validation ────────────────────────────────────────────────────
+    def _positives_only(self) -> pd.DataFrame:
         col_l = f"{self.unique_id_column}_l"
         col_r = f"{self.unique_id_column}_r"
-        positives = self.labels_df[self.labels_df[self.label_col].astype(int) == 1]
-        positives = positives.rename(columns={
-            "PATID_A": col_l, "PATID_B": col_r,
-        })[[col_l, col_r]]
-        logger.info(
-            "SupervisedTraining: registering %d positive labels for m-training "
-            "(columns: %s, %s)", len(positives), col_l, col_r,
+        pos = self.labels_df[self.labels_df[self.label_col].astype(int) == 1]
+        pos = pos.rename(columns={"PATID_A": col_l, "PATID_B": col_r})[[col_l, col_r]]
+        return pos
+
+    def _validate_labels_resolvable(
+        self, positives: pd.DataFrame, records_df: pd.DataFrame, records_label: str,
+    ) -> None:
+        """Fail loudly if labels reference PATIDs absent from `records_df`.
+
+        This is the guard that would have caught the E2-5 silent-broken-training
+        case (synthetic labels referencing PATIDs that aren't in the real cohort).
+        """
+        col_l = f"{self.unique_id_column}_l"
+        col_r = f"{self.unique_id_column}_r"
+        if self.unique_id_column not in records_df.columns:
+            raise ValueError(
+                f"SupervisedTraining: records frame {records_label!r} is missing "
+                f"the unique_id column {self.unique_id_column!r}."
+            )
+        known = set(records_df[self.unique_id_column].astype(str))
+        referenced = set(positives[col_l].astype(str)) | set(positives[col_r].astype(str))
+        missing = referenced - known
+        if not missing:
+            return
+        n_total = len(referenced)
+        n_missing = len(missing)
+        sample = sorted(missing)[:5]
+        raise ValueError(
+            f"SupervisedTraining: {n_missing:,}/{n_total:,} labeled PATIDs are "
+            f"absent from the {records_label!r} records frame "
+            f"(e.g. {sample}). Splink's estimate_m_from_pairwise_labels would "
+            f"silently produce floor-value m's. Fix by either: (a) passing a "
+            f"`labels_records_df` whose PATIDs the labels reference, or "
+            f"(b) using a labels source whose PATIDs ARE in your records frame."
         )
-        linker.table_management.register_table(
+
+    # ─── Training entry point ────────────────────────────────────────────────
+    def train(
+        self,
+        linker: Any,
+        df_clean: pd.DataFrame | None = None,
+        model: "FSModel | None" = None,
+    ) -> None:
+        positives = self._positives_only()
+
+        if self.labels_records_df is None:
+            # Single-linker path. Labels' PATIDs must be in df_clean (the live
+            # linker's records). Guard catches the silent-broken case.
+            if df_clean is not None:
+                self._validate_labels_resolvable(positives, df_clean, "df_clean")
+            self._train_m_on(linker, positives)
+            _estimate_u_with_guard(linker, self.u_max_pairs, self.seed)
+            _warn_on_weight_inversions(linker)
+            return
+
+        # Split-training path. Validate the labels resolve in labels_records_df.
+        if model is None:
+            raise RuntimeError(
+                "SupervisedTraining: labels_records_df was provided but no "
+                "`model` was passed to train(). FSModel.train() must thread "
+                "model=self through."
+            )
+        self._validate_labels_resolvable(
+            positives, self.labels_records_df, "labels_records_df",
+        )
+
+        logger.info(
+            "SupervisedTraining (split): training m on %d-record auxiliary "
+            "frame; u on %d-record production frame",
+            len(self.labels_records_df), len(df_clean) if df_clean is not None else -1,
+        )
+
+        # 1. Build the auxiliary m-training linker.
+        m_linker = self._build_m_training_linker(model)
+        # 2. Train m there (labels resolve).
+        self._train_m_on(m_linker, positives)
+        # 3. Estimate u on the live (real-cohort) linker.
+        _estimate_u_with_guard(linker, self.u_max_pairs, self.seed)
+        # 4. Transfer trained m values from the auxiliary linker to the live one.
+        _copy_m_probabilities(m_linker, linker)
+        _warn_on_weight_inversions(linker)
+
+    def _train_m_on(self, target_linker: Any, positives: pd.DataFrame) -> None:
+        logger.info(
+            "SupervisedTraining: registering %d positive labels for m-training",
+            len(positives),
+        )
+        target_linker.table_management.register_table(
             positives, self.labels_table_name, overwrite=True,
         )
-        linker.training.estimate_m_from_pairwise_labels(self.labels_table_name)
-        _warn_on_weight_inversions(linker)
+        target_linker.training.estimate_m_from_pairwise_labels(self.labels_table_name)
+
+    def _build_m_training_linker(self, model: "FSModel") -> Any:
+        """Construct an auxiliary Linker bound to labels_records_df.
+
+        Registers an empty candidate-pairs table so the candidate-pairs blocking
+        rule on the settings binds cleanly even though we never call predict()
+        on this linker.
+        """
+        from splink import DuckDBAPI, Linker  # local import to keep base lazy
+        m_records = model.prepare_model_input(self.labels_records_df)
+        db_api = DuckDBAPI()
+        # Mirror the schema of the production candidate-pairs frame (Splink only
+        # needs the column names to bind the blocking rule SQL).
+        empty_cp = pd.DataFrame({
+            "PATID_A": pd.Series([], dtype="object"),
+            "PATID_B": pd.Series([], dtype="object"),
+            "source_blocks": pd.Series([], dtype="object"),
+            "n_blocks": pd.Series([], dtype="int64"),
+        })
+        _register_candidate_pairs(db_api, empty_cp, model.candidate_pairs_table_name)
+        return Linker(m_records, model.build_settings(), db_api=db_api)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -323,7 +451,7 @@ class FSModel(ABC):
         return linker
 
     def train(self, linker: Any, df_clean: pd.DataFrame | None = None) -> Any:
-        self.training.train(linker, df_clean)
+        self.training.train(linker, df_clean, model=self)
         logger.info("FSModel[%s]: training complete", self.model_name)
         return linker
 
@@ -504,6 +632,54 @@ def _estimate_u_with_guard(linker: Any, max_pairs: float, seed: int) -> None:
                 "allocation, or pass u_max_pairs=1e4."
             ) from exc
         raise
+
+
+def _copy_m_probabilities(src_linker: Any, dst_linker: Any) -> None:
+    """Transfer trained m_probability values from `src_linker` to `dst_linker`.
+
+    Used by the split-training path in `SupervisedTraining`: m is estimated on
+    an auxiliary linker bound to the records frame the labels reference, then
+    those m values must be applied to the production linker bound to the real
+    cohort.
+
+    The two linkers must share the same comparison structure (same registry).
+    Levels with `m_probability is None` on the source (e.g., never observed
+    in labeled positives — Sex_positive M↔F by design) are left untouched on
+    the destination so they retain their default state.
+
+    Splink stores m on the private `_m_probability` attribute of each
+    `ComparisonLevel`; reading via the public property is safe, writing via
+    the private attribute is the pattern used by Splink's own internals and
+    by the existing `manual_priors.apply_manual_priors` helper in the
+    enhanced module.
+    """
+    src_comps = src_linker._settings_obj.comparisons
+    dst_comps = dst_linker._settings_obj.comparisons
+    if len(src_comps) != len(dst_comps):
+        raise RuntimeError(
+            f"_copy_m_probabilities: comparison count mismatch "
+            f"(src={len(src_comps)}, dst={len(dst_comps)}). The two linkers "
+            f"must be built from the same FSModel settings."
+        )
+    n_copied = 0
+    n_skipped = 0
+    for src_c, dst_c in zip(src_comps, dst_comps):
+        for src_l, dst_l in zip(src_c.comparison_levels, dst_c.comparison_levels):
+            if getattr(src_l, "is_null_level", False):
+                continue
+            try:
+                m = src_l.m_probability
+            except AttributeError:
+                m = None
+            if m is None:
+                n_skipped += 1
+                continue
+            dst_l._m_probability = m
+            n_copied += 1
+    logger.info(
+        "_copy_m_probabilities: copied m on %d levels (%d levels had no trained m "
+        "and were left at defaults).", n_copied, n_skipped,
+    )
 
 
 def _warn_on_weight_inversions(linker: Any) -> None:

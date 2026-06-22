@@ -28,11 +28,28 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SYNTH_DIR = _PROJECT_ROOT / "data" / "synthetic"
 
 
+def _deconstruct_paired(df: pd.DataFrame) -> pd.DataFrame:
+    left_cols = ["PATID_A"] + [c for c in df.columns if c.endswith("_l")]
+    right_cols = ["PATID_B"] + [c for c in df.columns if c.endswith("_r")]
+    left = df[left_cols].rename(columns=lambda c: c[:-2])
+    right = df[right_cols].rename(columns=lambda c: c[:-2])
+    out = pd.concat([left, right], ignore_index=True)
+    return out.drop_duplicates(subset=["PATID"]).reset_index(drop=True)
+
+
 def _load_records() -> pd.DataFrame:
-    df = pd.read_csv(SYNTH_DIR / "synthetic_blocking_testing.csv", dtype=str)
-    df["BirthDT_clean"] = pd.to_datetime(df["BirthDT_clean"], errors="coerce")
-    df["valid_record"] = True
-    return df
+    """Synthetic records — UNION of train + test PATIDs (Phase E2-5-fix3) so
+    the labels (`synthetic_train_v3.csv`) resolve when single-linker training
+    runs."""
+    train_pairs = pd.read_csv(SYNTH_DIR / "synthetic_train_v3.csv", dtype=str)
+    test_pairs = pd.read_csv(SYNTH_DIR / "synthetic_test_v3.csv", dtype=str)
+    records = pd.concat(
+        [_deconstruct_paired(train_pairs), _deconstruct_paired(test_pairs)],
+        ignore_index=True,
+    ).drop_duplicates(subset=["PATID"]).reset_index(drop=True)
+    records["BirthDT_clean"] = pd.to_datetime(records["BirthDT_clean"], errors="coerce")
+    records["valid_record"] = True
+    return records
 
 
 def _load_labels(name: str) -> pd.DataFrame:

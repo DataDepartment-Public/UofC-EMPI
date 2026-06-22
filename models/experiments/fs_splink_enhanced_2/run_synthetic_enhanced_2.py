@@ -42,13 +42,34 @@ logger = logging.getLogger("fs_enhanced_2.sandbox")
 SYNTH_DIR = _PROJECT_ROOT / "data" / "synthetic"
 
 
+def _deconstruct_paired(df: pd.DataFrame) -> pd.DataFrame:
+    """Turn a paired pairs CSV (columns suffixed `_l` / `_r`) into a records
+    frame. Mirrors `data/synthetic/format_synthetic_to_blocking_testing.ipynb`.
+    """
+    left_cols = ["PATID_A"] + [c for c in df.columns if c.endswith("_l")]
+    right_cols = ["PATID_B"] + [c for c in df.columns if c.endswith("_r")]
+    left = df[left_cols].rename(columns=lambda c: c[:-2])
+    right = df[right_cols].rename(columns=lambda c: c[:-2])
+    out = pd.concat([left, right], ignore_index=True)
+    return out.drop_duplicates(subset=["PATID"]).reset_index(drop=True)
+
+
 def _load_records() -> pd.DataFrame:
-    """Synthetic records frame (deconstructed from the paired CSVs)."""
-    df = pd.read_csv(SYNTH_DIR / "synthetic_blocking_testing.csv", dtype=str)
-    # Coerce typed columns the cleaning contract expects.
-    df["BirthDT_clean"] = pd.to_datetime(df["BirthDT_clean"], errors="coerce")
-    df["valid_record"] = True
-    return df
+    """Synthetic records frame containing PATIDs from BOTH train and test
+    paired CSVs — required so the synthetic_train_v3 labels' PATIDs resolve
+    against the records the linker is bound to (the alternative,
+    `synthetic_blocking_testing.csv`, only deconstructs the test split and
+    leaves train-only PATIDs unresolvable).
+    """
+    train_pairs = pd.read_csv(SYNTH_DIR / "synthetic_train_v3.csv", dtype=str)
+    test_pairs = pd.read_csv(SYNTH_DIR / "synthetic_test_v3.csv", dtype=str)
+    records = pd.concat(
+        [_deconstruct_paired(train_pairs), _deconstruct_paired(test_pairs)],
+        ignore_index=True,
+    ).drop_duplicates(subset=["PATID"]).reset_index(drop=True)
+    records["BirthDT_clean"] = pd.to_datetime(records["BirthDT_clean"], errors="coerce")
+    records["valid_record"] = True
+    return records
 
 
 def _load_labeled_pairs(name: str) -> pd.DataFrame:

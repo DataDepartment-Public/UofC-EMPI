@@ -93,7 +93,23 @@ class FSEnhanced2(FSModel):
         classification_config: ClassificationConfig | None = None,
         u_max_pairs: float = 1e6,
         seed: int = 42,
+        labels_records_df: pd.DataFrame | None = None,
     ):
+        """
+        Parameters
+        ----------
+        labels_records_df : optional
+            Records frame whose PATIDs the labels (PATID_A / PATID_B) reference.
+            When supplied, m-training runs on a separate "auxiliary" linker
+            bound to this frame and the trained m values are transferred to the
+            production linker for scoring. Required whenever the production
+            records frame (the `df_clean` passed to `run()`) does NOT contain
+            the labels' PATIDs — e.g., training on synthetic labels and scoring
+            on the real cohort. Pass
+            `pd.read_csv("data/synthetic/synthetic_blocking_testing.csv", ...)`
+            for the standard synthetic-train-v3 label set. See SupervisedTraining
+            docstring for the split-training rationale.
+        """
         self.include_address = include_address
         self.registry: ComparisonRegistry = build_registry(
             include_address=include_address
@@ -105,6 +121,7 @@ class FSEnhanced2(FSModel):
             u_max_pairs=u_max_pairs,
             seed=seed,
             unique_id_column=COL_PATID,
+            labels_records_df=labels_records_df,
         )
 
     # ── Subclass hooks ────────────────────────────────────────────────────────

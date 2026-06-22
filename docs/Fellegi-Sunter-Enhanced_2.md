@@ -190,6 +190,58 @@ Implemented in `models/common/fs_base.py::SupervisedTraining.train()`. Three ste
 
 No EM session is run. No manual priors are applied. Splink computes m by looking up each labeled positive pair in the records table, computing the full comparison vector, and tallying frequencies per level — the canonical Fellegi-Sunter supervised estimator.
 
+## Threshold-tuning rationale (Phase E2-4)
+
+`scripts/sweep_enhanced_2_thresholds.py` is the calibration tool. It accepts any scored-pairs frame + labels frame and sweeps the prescribed grid (`auto_merge ∈ {0.85, 0.90, 0.925, 0.95}` × `review_floor ∈ {0.35, 0.40, 0.50, 0.55}`), reporting precision and recall at each combination plus the Pareto-feasible points under the gates.
+
+**Synthetic sweep (10,000 test labels, run locally as the first-pass calibration):**
+
+| auto_merge | review_floor | precision_AM | recall_AM | recall_AM∪HR |
+|---|---|---|---|---|
+| 0.85 | (any) | 0.754 | 0.972 | 0.979 |
+| 0.90 | (any) | 0.777 | 0.969 | 0.979 |
+| 0.925 | (any) | 0.793 | 0.966 | 0.979 |
+| **0.95** | **0.40** | **0.822** | **0.963** | **0.979** |
+
+(Within each `auto_merge` row, `review_floor` changes the human_review tier size but not the AM precision or AM∪HR recall — the residual 21 positives in no_match score very low across all combinations.)
+
+**Why no synthetic combination meets the ≥95% precision gate:** the synthetic test set is intentionally adversarial — ~85% of its negatives are `NM-HARD-*` or `NM-HH-*` case types (deliberately sharing one or more identifier fields). Real blocked candidate pairs are far less adversarial, so the precision on the 42 reviewer-labeled real pairs is expected to be materially higher than the synthetic 82.2%.
+
+**Decision (within-grid Pareto-best on synthetic):** keep `auto_merge_threshold = 0.95` and `review_floor = 0.40` — matches the enhanced model's defaults. The synthetic sweep validates the current point as the best in-grid choice. The real-data sweep (post-E2-5, on the VM, using the 42 reviewer labels parsed from the validation notebook) will finalize the numbers; `ClassificationConfig` defaults are revisited then.
+
+To re-run the sweep on the VM after a real cohort run:
+```bash
+# 42 reviewer labels (gold) — final precision + recall calibration
+python scripts/sweep_enhanced_2_thresholds.py --mode real \
+  --scored models/outputs/fs_splink_enhanced_2__<version>.parquet \
+  --labels-csv /path/to/reviewer_labels_42.csv \
+  --output data/threshold_sweep_real.csv
+```
+
+### Silver-labels validation (VM-only)
+
+`data/silver_labels/` (gitignored, VM-only — labels reference real PATIDs from `MDM_Population.csv`) holds Stage-3 deterministic-rule confirmations as an all-positive held-out validation set (~99% precision per adjudicator). Silver labels are **not** part of the supervised m-training set — they remain held out specifically so we can measure how enhanced_2 ranks pairs the deterministic stage already caught.
+
+**Workflow caveat:** silver-labeled pairs are filtered out of `data/non_matches/<run_id>.parquet` by Stage 3 (that's where they came from). To score them with enhanced_2, the real runner (E2-5) must score against the **full candidate pool** (`data/blocking/candidate_pairs_<run_id>.parquet`), not the non_matches subset. The E2-5 runner exposes a `--score-full-candidate-pool` flag for exactly this use.
+
+```bash
+# 1. Score the full candidate pool for evaluation purposes (E2-5)
+python -m models.experiments.fs_splink_enhanced_2.run_real_enhanced_2 \
+  --score-full-candidate-pool
+
+# 2. Sweep against silver labels (recall-only signal — precision_AM is
+#    trivially 1.0 since silver has no negatives; the script warns).
+python scripts/sweep_enhanced_2_thresholds.py --mode real \
+  --scored models/outputs/fs_splink_enhanced_2__<version>_full_pool.parquet \
+  --labels-csv data/silver_labels/silver_labels.csv \
+  --output data/threshold_sweep_silver.csv
+```
+
+**Interpretation of silver-labels sweep:**
+- `recall_AM` tells us *what fraction of deterministic-rule confirmations enhanced_2 would also auto-merge*. A high number is corroborative — enhanced_2 catches what the rules catch. A low number reveals signals the rules use that enhanced_2 is missing (and is a candidate for an additional Stage-4 comparison).
+- `recall_AM∪HR` tells us *what fraction reaches at least the human-review tier*. Should approach 100% — if not, enhanced_2 is systematically under-scoring real positives.
+- `precision_AM` is uninformative here (no negatives) and the script flags it.
+
 ## Prediction & classification (Phase E2-3)
 
 Inherited from `FSModel`. Three phases:

@@ -37,7 +37,11 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
-from src.config.config import Settings, settings as default_settings  # noqa: E402
+from src.config import (  # noqa: E402
+    Settings,
+    configure_logging,
+    settings as default_settings,
+)
 from src.contracts import (  # noqa: E402
     ArtifactRef,
     CandidatePairs,
@@ -48,21 +52,16 @@ from src.contracts import (  # noqa: E402
     assert_patid_coverage,
     validate,
 )
-from src.data.clean import _load as _read_raw, write_cleaned  # noqa: E402
-from src.data.transformations import transform_dataframe  # noqa: E402
-from src.features.blocking import run_batch_blocking  # noqa: E402
+from src.preprocessing.clean import _load as _read_raw, write_cleaned  # noqa: E402
+from src.preprocessing.transformations import transform_dataframe  # noqa: E402
+from src.preprocessing.blocking import run_batch_blocking  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
     apply_rules,
     assign_clusters,
+    classify_non_matches,
     get_match_stats,
-    get_non_matches,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 logger = logging.getLogger("eMPI.pipeline")
 
 
@@ -112,6 +111,7 @@ def run_pipeline(
     run_id: str | None = None,
 ) -> RunManifest:
     """Run clean → block → rules for one input and return the run manifest."""
+    configure_logging(settings)
     run_id = run_id or _new_run_id()
     raw_input = Path(raw_input) if raw_input is not None else settings.raw_input
     settings.ensure_dirs()
@@ -154,17 +154,25 @@ def run_pipeline(
         matches = matches.copy()
         matches["cluster_id"] = matches["PATID_A"].map(clusters)
     validate(matches, Matches)
-    non_matches = get_non_matches(candidate_pairs, matches)
+    # Three-way split: review -> downstream; reject -> dropped (audited separately).
+    decided = classify_non_matches(candidate_pairs, matches, cleaned)
+    non_matches = (
+        decided[decided["decision"] == "review"][list(candidate_pairs.columns)]
+        .reset_index(drop=True)
+    )
+    rejects = decided[decided["decision"] == "reject"].reset_index(drop=True)
     validate(non_matches, NonMatches)
-    stats = get_match_stats(matches, n_records=len(cleaned))
+    stats = get_match_stats(matches, n_records=len(cleaned), decided=decided)
     logger.info(
-        "[3/3] RULES — %d matches, %d non-matches, %d clusters",
-        len(matches), len(non_matches), stats.get("n_clusters", 0),
+        "[3/3] RULES — %d matches, %d review, %d reject, %d clusters",
+        len(matches), len(non_matches), len(rejects), stats.get("n_clusters", 0),
     )
     matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
     non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
+    rejects_path = settings.rejects_dir / f"rejects_{run_id}.parquet"
+    rejects.to_parquet(rejects_path, index=False)
 
     # ── Stages 4–5 (model, clustering): add here, feeding the uniform Edges
     #    contract into a terminal clustering step over all confirmed edges. ──
@@ -180,6 +188,7 @@ def run_pipeline(
         candidate_pairs=_artifact_ref(pairs_path, candidate_pairs, root),
         matches=_artifact_ref(matches_path, matches, root),
         non_matches=_artifact_ref(non_matches_path, non_matches, root),
+        rejects=_artifact_ref(rejects_path, rejects, root),
         counts={
             "raw_rows": len(raw_df),
             "cleaned_rows": len(cleaned),
@@ -187,6 +196,7 @@ def run_pipeline(
             "candidate_pairs": len(candidate_pairs),
             "matches": len(matches),
             "non_matches": len(non_matches),
+            "rejects": len(rejects),
             "clusters": int(stats.get("n_clusters", 0)),
         },
     )
@@ -211,7 +221,12 @@ def main() -> None:
         "--run-id", type=str, default=None,
         help="Override the generated run id (default: UTC timestamp).",
     )
+    parser.add_argument(
+        "--log-level", type=str, default=None,
+        help="Override EMPI_LOG_LEVEL for this run (DEBUG/INFO/WARNING/...).",
+    )
     args = parser.parse_args()
+    configure_logging(level=args.log_level)
     run_pipeline(raw_input=args.input, run_id=args.run_id)
 
 

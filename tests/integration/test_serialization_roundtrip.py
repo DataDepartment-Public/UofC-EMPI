@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from src.contracts import CleanedRecords, validate
-from src.data.clean import write_cleaned
+from src.preprocessing.clean import write_cleaned
 from src.models.deterministic_rules import _parse_phone_set
 
 

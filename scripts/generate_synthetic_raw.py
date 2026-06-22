@@ -15,7 +15,7 @@ It also PLANTS true duplicate pairs that are detectable end-to-end. Each
 duplicate shares the *canonical* values a given deterministic rule needs, but
 rendered with different messy formatting — so the two records still clean to the
 same value and survive blocking + rule matching. Scenarios cover every rule:
-EXACT_SSN, EMAIL_EXACT, NAME_DOB_PHONE, NAME_DOB_EMAIL, NAME_DOB_ADDRESS,
+SSN_DOB, EMAIL_EXACT, NAME_DOB_PHONE, NAME_DOB_EMAIL, NAME_DOB_ADDRESS,
 NAME_DOB_SEX.
 
 USAGE:
@@ -283,7 +283,7 @@ def _junk_record(patid: str, rng: random.Random) -> dict:
 
 
 _SCENARIO_FORCE = {
-    "ssn": frozenset({"ssn"}),
+    "ssn_dob": frozenset({"ssn", "dob"}),
     "email": frozenset({"email"}),
     "name_dob_sex": frozenset({"first", "last", "dob", "sex"}),
     "name_dob_phone": frozenset({"first", "last", "dob", "phones"}),
@@ -295,7 +295,7 @@ _SCENARIO_FORCE = {
 
 def _scenario_ok(base: dict, scenario: str) -> bool:
     """True if `base` carries the canonical values this scenario needs."""
-    if scenario == "ssn":
+    if scenario == "ssn_dob":
         return base["ssn"] is not None
     if scenario == "email":
         return base["email"] is not None
@@ -313,8 +313,8 @@ def _plant_duplicate(base: dict, dup_patid: str, scenario: str,
     """Build a duplicate sharing the canonical fields `scenario` needs."""
     dup = _canonical_patient(rng)
     force = _SCENARIO_FORCE[scenario]
-    if scenario == "ssn":
-        dup["ssn"] = base["ssn"]
+    if scenario == "ssn_dob":
+        dup["ssn"], dup["dob"] = base["ssn"], base["dob"]
     elif scenario == "email":
         dup["email"] = base["email"]
     else:

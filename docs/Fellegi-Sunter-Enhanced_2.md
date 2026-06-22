@@ -126,11 +126,44 @@ The authoritative `_dm_primary` implementation lives in `src/data/transformation
 
 ## Module layout
 
-*(Placeholder — fills in Phase E2-3.)*
+```
+models/experiments/fs_splink_enhanced_2/
+├── __init__.py                       # re-exports FSEnhanced2, run_fs_enhanced_2
+├── comparisons.py                    # ComparisonSpec builders + ENHANCED_2_REGISTRY
+├── fs_enhanced_2.py                  # class FSEnhanced2(FSModel) + run_fs_enhanced_2
+├── run_synthetic_enhanced_2.py       # sandbox runner (used by integration test)
+└── (run_real_enhanced_2.py shipped in Phase E2-5)
+```
 
-## Comparison registry
+`comparisons.py` declares one `_build_*` function per Splink comparison; each returns the comparison dict directly. The registry is composed at import time via `build_registry(include_address: bool)` so the sandbox (without `CityNM_clean` / `StateCD_clean`) can drop Address + Household_discount cleanly.
 
-*(Placeholder — fills in Phase E2-3 with the audit-informed final registry. The registry below lists the **proposed** new comparisons plus their E2-0 audit verdicts.)*
+`fs_enhanced_2.py` contains a thin `FSEnhanced2(FSModel)` subclass. It sets `model_name`, owns the candidate-pairs blocking-rule SQL and shim columns, implements `prepare_model_input` (calls `_compute_derived_columns` from blocking and adds `Phones_array` + shim columns), and implements `build_settings` (uses Splink's `SettingsCreator` for the base settings dict, then replaces `comparisons` with the registry's `build_all()` output). All Splink-linker boilerplate (train/predict/classify/projections) is inherited from `FSModel`.
+
+## Comparison registry (final, Phase E2-3)
+
+The full registry (`ENHANCED_2_REGISTRY` in `comparisons.py`), in declaration order — this is also the order Splink lists in the trained settings, which the validation notebook §11 will display:
+
+| # | Name | New in E2-3? | Levels |
+|---|---|---|---|
+| 1 | `FirstNM` | carried over | null / JW≥0.92 / JW≥0.85 / JW<0.5 / else |
+| 2 | `LastNM` | new level | null / exact / JW≥0.92 / **full_name_compact exact** (NEW) / JW≥0.88 / JW<0.5 / else |
+| 3 | `BirthDT` | new level | null / exact / ±1 day / ±1 month / **month-day swap** (NEW) / else |
+| 4 | `SSN` | carried over | null / exact / last-4 match / 5-9 conflict / else |
+| 5 | `Email` | carried over | null / exact / local-part match (diff domain) / else |
+| 6 | `Phones` | carried over | array intersect ≥2 / ≥1 / else |
+| 7 | `ZIP` | carried over | null / exact / 3-prefix / else |
+| 8 | `MiddleNM` | **NEW** | null / exact / first-initial match / mismatch |
+| 9 | `Sex_positive` | **NEW** | null / exact / OTHER-either / M↔F mismatch / else |
+| 10 | `LastNM_Phonetic` | **NEW** | null / DM-equal / mismatch (reads `_dm_LastNM`) |
+| 11 | `FirstNM_Phonetic` | **NEW** | null / DM-equal / mismatch (reads `_dm_FirstNM`) |
+| 12 | `Household_discount` | carried over | null / household-indicator-without-identity-match / else (gated on `include_address`) |
+| 13 | `Address` | carried over | null / exact / same-city-state-zip / else (gated on `include_address`) |
+
+The synthetic sandbox runs with `include_address=False` (records frame lacks `CityNM_clean` / `StateCD_clean`) so comparisons 12 and 13 drop out there.
+
+**Audit-flagged levels** (Phase E2-0 surfaced two — neither dropped):
+- `Sex_positive[M↔F]` had 0 positives in the labeled set, so Splink reports m=None for that level after training. This is the *desired* behavior — combined with the high u (~6,700 random-pair occurrences in the audit), the level acts as strong anti-evidence in scoring without ever being trained as a positive case. No manual clamp needed.
+- `FirstNM_Phonetic[null]` had only 10 positives — minor; first names are rarely null in synthetic. m for that level may be noisy but the level rarely fires.
 
 | Comparison | New? | Levels | E2-0 audit |
 |---|---|---|---|
@@ -145,22 +178,61 @@ The authoritative `_dm_primary` implementation lives in `src/data/transformation
 
 The `MALE↔FEMALE` finding is **expected**: a sex-mismatch true positive would be extremely rare in real records, so synthetic doesn't generate any. The model will still penalize MALE↔FEMALE pairs heavily because u is large (6,702 random-pair occurrences) and m is manually clamped low.
 
-## Supervised training procedure
+## Supervised training procedure (Phase E2-3)
 
-*(Placeholder — fills in Phase E2-3.)*
+Implemented in `models/common/fs_base.py::SupervisedTraining.train()`. Three steps in order:
 
-Outline:
-1. Load `data/synthetic/synthetic_train_v3.csv` (40k pairs with `label`, `case_type`, `_l` / `_r` paired columns).
-2. Build the Splink linker with `ENHANCED_2_REGISTRY` comparisons.
-3. `estimate_u_using_random_sampling` on the real cleaned cohort (unchanged from baseline / enhanced).
-4. `estimate_m_from_pairwise_labels` on the synthetic pairs table.
-5. No EM session. No manual priors except the `MALE↔FEMALE` clamp noted above.
+1. **Random u-estimation on the real cohort.** `linker.training.estimate_u_using_random_sampling(max_pairs=u_max_pairs, seed=seed)`. Random pairs from the production records — *not* synthetic — because synthetic negatives don't capture blocking-induced household co-occurrence in real data.
+2. **Filter labels to positives.** Splink's `estimate_m_from_pairwise_labels` treats every row in the labels table as a positive match (it ignores any score column). The labels frame is filtered to `label == 1` rows.
+3. **Rename to Splink's labels-table schema.** The labels table needs `<unique_id_column>_l` / `<unique_id_column>_r` columns — for our `PATID` unique-id setting that's `PATID_l` / `PATID_r`. The fs_base helper handles the rename from `PATID_A` / `PATID_B`. (Splink's docstring shows "unique_id_l" but that's placeholder text — the real names follow the configured `unique_id_column_name`. Verified against `splink==4.0.16` in `splink/internals/block_from_labels.py`.)
+4. **Register + train.** `linker.table_management.register_table(positives, "synthetic_labels", overwrite=True)` then `linker.training.estimate_m_from_pairwise_labels("synthetic_labels")`.
+5. **Weight-inversion diagnostic.** `_warn_on_weight_inversions(linker)` logs any comparison level where m<u (sign-flipped) — typically a sign that a level had insufficient positive labels.
 
-## Prediction & classification
+No EM session is run. No manual priors are applied. Splink computes m by looking up each labeled positive pair in the records table, computing the full comparison vector, and tallying frequencies per level — the canonical Fellegi-Sunter supervised estimator.
 
-*(Placeholder — fills in Phase E2-3.)*
+## Prediction & classification (Phase E2-3)
 
-Same scoring algebra as baseline / enhanced. The `n_blocks` log-odds bump (+1 bit per block above 2, capped +4) is retained. The veto-override branch is **removed** — there are no vetoes in this module.
+Inherited from `FSModel`. Three phases:
+
+### Prediction
+`linker.inference.predict().as_pandas_dataframe()` returns the full comparison-vector frame. Post-processing in `FSModel.predict`:
+- Canonicalize PATID_A/B from Splink's `PATID_l` / `PATID_r` (`min`/`max` on the pair).
+- Merge `source_blocks` + `n_blocks` back on from the original candidate_pairs frame (Splink doesn't pass them through additional_columns_to_retain).
+
+### n_blocks log-odds bump
+Identical to enhanced: `+1 bit` per block above `n_blocks_bump_threshold=2`, capped at `n_blocks_bump_max_bits=4.0`. Bit-space math:
+```
+weight     = log2(p / (1 - p))
+weight'    = weight + min(max(n_blocks - threshold, 0), max_bits)
+p'         = 1 / (1 + 2^(-weight'))
+```
+Implemented as `FSModel._apply_n_blocks_bump` (pure pandas/numpy, no Splink).
+
+### Threshold classification
+```
+p' >= auto_merge_threshold       -> "auto_merge"
+review_floor <= p' < auto_merge  -> "human_review"
+p' < review_floor                -> "no_match"
+```
+Both bounds are **inclusive at the floor**. Defaults are `0.95 / 0.40` (enhanced's defaults; retuned in Phase E2-4).
+
+**Veto override is removed.** There is no `veto_reason` column on the classified frame and none in the `ProbabilisticMatches` projection. Vetoes will live in the upstream deterministic-rules stage going forward (separate workstream).
+
+### Sandbox smoke results (Phase E2-3)
+
+Run via `python -m models.experiments.fs_splink_enhanced_2.run_synthetic_enhanced_2` against the synthetic test split (10,000 pairs, 80/20 neg/pos):
+
+```
+                      auto_merge  human_review  no_match
+label=0 (8000)              416           488      7,096
+label=1 (2000)            1,925            32        43
+```
+
+- **True positives in auto_merge:** 96.3% (1,925/2,000)
+- **True positives in AM∪HR:** 97.9% (1,957/2,000) — recall lifted dramatically vs the enhanced model's `0/3 same → AM∪HR` on the 42-label set
+- **False positives in auto_merge:** 5.2% (416/8,000) — the threshold sweep in Phase E2-4 will tune this down
+
+The integration test `tests/integration/test_fs_enhanced_2_sandbox.py` pins the three E2-3 gates: (a) one `gamma_*` column per registered comparison; (b) household-contamination pairs (NM-HH-*) mean score below `review_floor=0.40` with ≥60% in `no_match` tier; (c) NM-COMMON-* bottom decile below 0.05.
 
 ## Output contracts
 

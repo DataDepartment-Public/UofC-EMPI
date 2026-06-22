@@ -191,6 +191,7 @@ class SupervisedTraining(TrainingStrategy):
         u_max_pairs: float = 1e6,
         seed: int = 42,
         labels_table_name: str = "synthetic_labels",
+        unique_id_column: str = "PATID",
     ):
         if label_col not in labels_df.columns:
             raise ValueError(
@@ -202,17 +203,31 @@ class SupervisedTraining(TrainingStrategy):
         self.u_max_pairs = u_max_pairs
         self.seed = seed
         self.labels_table_name = labels_table_name
+        self.unique_id_column = unique_id_column
 
     def train(self, linker: Any, df_clean: pd.DataFrame | None = None) -> None:
         _estimate_u_with_guard(linker, self.u_max_pairs, self.seed)
-        # Splink 4.x: register the labels table, then call
-        # estimate_m_from_pairwise_labels. Exact API binding is verified in E2-3
-        # against the installed splink==4.0.16; this base intentionally relies
-        # on the public `training` namespace only.
-        linker.table_management.register_labels_table(
-            self.labels_df, self.label_col
+        # Splink's estimate_m_from_pairwise_labels treats every row in the
+        # labels table as a POSITIVE match (it ignores any score column), so
+        # filter to label == 1 first. The labels table column names must
+        # match the linker's unique_id_column with `_l`/`_r` suffixes — the
+        # docstring's "unique_id_l" is placeholder text; the real names use
+        # the configured unique_id_column_name. Verified against splink==4.0.16
+        # (src: splink/internals/block_from_labels.py).
+        col_l = f"{self.unique_id_column}_l"
+        col_r = f"{self.unique_id_column}_r"
+        positives = self.labels_df[self.labels_df[self.label_col].astype(int) == 1]
+        positives = positives.rename(columns={
+            "PATID_A": col_l, "PATID_B": col_r,
+        })[[col_l, col_r]]
+        logger.info(
+            "SupervisedTraining: registering %d positive labels for m-training "
+            "(columns: %s, %s)", len(positives), col_l, col_r,
         )
-        linker.training.estimate_m_from_pairwise_labels(self.label_col)
+        linker.table_management.register_table(
+            positives, self.labels_table_name, overwrite=True,
+        )
+        linker.training.estimate_m_from_pairwise_labels(self.labels_table_name)
         _warn_on_weight_inversions(linker)
 
 

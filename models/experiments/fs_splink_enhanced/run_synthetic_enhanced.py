@@ -1,19 +1,17 @@
 """
 run_synthetic_enhanced.py — generate a standardized evaluation output for the
-FS Splink baseline, scored against the synthetic dataset.
+FS Splink enhanced model, scored against the synthetic dataset.
 
 Writes:
     models/outputs/fs_splink_enhanced__synthetic.parquet
 
 The output is the standardized 5-column evaluation frame (PATID_A, PATID_B,
 model_name, score, predicted_tier) — the same contract every model under
-models/experiments/ will write to models/outputs/, so they can later be
-pooled and compared by evaluate.py (not yet built).
+models/experiments/ writes to models/outputs/, so they can later be pooled and
+compared.
 
-This script is for the *synthetic* dataset only. For real-data runs against
-the AllianceChicago VM's cleaned index + candidate pairs, a separate script
-(or CLI flag) pointing at the real parquet paths from the implementation plan
-(Section 3.0) will be added once that's ready to run on the VM.
+This script is for the *synthetic* dataset only. For real-data runs against the
+AllianceChicago VM's cleaned index + candidate pairs use run_real_enhanced.py.
 
 Usage (from project root, with empi_env activated):
     python models/experiments/fs_splink_enhanced/run_synthetic_enhanced.py
@@ -32,7 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.experiments.fs_splink_enhanced import fellegi_sunter_enhanced as fs
+from models.experiments.fs_splink_enhanced.fs_enhanced import FSEnhanced, MODEL_NAME
 from models.common import synthetic_data as sd
 from src.preprocessing.blocking import run_batch_blocking, _compute_derived_columns
 
@@ -40,12 +38,11 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 OUTPUTS_DIR = PROJECT_ROOT / "models" / "outputs"
-ARTIFACTS_DIR = PROJECT_ROOT / "models" / "artifacts" / fs.MODEL_NAME
+ARTIFACTS_DIR = PROJECT_ROOT / "models" / "artifacts" / MODEL_NAME
 
 DATA_VERSION = "synthetic"
 
-# Production VM default is 1e6; this is only reduced if running on a
-# single-CPU machine (see NEW ISSUE A in fellegi_sunter_enhanced.py).
+# Production VM default; reduced automatically if single-CPU (see FSModel).
 U_MAX_PAIRS = 1e6
 
 
@@ -63,38 +60,24 @@ def main() -> None:
         "Training and scoring (%d candidate pairs, u_max_pairs=%.0e)...",
         len(candidate_pairs), U_MAX_PAIRS,
     )
+
+    # Synthetic fixture lacks address columns — use include_address=False.
+    model = FSEnhanced(include_address=False, u_max_pairs=U_MAX_PAIRS)
+
     try:
-        result, diagnostics = fs.run_fs_enhanced(
-            tmp_pairs_path,
-            df_clean,
-            u_max_pairs=U_MAX_PAIRS,
-            return_diagnostics=True,
-        )
+        result = model.run(candidate_pairs, df_clean)
     except RuntimeError as exc:
-        # Single-CPU u-sampling salting issue (NEW ISSUE A). Retry with the
-        # smaller u_max_pairs used in the test suite.
         logger.warning("Retrying with u_max_pairs=1e4 due to: %s", exc)
-        result, diagnostics = fs.run_fs_enhanced(
-            tmp_pairs_path,
-            df_clean,
-            u_max_pairs=1e4,
-            return_diagnostics=True,
-        )
+        model = FSEnhanced(include_address=False, u_max_pairs=1e4)
+        result = model.run(candidate_pairs, df_clean)
     finally:
         tmp_pairs_path.unlink(missing_ok=True)
 
-    # --- Write the standardized evaluation output ---------------------------
-    out_path = OUTPUTS_DIR / f"{fs.MODEL_NAME}__{DATA_VERSION}.parquet"
+    # --- Write the standardized evaluation output ----------------------------
+    out_path = OUTPUTS_DIR / f"{MODEL_NAME}__{DATA_VERSION}.parquet"
     result.to_parquet(out_path, index=False)
     logger.info("Wrote %d scored pairs -> %s", len(result), out_path)
     print(result.sort_values("score", ascending=False).to_string(index=False))
-
-    # --- Write Phase A diagnostics for this model's own calibration ---------
-    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    diag_path = ARTIFACTS_DIR / f"diagnostics__{DATA_VERSION}.json"
-    with open(diag_path, "w") as f:
-        json.dump(diagnostics, f, indent=2, default=str)
-    logger.info("Wrote diagnostics -> %s", diag_path)
 
     # --- Tier summary ---------------------------------------------------------
     counts = result["predicted_tier"].value_counts().to_dict()

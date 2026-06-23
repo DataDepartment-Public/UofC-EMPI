@@ -326,10 +326,10 @@ Compares the `match_probability` distribution from the baseline FS (`df_scored`,
 Reading guide: the enhanced model should concentrate mass below `REVIEW_FLOOR` (most non_matches are true negatives) and produce a clean spike near 1.0 for the surviving high-confidence merges. A flat band across `[0.40, 0.95]` would indicate uncalibrated middle scores.
 """),
     code("""# §10.4 — score distribution overlay (baseline vs enhanced).
-from models.experiments.fs_splink_enhanced import fellegi_sunter_enhanced as fs_enh
-
-_enh_floor = fs_enh.DEFAULT_REVIEW_FLOOR
-_enh_auto = fs_enh.DEFAULT_AUTO_MERGE_THRESHOLD
+from models.experiments.fs_splink_enhanced.fs_enhanced import FSEnhanced as _FSEnhanced
+_enh_cfg = _FSEnhanced().classification_config
+_enh_floor = _enh_cfg.review_floor
+_enh_auto = _enh_cfg.auto_merge_threshold
 
 fig, ax = plt.subplots(figsize=(11, 4.6))
 ax.axvspan(0.0, _enh_floor, color=TIER_COLORS["no_match"], alpha=0.18, lw=0)

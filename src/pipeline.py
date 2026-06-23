@@ -182,17 +182,15 @@ def run_pipeline(
     if not non_matches.empty:
         logger.info("[4/5] MODEL — scoring %d non-match pairs with FS enhanced...",
                     len(non_matches))
-        from models.experiments.fs_splink_enhanced.fellegi_sunter_enhanced import (
-            run_fs_enhanced,
-            to_probabilistic_matches,
-        )
+        from models.experiments.fs_splink_enhanced.fs_enhanced import FSEnhanced
         from src.contracts import ProbabilisticMatches
-        classified = run_fs_enhanced(
-            candidate_pairs_path=non_matches_path,
+        _model = FSEnhanced(include_address=True)
+        classified = _model.run(
+            candidate_pairs_df=pd.read_parquet(non_matches_path),
             df_clean=cleaned,
             full_output=True,
         )
-        prob_matches = to_probabilistic_matches(classified)
+        prob_matches = _model.to_probabilistic_matches(classified)
         validate(prob_matches, ProbabilisticMatches)
         matches_model_path = settings.matches_model_dir / f"matches_model_{run_id}.parquet"
         prob_matches.to_parquet(matches_model_path, index=False)

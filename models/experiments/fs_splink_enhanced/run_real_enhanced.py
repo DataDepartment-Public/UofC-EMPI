@@ -1,13 +1,12 @@
 """
-run_real_enhanced.py — run the FS Splink baseline against the real
+run_real_enhanced.py — run the FS Splink enhanced model against the real
 AllianceChicago cleaned patient index + candidate pairs.
 
 *** RUN THIS ON THE VM ONLY. NEVER in the sandbox / off the VM. ***
 
 This script never logs or prints individual PATID values, names, SSNs, DOBs,
 or any other identifier — only aggregate counts and the non-PHI diagnostics
-bundle (trained m/u parameters), consistent with fellegi_sunter_enhanced.py's
-HIPAA note.
+bundle (trained m/u parameters), consistent with the HIPAA note in CLAUDE.md.
 
 Inputs (auto-resolved to the highest-versioned parquet on disk via
 ``models.common.versioning.latest_versioned``; override with CLI flags):
@@ -52,25 +51,29 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pandas as pd
 
-from models.experiments.fs_splink_enhanced import fellegi_sunter_enhanced as fs
+from models.experiments.fs_splink_enhanced.fs_enhanced import (
+    FSEnhanced,
+    MODEL_NAME,
+)
 from models.common.versioning import latest_versioned, version_tag_from_filename
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 OUTPUTS_DIR = PROJECT_ROOT / "models" / "outputs"
-ARTIFACTS_DIR = PROJECT_ROOT / "models" / "artifacts" / fs.MODEL_NAME
+ARTIFACTS_DIR = PROJECT_ROOT / "models" / "artifacts" / MODEL_NAME
 
-# Auto-resolved at runtime (see resolve_inputs()) from these directories +
-# glob patterns. Override via CLI flags to pin a specific file.
+# Auto-resolved at runtime (see main()) from these directories + glob patterns.
 CLEANED_DIR = PROJECT_ROOT / "data" / "processed"
 CLEANED_GLOB = "MDM_Population_cleaned_v*_*.parquet"
 PAIRS_DIR = PROJECT_ROOT / "src" / "features" / "outputs" / "blocking"
 PAIRS_GLOB = "candidate_pairs_v*_*.parquet"
 
-# Production default (multi-core VM). The module's _estimate_u_with_guard
-# auto-falls-back to 1e4 with a clear error if this host turns out to be
-# single-CPU (NEW ISSUE A) — but on the VM this should not trigger.
+# E5 defaults (matched to FSEnhanced class-level ClassificationConfig).
+_DEFAULT_AUTO_MERGE_THRESHOLD = 0.95
+_DEFAULT_REVIEW_FLOOR = 0.40
+
+# Production default (multi-core VM).
 U_MAX_PAIRS = 1e6
 
 
@@ -102,12 +105,20 @@ def parse_args() -> argparse.Namespace:
         help="Splink u-sampling max_pairs (default 1e6).",
     )
     p.add_argument(
-        "--auto-merge-threshold", type=float, default=fs.DEFAULT_AUTO_MERGE_THRESHOLD,
-        help=f"Default {fs.DEFAULT_AUTO_MERGE_THRESHOLD} (plan Section 8 starting point).",
+        "--auto-merge-threshold", type=float, default=_DEFAULT_AUTO_MERGE_THRESHOLD,
+        help=f"Auto-merge threshold (default {_DEFAULT_AUTO_MERGE_THRESHOLD}).",
     )
     p.add_argument(
-        "--review-floor", type=float, default=fs.DEFAULT_REVIEW_FLOOR,
-        help=f"Default {fs.DEFAULT_REVIEW_FLOOR} (plan Section 8 starting point).",
+        "--review-floor", type=float, default=_DEFAULT_REVIEW_FLOOR,
+        help=f"Review floor (default {_DEFAULT_REVIEW_FLOOR}).",
+    )
+    p.add_argument(
+        "--include-address", action="store_true", default=True,
+        help="Include Address + Household_discount comparisons (default True).",
+    )
+    p.add_argument(
+        "--no-address", dest="include_address", action="store_false",
+        help="Exclude Address + Household_discount comparisons.",
     )
     return p.parse_args()
 
@@ -141,66 +152,62 @@ def main() -> None:
     df_clean = pd.read_parquet(args.cleaned_index)
     logger.info("Loaded %d records", len(df_clean))
 
-    logger.info(
-        "Running FS baseline (u_max_pairs=%.0e, auto_merge>=%.2f, review_floor>=%.2f)...",
-        args.u_max_pairs, args.auto_merge_threshold, args.review_floor,
-    )
-    try:
-        classified, diagnostics = fs.run_fs_enhanced(
-            args.candidate_pairs,
-            df_clean,
-            auto_merge_threshold=args.auto_merge_threshold,
-            review_floor=args.review_floor,
-            u_max_pairs=args.u_max_pairs,
-            full_output=True,
-            return_diagnostics=True,
-        )
-    except RuntimeError as exc:
-        # Single-CPU u-sampling salting issue (NEW ISSUE A). Should not occur
-        # on the VM, but handle it gracefully if it does.
-        logger.warning("Retrying with u_max_pairs=1e4 due to: %s", exc)
-        classified, diagnostics = fs.run_fs_enhanced(
-            args.candidate_pairs,
-            df_clean,
-            auto_merge_threshold=args.auto_merge_threshold,
-            review_floor=args.review_floor,
-            u_max_pairs=1e4,
-            full_output=True,
-            return_diagnostics=True,
-        )
+    candidate_pairs = pd.read_parquet(args.candidate_pairs)
+    logger.info("Loaded %d candidate pairs from %s", len(candidate_pairs), args.candidate_pairs)
 
-    # --- Dual-output projection from the rich classified frame --------------
+    logger.info(
+        "Running FSEnhanced (include_address=%s, u_max_pairs=%.0e, "
+        "auto_merge>=%.2f, review_floor>=%.2f)...",
+        args.include_address, args.u_max_pairs,
+        args.auto_merge_threshold, args.review_floor,
+    )
+
+    model = FSEnhanced(
+        include_address=args.include_address,
+        u_max_pairs=args.u_max_pairs,
+        auto_merge_threshold=args.auto_merge_threshold,
+        review_floor=args.review_floor,
+    )
+
+    try:
+        classified = model.run(candidate_pairs, df_clean, full_output=True)
+    except RuntimeError as exc:
+        logger.warning("Retrying with u_max_pairs=1e4 due to: %s", exc)
+        model = FSEnhanced(
+            include_address=args.include_address,
+            u_max_pairs=1e4,
+            auto_merge_threshold=args.auto_merge_threshold,
+            review_floor=args.review_floor,
+        )
+        classified = model.run(candidate_pairs, df_clean, full_output=True)
+
+    # --- Dual-output projection from the rich classified frame ---------------
     # 1) Legacy 5-col eval-schema parquet — head-to-head input for notebook §10.
     # 2) ProbabilisticMatches parquet — union-ready Stage 4 contract, validated
     #    against src.contracts.ProbabilisticMatches.
-    result = fs.to_evaluation_schema(classified)
-    prob_matches = fs.to_probabilistic_matches(classified)
+    result = model.to_evaluation_schema(classified)
+    prob_matches = model.to_probabilistic_matches(classified)
     from src.contracts import ProbabilisticMatches, validate as validate_contract
     prob_matches = validate_contract(prob_matches, ProbabilisticMatches)
 
-    # --- Write both artifacts ----------------------------------------------
+    # --- Write both artifacts ------------------------------------------------
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUTPUTS_DIR / f"{fs.MODEL_NAME}__{args.data_version}.parquet"
+    out_path = OUTPUTS_DIR / f"{MODEL_NAME}__{args.data_version}.parquet"
     result.to_parquet(out_path, index=False)
     logger.info("Wrote %d scored pairs -> %s (eval_schema)", len(result), out_path)
 
     from src.config import settings as _empi_settings
     _empi_settings.matches_model_dir.mkdir(parents=True, exist_ok=True)
     pm_path = _empi_settings.matches_model_dir / (
-        f"{fs.MODEL_NAME}_matches_model__{args.data_version}.parquet"
+        f"{MODEL_NAME}_matches_model__{args.data_version}.parquet"
     )
     prob_matches.to_parquet(pm_path, index=False)
-    logger.info("Wrote %d scored pairs -> %s (ProbabilisticMatches)",
-                len(prob_matches), pm_path)
+    logger.info(
+        "Wrote %d scored pairs -> %s (ProbabilisticMatches)",
+        len(prob_matches), pm_path,
+    )
 
-    # --- Write Phase A diagnostics (non-PHI: m/u parameters only) -----------
-    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    diag_path = ARTIFACTS_DIR / f"diagnostics__{args.data_version}.json"
-    with open(diag_path, "w") as f:
-        json.dump(diagnostics, f, indent=2, default=str)
-    logger.info("Wrote diagnostics -> %s", diag_path)
-
-    # --- Aggregate-only summary (no PHI / identifiers printed) --------------
+    # --- Aggregate-only summary (no PHI / identifiers printed) ---------------
     counts = result["predicted_tier"].value_counts().to_dict()
     logger.info("Tier breakdown: %s", counts)
     logger.info(

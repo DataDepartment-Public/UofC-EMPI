@@ -1,13 +1,9 @@
-from models.experiments.fs_splink_enhanced.fellegi_sunter_enhanced import (
-    DEFAULT_AUTO_MERGE_THRESHOLD,
-    DEFAULT_REVIEW_FLOOR,
+from models.experiments.fs_splink_enhanced.fs_enhanced import (
+    FSEnhanced,
     MODEL_NAME,
-    run_fs_enhanced,
 )
 
 __all__ = [
-    "DEFAULT_AUTO_MERGE_THRESHOLD",
-    "DEFAULT_REVIEW_FLOOR",
+    "FSEnhanced",
     "MODEL_NAME",
-    "run_fs_enhanced",
 ]

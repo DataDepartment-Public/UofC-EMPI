@@ -259,37 +259,75 @@ def test_apply_vetoes_skips_gender_conflict_when_sex_column_missing(caplog):
 
 
 # ============================================================================
-# Wire-in: classify_pairs must force tier=no_match for any veto_reason
+# Wire-in: FSEnhanced.classify() must force tier=no_match when veto fires
 # ============================================================================
-def test_classify_pairs_honors_veto_reason_over_high_score():
-    """A pair with score=0.99 AND a veto_reason set must land in no_match."""
-    from models.experiments.fs_splink_enhanced.fellegi_sunter_enhanced import (
-        classify_pairs,
-    )
-
-    df = pd.DataFrame(
+def _make_df_clean_no_conflict(patids: list[str]) -> pd.DataFrame:
+    """Minimal df_clean whose records share identical non-conflicting identifiers."""
+    return pd.DataFrame(
         {
-            "match_probability": [0.99, 0.99, 0.20],
-            VETO_REASON_COL: ["ssn_conflict", None, None],
+            PATID: patids,
+            SSN: [None] * len(patids),
+            SSN_LAST4: [None] * len(patids),
+            BIRTH_DT: [pd.Timestamp("1990-06-15")] * len(patids),
+            SEX: ["MALE"] * len(patids),
         }
     )
-    out = classify_pairs(df, auto_merge_threshold=0.90, review_floor=0.50)
-    assert out.loc[0, "classification_tier"] == "no_match"
-    # Sanity: the second high-score pair (no veto) still auto_merges, and
-    # the low-score pair still no_matches via the normal threshold path.
-    assert out.loc[1, "classification_tier"] == "auto_merge"
-    assert out.loc[2, "classification_tier"] == "no_match"
 
 
-def test_classify_pairs_works_without_veto_column():
-    """Backwards-compat: if the predictions frame has no veto_reason column,
-    classify_pairs must behave exactly like the baseline."""
-    from models.experiments.fs_splink_enhanced.fellegi_sunter_enhanced import (
-        classify_pairs,
+def test_fs_enhanced_classify_forces_no_match_when_veto_fires():
+    """FSEnhanced.classify() forces predicted_tier=no_match for a vetoed pair.
+
+    We build a synthetic 2-pair df_predictions and a df_clean whose records
+    trigger ssn_conflict on pair 0 (different SSNs) but not on pair 1 (no
+    SSN populated).  After FSEnhanced.classify() both pairs get their tier;
+    pair 0 must be no_match regardless of its probabilistic score.
+    """
+    from models.experiments.fs_splink_enhanced.fs_enhanced import FSEnhanced
+
+    df_clean = pd.DataFrame(
+        {
+            PATID:    ["P1", "P2", "P3", "P4"],
+            SSN:      ["111111111", "222222222", None, None],
+            SSN_LAST4: ["1111", "2222", None, None],
+            BIRTH_DT: [pd.Timestamp("1980-01-15")] * 4,
+            SEX:      ["MALE"] * 4,
+        }
+    )
+    # Pair 0: P1 vs P2 — SSN conflict → veto fires.  High score that would
+    # otherwise land in auto_merge without the veto override.
+    # Pair 1: P3 vs P4 — no conflict.  Score above auto_merge threshold.
+    df_predictions = pd.DataFrame(
+        {
+            "PATID_A": ["P1", "P3"],
+            "PATID_B": ["P2", "P4"],
+            "match_probability": [0.97, 0.97],
+        }
     )
 
-    df = pd.DataFrame({"match_probability": [0.99, 0.70, 0.20]})
-    out = classify_pairs(df, auto_merge_threshold=0.90, review_floor=0.50)
+    model = FSEnhanced()
+    model._df_clean = df_clean
+    out = model.classify(df_predictions)
+
+    assert out.loc[0, "classification_tier"] == "no_match", (
+        "Pair 0 (SSN conflict) must be forced to no_match"
+    )
+    assert out.loc[1, "classification_tier"] == "auto_merge", (
+        "Pair 1 (no conflict, score=0.97 > 0.95) must be auto_merge"
+    )
+
+
+def test_fs_enhanced_classify_no_veto_column_when_df_clean_none():
+    """With _df_clean=None the veto layer is skipped and classify() still works."""
+    from models.experiments.fs_splink_enhanced.fs_enhanced import FSEnhanced
+
+    model = FSEnhanced()
+    # _df_clean is None by default — no vetoes applied.
+    df = pd.DataFrame({
+        "match_probability": [0.97, 0.60, 0.10],
+        "PATID_A": ["A", "C", "E"],
+        "PATID_B": ["B", "D", "F"],
+    })
+    out = model.classify(df)
     assert out["classification_tier"].tolist() == [
         "auto_merge", "human_review", "no_match",
     ]

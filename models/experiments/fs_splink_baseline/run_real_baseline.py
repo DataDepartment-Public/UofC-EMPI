@@ -6,8 +6,7 @@ AllianceChicago cleaned patient index + candidate pairs.
 
 This script never logs or prints individual PATID values, names, SSNs, DOBs,
 or any other identifier — only aggregate counts and the non-PHI diagnostics
-bundle (trained m/u parameters), consistent with fellegi_sunter_baseline.py's
-HIPAA note.
+bundle (trained m/u parameters), consistent with HIPAA discipline.
 
 Inputs (auto-resolved to the highest-versioned parquet on disk via
 ``models.common.versioning.latest_versioned``; override with CLI flags):
@@ -43,6 +42,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 # Project root = three levels up from this file
 # (models/experiments/fs_splink_baseline/run_real_baseline.py).
@@ -52,14 +52,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pandas as pd
 
-from models.experiments.fs_splink_baseline import fellegi_sunter_baseline as fs
+from models.experiments.fs_splink_baseline.fs_baseline import FSBaseline, MODEL_NAME
 from models.common.versioning import latest_versioned, version_tag_from_filename
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 OUTPUTS_DIR = PROJECT_ROOT / "models" / "outputs"
-ARTIFACTS_DIR = PROJECT_ROOT / "models" / "artifacts" / fs.MODEL_NAME
+ARTIFACTS_DIR = PROJECT_ROOT / "models" / "artifacts" / MODEL_NAME
 
 # Auto-resolved at runtime (see resolve_inputs()) from these directories +
 # glob patterns. Override via CLI flags to pin a specific file.
@@ -70,8 +70,36 @@ PAIRS_GLOB = "candidate_pairs_v*_*.parquet"
 
 # Production default (multi-core VM). The module's _estimate_u_with_guard
 # auto-falls-back to 1e4 with a clear error if this host turns out to be
-# single-CPU (NEW ISSUE A) — but on the VM this should not trigger.
+# single-CPU — but on the VM this should not trigger.
 U_MAX_PAIRS = 1e6
+
+# Baseline thresholds (plan Section 8 starting points).
+DEFAULT_AUTO_MERGE_THRESHOLD = 0.90
+DEFAULT_REVIEW_FLOOR = 0.50
+
+
+def _get_model_diagnostics(linker: Any) -> dict:
+    """Return a non-PHI diagnostics bundle from the trained linker."""
+    from splink import Linker  # local import
+    diagnostics: dict = {}
+    try:
+        diagnostics["trained_settings"] = linker.misc.save_model_to_json()
+    except AttributeError as exc:
+        logger.warning("Splink save_model_to_json missing: %s", exc)
+        diagnostics["trained_settings_error"] = str(exc)
+    try:
+        diagnostics["parameter_records"] = linker._settings_obj._parameters_as_detailed_records
+    except AttributeError as exc:
+        logger.warning("Splink _parameters_as_detailed_records missing: %s", exc)
+        diagnostics["parameter_records_error"] = str(exc)
+    try:
+        diagnostics["per_session_estimates"] = linker._settings_obj._parameter_estimates_as_records
+    except AttributeError as exc:
+        logger.warning("Splink _parameter_estimates_as_records missing: %s", exc)
+    diagnostics["probability_two_random_records_match"] = getattr(
+        linker._settings_obj, "_probability_two_random_records_match", None
+    )
+    return diagnostics
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,12 +130,12 @@ def parse_args() -> argparse.Namespace:
         help="Splink u-sampling max_pairs (default 1e6).",
     )
     p.add_argument(
-        "--auto-merge-threshold", type=float, default=fs.DEFAULT_AUTO_MERGE_THRESHOLD,
-        help=f"Default {fs.DEFAULT_AUTO_MERGE_THRESHOLD} (plan Section 8 starting point).",
+        "--auto-merge-threshold", type=float, default=DEFAULT_AUTO_MERGE_THRESHOLD,
+        help=f"Default {DEFAULT_AUTO_MERGE_THRESHOLD} (plan Section 8 starting point).",
     )
     p.add_argument(
-        "--review-floor", type=float, default=fs.DEFAULT_REVIEW_FLOOR,
-        help=f"Default {fs.DEFAULT_REVIEW_FLOOR} (plan Section 8 starting point).",
+        "--review-floor", type=float, default=DEFAULT_REVIEW_FLOOR,
+        help=f"Default {DEFAULT_REVIEW_FLOOR} (plan Section 8 starting point).",
     )
     return p.parse_args()
 
@@ -141,35 +169,48 @@ def main() -> None:
     df_clean = pd.read_parquet(args.cleaned_index)
     logger.info("Loaded %d records", len(df_clean))
 
+    logger.info("Loading candidate pairs from %s", args.candidate_pairs)
+    candidate_pairs = pd.read_parquet(args.candidate_pairs)
+    logger.info("Loaded %d candidate pairs", len(candidate_pairs))
+
     logger.info(
         "Running FS baseline (u_max_pairs=%.0e, auto_merge>=%.2f, review_floor>=%.2f)...",
         args.u_max_pairs, args.auto_merge_threshold, args.review_floor,
     )
+
+    def _run_with_diagnostics(u_max_pairs: float):
+        """Train the model and return (result_df, diagnostics)."""
+        from models.common.fs_base import ClassificationConfig
+        model = FSBaseline(u_max_pairs=u_max_pairs)
+        # Override thresholds if non-default values passed via CLI.
+        if (
+            args.auto_merge_threshold != DEFAULT_AUTO_MERGE_THRESHOLD
+            or args.review_floor != DEFAULT_REVIEW_FLOOR
+        ):
+            model.classification_config = ClassificationConfig(
+                auto_merge_threshold=args.auto_merge_threshold,
+                review_floor=args.review_floor,
+            )
+        df_model = model.prepare_model_input(df_clean)
+        linker = model.build_linker(df_model, candidate_pairs)
+        model.train(linker, df_clean)
+        predictions = model.predict(linker, candidate_pairs)
+        classified = model.classify(predictions)
+        result = model.to_evaluation_schema(classified)
+        diagnostics = _get_model_diagnostics(linker)
+        return result, diagnostics
+
     try:
-        result, diagnostics = fs.run_fs_baseline(
-            args.candidate_pairs,
-            df_clean,
-            auto_merge_threshold=args.auto_merge_threshold,
-            review_floor=args.review_floor,
-            u_max_pairs=args.u_max_pairs,
-            return_diagnostics=True,
-        )
+        result, diagnostics = _run_with_diagnostics(args.u_max_pairs)
     except RuntimeError as exc:
-        # Single-CPU u-sampling salting issue (NEW ISSUE A). Should not occur
-        # on the VM, but handle it gracefully if it does.
+        # Single-CPU u-sampling salting issue. Should not occur on the VM,
+        # but handle it gracefully if it does.
         logger.warning("Retrying with u_max_pairs=1e4 due to: %s", exc)
-        result, diagnostics = fs.run_fs_baseline(
-            args.candidate_pairs,
-            df_clean,
-            auto_merge_threshold=args.auto_merge_threshold,
-            review_floor=args.review_floor,
-            u_max_pairs=1e4,
-            return_diagnostics=True,
-        )
+        result, diagnostics = _run_with_diagnostics(1e4)
 
     # --- Write the standardized evaluation output ---------------------------
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUTPUTS_DIR / f"{fs.MODEL_NAME}__{args.data_version}.parquet"
+    out_path = OUTPUTS_DIR / f"{MODEL_NAME}__{args.data_version}.parquet"
     result.to_parquet(out_path, index=False)
     logger.info("Wrote %d scored pairs -> %s", len(result), out_path)
 

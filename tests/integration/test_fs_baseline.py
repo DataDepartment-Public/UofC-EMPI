@@ -1,50 +1,48 @@
 """
-tests/integration/test_fellegi_sunter_baseline.py
+tests/integration/test_fs_baseline.py
 
-Full-pipeline integration tests for the Fellegi-Sunter Splink baseline
-(implementation plan Sections 5.2 and 7). These train a real Splink model on
-the synthetic dataset (via the shared `fs_classified` / `fs_candidate_pairs`
-fixtures in tests/conftest.py) and exercise the end-to-end orchestration.
+Full-pipeline integration tests for the FS Splink baseline (FSBaseline).
+These train a real Splink model on the synthetic dataset (via the shared
+`fs_classified` / `fs_candidate_pairs` fixtures in tests/conftest.py) and
+exercise the end-to-end orchestration.
 
 Covers:
-  - run_fs_baseline's default return obeys the standardized 5-column
+  - FSBaseline().run() default return obeys the standardized 5-column
     evaluation contract (PATID_A, PATID_B, model_name, score, predicted_tier)
   - clean separation of the 8 synthetic truth pairs vs. the 2 known
     non-matches
   - full_output=True still yields the rich Phase A calibration frame
   - the EXISTS candidate-pairs blocking rule scores EXACTLY the candidate
-    pairs (plan Section 5.2) — no fan-out, none dropped
+    pairs — no fan-out, none dropped
 
 These are slower than tests/unit (they train a Splink model, ~5-10s) but
-still synthetic-data-only and safe to run in CI. The trained-parameter
-sanity / m-u snapshot checks live in tests/regression instead.
+still synthetic-data-only and safe to run in CI.
 """
 
-from models.experiments.fs_splink_baseline import fellegi_sunter_baseline as fs
+from models.experiments.fs_splink_baseline.fs_baseline import FSBaseline
 from models.common import synthetic_data as sd
 
 
 # ===========================================================================
-# run_fs_baseline — standardized output contract
+# FSBaseline.run() — standardized output contract
 # ===========================================================================
-def test_run_fs_baseline_default_schema(fs_df_clean, fs_candidate_pairs_path):
+def test_run_default_schema(fs_df_clean, fs_candidate_pairs):
     """Default return must obey the standardized evaluation contract."""
-    # Single-CPU sandbox cap (see FS_U_MAX_PAIRS_SANDBOX in tests/conftest.py
-    # and NEW ISSUE A in fellegi_sunter_baseline.py); VM default is 1e6.
-    out = fs.run_fs_baseline(
-        fs_candidate_pairs_path, fs_df_clean, u_max_pairs=1e4
+    # Single-CPU sandbox cap; VM default is 1e6.
+    out = FSBaseline(u_max_pairs=1e4).run(
+        candidate_pairs_df=fs_candidate_pairs,
+        df_clean=fs_df_clean,
     )
-    assert list(out.columns) == fs.EVAL_SCHEMA_COLUMNS
-    assert (out["model_name"] == fs.MODEL_NAME).all()
+    assert list(out.columns) == ["PATID_A", "PATID_B", "model_name", "score", "predicted_tier"]
+    assert (out["model_name"] == "fs_splink_baseline").all()
     assert out["score"].between(0.0, 1.0).all()
-    assert out["predicted_tier"].isin(
-        {"auto_merge", "human_review", "no_match"}
-    ).all()
+    assert out["predicted_tier"].isin({"auto_merge", "human_review", "no_match"}).all()
 
 
-def test_run_fs_baseline_separates_truth_from_nonmatch(fs_classified):
+def test_run_separates_truth_from_nonmatch(fs_classified):
     """All 8 true-duplicate pairs > 0.5; both known non-matches < 0.5."""
-    eval_df = fs.to_evaluation_schema(fs_classified)
+    model = FSBaseline()
+    eval_df = model.to_evaluation_schema(fs_classified)
     scored = {
         (r.PATID_A, r.PATID_B): r.score for r in eval_df.itertuples(index=False)
     }
@@ -63,7 +61,7 @@ def test_run_fs_baseline_separates_truth_from_nonmatch(fs_classified):
         assert scored[pair] < 0.5, f"non-match {pair} scored high: {scored[pair]}"
 
 
-def test_run_fs_baseline_full_output(fs_classified):
+def test_run_full_output(fs_classified):
     """full_output=True yields the rich calibration frame (gamma_* + weight)."""
     gamma = [c for c in fs_classified.columns if c.startswith("gamma_")]
     # FirstNM, LastNM, DOB, SSN, Email, Phones, ZIP (7 comparisons).
@@ -80,7 +78,7 @@ def test_run_fs_baseline_full_output(fs_classified):
 
 
 # ===========================================================================
-# Blocking-rule validation (plan Section 5.2)
+# Blocking-rule validation
 # ===========================================================================
 def test_scored_pairs_match_candidate_pairs_exactly(fs_classified, fs_candidate_pairs):
     """

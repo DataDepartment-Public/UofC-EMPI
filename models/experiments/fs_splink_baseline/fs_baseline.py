@@ -138,5 +138,22 @@ class FSBaseline(FSModel):
         settings["comparisons"] = self.registry.build_all()
         return settings
 
+    def predict(
+        self,
+        linker,
+        candidate_pairs_df=None,
+    ) -> pd.DataFrame:
+        """Score pairs and drop the inert PATID_A / PATID_B shim passthrough
+        columns (PATID_A_l/r, PATID_B_l/r) that Splink emits because
+        retain_matching_columns=True binds on the shim column names from
+        the candidate-pairs blocking rule."""
+        df = super().predict(linker, candidate_pairs_df)
+        junk = [
+            f"{c}{suf}"
+            for c in _PAIR_SHIM_COLUMNS
+            for suf in ("_l", "_r")
+        ]
+        return df.drop(columns=[c for c in junk if c in df.columns])
+
 
 __all__ = ["FSBaseline", "MODEL_NAME"]

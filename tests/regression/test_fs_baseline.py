@@ -1,7 +1,7 @@
 """
-tests/regression/test_fellegi_sunter_baseline.py
+tests/regression/test_fs_baseline.py
 
-Regression / snapshot-style checks for the Fellegi-Sunter Splink baseline
+Regression / snapshot-style checks for the FS Splink baseline (FSBaseline).
 (implementation plan Section 10.3, the m/u weight-inversion guardrail from
 Section 6.4).
 
@@ -12,28 +12,31 @@ on a field that should be discriminating), these tests catch it even though
 the end-to-end classification (tested in tests/integration) might still
 happen to "pass" by coincidence.
 
-As real-data calibration progresses (plan Section 8), add snapshot-style
-assertions here for specific synthetic pairs' expected score ranges so drift
-is caught early.
+Training is done via FSBaseline lower-level methods so the tests can inspect
+the trained linker's parameter records directly. The synthetic fixture is
+used throughout (no PHI data available off-VM).
 """
 
-from models.experiments.fs_splink_baseline import fellegi_sunter_baseline as fs
+from models.experiments.fs_splink_baseline.fs_baseline import FSBaseline
 
 
-def test_trained_parameters_are_sane(fs_df_clean, fs_candidate_pairs_path):
+def test_trained_parameters_are_sane(fs_df_clean, fs_candidate_pairs):
     """
     After training, m/u parameters must be finite and the discriminating
     SSN-exact level must satisfy m >= u (an exact SSN match is more likely
     among true matches than among random pairs). A violation would indicate a
     weight inversion (plan Section 6.4).
     """
-    # Single-CPU sandbox cap (see FS_U_MAX_PAIRS_SANDBOX in tests/conftest.py
-    # and NEW ISSUE A in fellegi_sunter_baseline.py); VM default is 1e6.
-    _, diag = fs.run_fs_baseline(
-        fs_candidate_pairs_path, fs_df_clean,
-        u_max_pairs=1e4, return_diagnostics=True,
-    )
-    records = diag.get("parameter_records", [])
+    # Single-CPU sandbox cap; VM default is 1e6.
+    model = FSBaseline(u_max_pairs=1e4)
+    df_model = model.prepare_model_input(fs_df_clean)
+    linker = model.build_linker(df_model, fs_candidate_pairs)
+    model.train(linker, fs_df_clean)
+
+    try:
+        records = linker._settings_obj._parameters_as_detailed_records
+    except AttributeError:
+        records = []
     assert records, "diagnostics should expose per-level parameter records"
 
     # All m and u probabilities are finite and within [0, 1].
@@ -60,7 +63,7 @@ def test_trained_parameters_are_sane(fs_df_clean, fs_candidate_pairs_path):
 
 
 def test_no_weight_inversions_on_high_precision_levels(
-    fs_df_clean, fs_candidate_pairs_path,
+    fs_df_clean, fs_candidate_pairs,
 ):
     """
     Plan R1 guardrail: the exact-match level of every comparison that has one
@@ -70,11 +73,16 @@ def test_no_weight_inversions_on_high_precision_levels(
     future settings change re-introduces a non-discriminating exact level,
     this test catches it.
     """
-    _, diag = fs.run_fs_baseline(
-        fs_candidate_pairs_path, fs_df_clean,
-        u_max_pairs=1e4, return_diagnostics=True,
-    )
-    records = diag.get("parameter_records", []) or []
+    model = FSBaseline(u_max_pairs=1e4)
+    df_model = model.prepare_model_input(fs_df_clean)
+    linker = model.build_linker(df_model, fs_candidate_pairs)
+    model.train(linker, fs_df_clean)
+
+    try:
+        records = linker._settings_obj._parameters_as_detailed_records
+    except AttributeError:
+        records = []
+
     inversions: list[str] = []
     for rec in records:
         label = str(rec.get("label_for_charts", "")).lower()

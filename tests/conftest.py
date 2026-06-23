@@ -30,16 +30,13 @@ logging.disable(logging.CRITICAL)
 # These fixtures train a real Splink model on the synthetic dataset and are
 # shared across tests/unit, tests/integration, and tests/regression so that
 # the (slow) training step happens at most once per test session.
-#
-# Adjust the two import paths below if fellegi_sunter_baseline.py /
-# synthetic_data.py live elsewhere in your tree.
-from models.experiments.fs_splink_baseline import fellegi_sunter_baseline as fs
+from models.experiments.fs_splink_baseline.fs_baseline import FSBaseline
 from models.common import synthetic_data as sd
 from src.preprocessing.blocking import run_batch_blocking, _compute_derived_columns
 
 # Splink salts u-sampling by CPU count; on a single-CPU host that collapses to
-# 1 and raises an error (see NEW ISSUE A in fellegi_sunter_baseline.py).
-# Use a small u_max_pairs in tests; the production VM default is 1e6.
+# 1 and raises an error. Use a small u_max_pairs in tests; the production VM
+# default is 1e6.
 FS_U_MAX_PAIRS_SANDBOX = 1e4
 
 
@@ -65,13 +62,14 @@ def fs_candidate_pairs_path(fs_candidate_pairs, tmp_path_factory) -> str:
 
 
 @pytest.fixture(scope="session")
-def fs_classified(fs_df_clean, fs_candidate_pairs_path) -> pd.DataFrame:
+def fs_classified(fs_df_clean, fs_candidate_pairs) -> pd.DataFrame:
     """
     Full-output classified frame from one training run, shared across the
     integration and regression tests (training is the slow step, so we do it
     once per session).
     """
-    return fs.run_fs_baseline(
-        fs_candidate_pairs_path, fs_df_clean,
-        u_max_pairs=FS_U_MAX_PAIRS_SANDBOX, full_output=True,
+    return FSBaseline(u_max_pairs=FS_U_MAX_PAIRS_SANDBOX).run(
+        candidate_pairs_df=fs_candidate_pairs,
+        df_clean=fs_df_clean,
+        full_output=True,
     )

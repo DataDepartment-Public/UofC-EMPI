@@ -54,14 +54,6 @@ def fs_candidate_pairs(fs_df_clean) -> pd.DataFrame:
 
 
 @pytest.fixture(scope="session")
-def fs_candidate_pairs_path(fs_candidate_pairs, tmp_path_factory) -> str:
-    """Persist candidate pairs to parquet so run_fs_baseline can load them."""
-    p = tmp_path_factory.mktemp("fs_blocking") / "candidate_pairs.parquet"
-    fs_candidate_pairs.to_parquet(p)
-    return str(p)
-
-
-@pytest.fixture(scope="session")
 def fs_classified(fs_df_clean, fs_candidate_pairs) -> pd.DataFrame:
     """
     Full-output classified frame from one training run, shared across the

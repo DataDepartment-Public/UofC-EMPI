@@ -88,7 +88,13 @@ class FSBaseline(FSModel):
     candidate_pairs_table_name = CANDIDATE_PAIRS_TABLE
     unique_id_column = COL_PATID
 
-    def __init__(self, u_max_pairs: float = 1e6, seed: int = 42):
+    def __init__(
+        self,
+        u_max_pairs: float = 1e6,
+        seed: int = 42,
+        auto_merge_threshold: float | None = None,
+        review_floor: float | None = None,
+    ):
         self.training = EMTraining(
             em_blocking_rules=EM_BLOCKING_RULES,
             prior_rules=PRIOR_RULES,
@@ -96,6 +102,22 @@ class FSBaseline(FSModel):
             u_max_pairs=u_max_pairs,
             seed=seed,
         )
+        if auto_merge_threshold is not None or review_floor is not None:
+            base = self.__class__.classification_config
+            self.classification_config = ClassificationConfig(
+                auto_merge_threshold=(
+                    auto_merge_threshold
+                    if auto_merge_threshold is not None
+                    else base.auto_merge_threshold
+                ),
+                review_floor=(
+                    review_floor
+                    if review_floor is not None
+                    else base.review_floor
+                ),
+                n_blocks_bump_threshold=base.n_blocks_bump_threshold,
+                n_blocks_bump_max_bits=base.n_blocks_bump_max_bits,
+            )
 
     # ── Subclass hooks ────────────────────────────────────────────────────────
     def prepare_model_input(self, df_clean: pd.DataFrame) -> pd.DataFrame:

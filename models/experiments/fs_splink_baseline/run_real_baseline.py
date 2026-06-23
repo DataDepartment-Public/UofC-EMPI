@@ -180,17 +180,11 @@ def main() -> None:
 
     def _run_with_diagnostics(u_max_pairs: float):
         """Train the model and return (result_df, diagnostics)."""
-        from models.common.fs_base import ClassificationConfig
-        model = FSBaseline(u_max_pairs=u_max_pairs)
-        # Override thresholds if non-default values passed via CLI.
-        if (
-            args.auto_merge_threshold != DEFAULT_AUTO_MERGE_THRESHOLD
-            or args.review_floor != DEFAULT_REVIEW_FLOOR
-        ):
-            model.classification_config = ClassificationConfig(
-                auto_merge_threshold=args.auto_merge_threshold,
-                review_floor=args.review_floor,
-            )
+        model = FSBaseline(
+            u_max_pairs=u_max_pairs,
+            auto_merge_threshold=args.auto_merge_threshold,
+            review_floor=args.review_floor,
+        )
         df_model = model.prepare_model_input(df_clean)
         linker = model.build_linker(df_model, candidate_pairs)
         model.train(linker, df_clean)

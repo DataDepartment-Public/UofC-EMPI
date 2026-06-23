@@ -443,9 +443,17 @@ The pre-merge enhanced_2 artifacts (`models/outputs/fs_splink_enhanced_2__202606
 ## Known limitations + what's next
 
 1. **Anti-evidence over-scoring is mitigated, not eliminated.** Stage 4 sees only review-tier pairs from `classify_non_matches`, so the household-FP population that inflated raw scores in pre-merge runs is now mostly dropped before scoring. Residual inflation is possible on borderline review pairs where one anti-evidence level fires; revisit if real-cohort measurement shows auto_merge precision below threshold.
-2. **42 reviewer labels is a small calibration set.** Phase E2-6 threshold sweep against them may not have enough statistical power to detect small precision/recall differences. Add 30–50 more pairs at the new boundaries before promoting.
-3. **Synthetic positives may over-represent corruption.** m values for "All other" / mismatch levels are higher than real-data positives would justify (because synthetic positives are deliberately corrupted at high rates). The downstream effect is weaker negative weights on these levels in real scoring. Mitigation: silver labels (real-PATID positives, ~99% precision) can complement synthetic in a future m-training pass.
-4. **OO base is not yet adopted by baseline / enhanced.** Refactoring those onto `models/common/fs_base.py` is deferred to a separate workstream.
+
+2. **m/u weight inversions on anti-evidence levels (diagnostic, FS_Enhanced_3 input).** Inspection of the trained m/u parameters (surfaced via the diagnostics JSON and the validation notebook §27 m/u figure) revealed that three comparison levels have `m < u` — i.e. they produce **positive** match-weight when they fire, the opposite of their intent:
+
+   - **`Household_discount` (fired):** m ≈ 0.05 / u ≈ 0.45 → −3.2 bits as intended, but because supervised m-training never sees a positive example that fires `Household_discount` (the synthetic generator doesn't produce household-indicator true positives), m falls to Splink's Bayesian floor when the locked prior is absent. If the prior is not loaded correctly, the weight inverts to strongly positive.
+   - **`Sex_positive[M↔F]`:** 0 positive observations in synthetic training by design. m lands at the Bayesian floor (~0.05); u is ~0.08 (small, so `log2(0.05/0.08) ≈ −0.7 bits` — correctly negative but very weak). Investigate whether u is under-counted for this level on the real cohort.
+   - **`SSN[9-digit mismatch]`:** m floor (~0.01) / u small (~0.01–0.02) → weight near zero or slightly inverted. In practice the upstream `classify_non_matches` contradiction filter drops most SSN-conflicting pairs before they reach scoring, limiting the impact. For FS_Enhanced_3, consider whether this level adds useful signal or just noise after upstream filtering.
+
+   These weight inversions are the primary investigation items before promoting enhanced_2. They do not block the current evaluation phase but should be resolved (via expanded synthetic coverage or adjusted manual priors) before the model is adopted as the production Stage 4.
+
+3. **42 reviewer labels is a small calibration set.** Phase E2-6 threshold sweep against them may not have enough statistical power to detect small precision/recall differences. Add 30–50 more pairs at the new boundaries before promoting.
+4. **Synthetic positives may over-represent corruption.** m values for "All other" / mismatch levels are higher than real-data positives would justify (because synthetic positives are deliberately corrupted at high rates). The downstream effect is weaker negative weights on these levels in real scoring. Mitigation: silver labels (real-PATID positives, ~99% precision) can complement synthetic in a future m-training pass.
 5. **No Stage 5 clustering yet.** The `ProbabilisticMatches` artifact is union-ready for a future clustering step that combines deterministic + probabilistic edges.
 
 ## See also

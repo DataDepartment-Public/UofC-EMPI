@@ -141,7 +141,8 @@ The enhanced model **locks** m/u via Splink's `fix_m_probability` / `fix_u_proba
 
 | File | Purpose |
 |---|---|
-| `fellegi_sunter_enhanced.py` | The whole matcher: settings, linker, training, prediction, classification, diagnostics. |
+| `fs_enhanced.py` | `FSEnhanced(FSModel)` subclass: `prepare_model_input`, `build_settings` (calls `apply_manual_priors`), `classify` override (calls `super().classify()` then `apply_vetoes`), and the `run_fs_enhanced` public entry point. Splink boilerplate inherited from `models/common/fs_base.py::FSModel`. |
+| `comparisons.py` | One `_build_*` function per Splink comparison; `ENHANCED_REGISTRY` composed at import time via `ComparisonRegistry`. |
 | `deterministic_vetoes.py` | The 4-veto safety layer. `apply_vetoes(df_predictions, df_clean) -> df` annotates each pair with a `veto_reason: str \| None`. |
 | `manual_priors.py` | Locked m/u values for Address, Phones, name-mismatch levels, SSN mismatch, Household_discount. `apply_manual_priors(settings_dict)` mutates the Splink settings dict in place. |
 | `run_synthetic_enhanced.py` | Sandbox runner. Uses `models/common/synthetic_data.py` fixtures + `u_max_pairs=1e4`. Safe to run anywhere. The synthetic fixture lacks some address columns; the module degrades gracefully. |
@@ -149,7 +150,7 @@ The enhanced model **locks** m/u via Splink's `fix_m_probability` / `fix_u_proba
 | `requirements.txt` | Pinned Splink + DuckDB versions to match the trained-model artifacts. |
 | `__init__.py` | Re-exports `run_fs_enhanced`, `MODEL_NAME`, threshold constants, `to_probabilistic_matches`. |
 
-Public entry point: `run_fs_enhanced(candidate_pairs_path, df_clean, full_output=False, return_diagnostics=False, u_max_pairs=1e6)` at `fellegi_sunter_enhanced.py:963`.
+Public entry point: `run_fs_enhanced(candidate_pairs_path, df_clean, full_output=False, return_diagnostics=False, u_max_pairs=1e6)` in `fs_enhanced.py`.
 
 ---
 
@@ -601,9 +602,13 @@ The 26,920 auto_merge figure (~16% of scored non_matches) is **higher than expec
 
 ---
 
-## 18. What's next — Phase E3 refactor
+## 18. Object-oriented architecture
 
-`fellegi_sunter_enhanced.py` is replaced in Phase E3-3 by a thin `FSEnhanced(FSModel)` subclass; `deterministic_vetoes.py` and `manual_priors.py` stay as standalone helpers wired in via `classify()` and `train()` overrides. No base-class hook points are added. See `docs/superpowers/specs/2026-06-23-fs-refactor-design.md`.
+`FSEnhanced` is a thin subclass of `FSModel` in `models/common/fs_base.py` (shipped in Phase E3-3). The per-module entry surface lives in `fs_enhanced.py` (subclass + `run_fs_enhanced`) and `comparisons.py` (`ENHANCED_REGISTRY`).
+
+**Veto + manual-prior wiring:** `FSEnhanced.classify()` calls `super().classify()` (n_blocks bump → threshold tiers) and then passes the result through `apply_vetoes(df_classified, self._df_clean)`, where `self._df_clean` is stashed on `self` during `prepare_model_input()`. `apply_manual_priors(settings_dict)` is called at the end of `FSEnhanced.build_settings()`, locking the candidate-pool-aware m/u values before the settings dict is handed to the Linker. No base-class hook points were added; the overrides are fully self-contained in `FSEnhanced`. This preserves the original functional-module behavior exactly (see commit `f6e286e` for the design rationale).
+
+For the full OO design narrative (ABC contracts, `ComparisonRegistry`, `TrainingStrategy` hierarchy), see the "Object-oriented architecture" section in `docs/Fellegi-Sunter-Enhanced_2.md`.
 
 ---
 

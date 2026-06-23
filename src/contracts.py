@@ -182,7 +182,7 @@ class Matches(pa.DataFrameModel):
 class ProbabilisticMatches(pa.DataFrameModel):
     """Stage 4 output of the Fellegi-Sunter probabilistic matcher.
 
-    Produced by `models/experiments/fs_splink_enhanced/fellegi_sunter_enhanced.py`
+    Produced by `models/experiments/fs_splink_enhanced/fs_enhanced.py`
     (which populates `veto_reason`) and by
     `models/experiments/fs_splink_enhanced_2/` (which omits `veto_reason` —
     vetoes were removed from the FS scoring stage in Phase E2-1 and move to

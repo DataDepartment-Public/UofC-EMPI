@@ -1,10 +1,9 @@
-"""Cross-experiment FS utilities.
+"""Cross-experiment FS utilities — public surface of `models/common/`.
 
-Re-exports the shared object-oriented FS base introduced in Phase E2-1.
-The functional modules `versioning` and `synthetic_data` remain importable
-directly from their own files; nothing is re-exported from them here to keep
-the namespace narrow.  (`eval_schema` was deleted in Phase E3-0 — its
-constants are inlined in each runner that needs them.)
+Re-exports the shared OO base (`fs_base.py`) and the two versioning helpers
+(`versioning.py`). Synthetic-data fixtures stay importable from
+`models.common.synthetic_data` directly; `eval_schema` was deleted in
+Phase E3-0 — its constants are inlined in each runner that needs them.
 """
 
 from models.common.fs_base import (
@@ -16,6 +15,7 @@ from models.common.fs_base import (
     SupervisedTraining,
     TrainingStrategy,
 )
+from models.common.versioning import latest_versioned, version_tag_from_filename
 
 __all__ = [
     "ClassificationConfig",
@@ -25,4 +25,6 @@ __all__ = [
     "FSModel",
     "SupervisedTraining",
     "TrainingStrategy",
+    "latest_versioned",
+    "version_tag_from_filename",
 ]

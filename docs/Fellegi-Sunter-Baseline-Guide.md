@@ -89,13 +89,14 @@ EM cannot estimate `u` for the field used *as* the blocking rule (because all pa
 
 | File | Purpose |
 |---|---|
-| `fellegi_sunter_baseline.py` | The whole matcher: settings, linker, training, prediction, classification, diagnostics. |
+| `fs_baseline.py` | `FSBaseline(FSModel)` subclass: `prepare_model_input`, `build_settings`, `EMTraining` config, and the `run_fs_baseline` public entry point. Splink boilerplate (linker construction, train/predict/classify, projections) is inherited from `models/common/fs_base.py::FSModel`. |
+| `comparisons.py` | One `_build_*` function per Splink comparison; `BASELINE_REGISTRY` composed at import time via `ComparisonRegistry`. |
 | `run_synthetic_baseline.py` | Sandbox runner. Uses `models/common/synthetic_data.py` fixtures + a 1e4 `u_max_pairs` budget. Safe to run anywhere. |
 | `run_real_baseline.py` | **VM-only.** Reads the highest-versioned cleaned parquet + candidate-pairs parquet, runs with `u_max_pairs=1e6`, writes `models/outputs/fs_splink_baseline__<data-version>.parquet` + a diagnostics JSON. |
 | `requirements.txt` | Pinned Splink + DuckDB versions to match the trained-model artifacts. |
 | `__init__.py` | Re-exports `run_fs_baseline`, `MODEL_NAME`, `DEFAULT_AUTO_MERGE_THRESHOLD`, `DEFAULT_REVIEW_FLOOR`. |
 
-Public entry point: `run_fs_baseline(candidate_pairs_path, df_clean, ...) -> pd.DataFrame` (`fellegi_sunter_baseline.py:658`).
+Public entry point: `run_fs_baseline(candidate_pairs_path, df_clean, ...) -> pd.DataFrame` (`fs_baseline.py`).
 
 ---
 
@@ -381,9 +382,11 @@ These motivated the enhanced model. Repeated here for completeness; full discuss
 
 ---
 
-## 14. What's next — Phase E3 refactor
+## 14. Object-oriented architecture
 
-`fellegi_sunter_baseline.py` is replaced in Phase E3-1/E3-2 by a thin `FSBaseline(FSModel)` subclass on the shared `models/common/fs_base.py` scaffold. The baseline's head-to-head role, thresholds, and eval-schema output are preserved; only the internal shape changes. See `docs/superpowers/specs/2026-06-23-fs-refactor-design.md`.
+`FSBaseline` is a thin subclass of `FSModel` in `models/common/fs_base.py` (shipped in Phase E3-1). The per-module entry surface lives in `fs_baseline.py` (subclass + `run_fs_baseline`) and `comparisons.py` (`BASELINE_REGISTRY`). Splink boilerplate — linker construction, train/predict/classify, projections — is entirely inherited from the base.
+
+For the full OO design narrative (ABC contracts, `ComparisonRegistry`, `TrainingStrategy` hierarchy, split-training), see the "Object-oriented architecture" section in `docs/Fellegi-Sunter-Enhanced_2.md`.
 
 ---
 

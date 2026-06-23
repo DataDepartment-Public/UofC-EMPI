@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import pandas as pd
 from splink import SettingsCreator
 
@@ -275,6 +276,24 @@ class FSEnhanced(FSModel):
 
         return out
 
+    def run(
+        self,
+        candidate_pairs_df: pd.DataFrame,
+        df_clean: pd.DataFrame,
+        full_output: bool = False,
+    ) -> pd.DataFrame:
+        """Delegate to FSModel.run(), then clear the _df_clean stash.
+
+        The stash is needed only during the classify() call inside run().
+        Clearing it in a finally block prevents stale state from leaking if
+        a caller later invokes prepare_model_input() with one frame and
+        run() with a different one.
+        """
+        try:
+            return super().run(candidate_pairs_df, df_clean, full_output=full_output)
+        finally:
+            self._df_clean = None
+
     def to_probabilistic_matches(self, df_classified: pd.DataFrame) -> pd.DataFrame:
         """Project to ProbabilisticMatches contract including veto_reason.
 
@@ -307,12 +326,12 @@ class FSEnhanced(FSModel):
             "source_blocks": (
                 df_classified["source_blocks"].values
                 if "source_blocks" in df_classified.columns
-                else [None] * n
+                else [None] * n          # str column → None is correct
             ),
             "n_blocks": (
                 df_classified["n_blocks"].values
                 if "n_blocks" in df_classified.columns
-                else [None] * n
+                else [np.nan] * n        # int/float column → NaN, not None
             ),
         })
         return out[list(PROBABILISTIC_MATCHES_COLUMNS)]

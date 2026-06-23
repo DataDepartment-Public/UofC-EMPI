@@ -183,43 +183,43 @@ def test_to_probabilistic_matches_raises_on_missing_required():
 # Veto override wins over n_blocks bump
 # ============================================================================
 def test_veto_wins_over_n_blocks_bump():
-    """A pair with a veto_reason must land in no_match even if the n_blocks
-    bump would otherwise lift its score above auto_merge.
+    """Veto must force no_match even when the n_blocks bump would otherwise
+    push the pair into auto_merge.
 
-    Note: _df_clean is None here so the veto layer is skipped by classify().
-    We inject veto_reason manually (as if apply_vetoes already ran) to test
-    the veto-override logic in classify() directly.
+    Setup:
+    - PATID_A="A" has SSN "111111111"; PATID_B="B" has SSN "222222222".
+      These differ → ssn_conflict veto fires.
+    - The predictions row carries n_blocks=10, which gives +8 bits of bump
+      (capped at max_bits=4.0 → effectively +4 bits), pushing p=0.85 well
+      above the 0.95 auto_merge threshold without the veto.
+    - After classify() the pair must land in no_match, not auto_merge.
     """
-    from models.experiments.fs_splink_enhanced.deterministic_vetoes import VETO_REASON_COL
-    m = FSEnhanced()
-    # Inject veto_reason directly into the predictions frame.
-    df = pd.DataFrame({
-        "match_probability": [0.85],
-        "n_blocks": [10],  # large bump that would push p > 0.95
-        VETO_REASON_COL: ["ssn_conflict"],
-        "PATID_A": ["A"],
-        "PATID_B": ["B"],
-    })
-    # Manually call the base classify then apply the override logic to test it.
-    # Since _df_clean is None, apply_vetoes won't run; but the veto column is
-    # already present so the base class's tier mask from the n_blocks bump will
-    # set auto_merge — we can test the override by setting _df_clean to a tiny
-    # frame and calling classify() directly.
-    # Use a tiny df_clean that won't fire any real vetoes (no SSN populated),
-    # so the pre-injected veto_reason survives unmodified via apply_vetoes.
     from src.contracts import PATID, SSN, SSN_LAST4, BIRTH_DT, SEX
+
+    m = FSEnhanced()
+    # df_clean with a genuine SSN conflict between A and B.
     df_clean = pd.DataFrame({
         PATID: ["A", "B"],
-        SSN: [None, None],
-        SSN_LAST4: [None, None],
+        SSN: ["111111111", "222222222"],
+        SSN_LAST4: ["1111", "2222"],
         BIRTH_DT: [pd.Timestamp("1980-01-01"), pd.Timestamp("1980-01-01")],
         SEX: ["MALE", "MALE"],
     })
     m._df_clean = df_clean
+
+    # n_blocks=10 → +4-bit bump (capped) → p=0.85 crosses into auto_merge
+    # territory without the veto.  With the veto, must be forced to no_match.
+    df = pd.DataFrame({
+        "match_probability": [0.85],
+        "n_blocks": [10],
+        "PATID_A": ["A"],
+        "PATID_B": ["B"],
+    })
     out = m.classify(df)
-    # apply_vetoes will overwrite veto_reason (no real conflict -> None), then
-    # the veto-override branch won't fire. That's correct behaviour: the injected
-    # veto_reason was artificial; classify() calls apply_vetoes fresh.
-    # We re-test the actual veto-override path via the regression test instead.
-    # For THIS unit test, confirm only that classify() runs without error.
-    assert "classification_tier" in out.columns
+
+    assert out["classification_tier"].iloc[0] == "no_match", (
+        "SSN-conflict veto must override the n_blocks bump and force no_match"
+    )
+    assert out["veto_reason"].iloc[0] == "ssn_conflict", (
+        "veto_reason must identify the firing rule"
+    )

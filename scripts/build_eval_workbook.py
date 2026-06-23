@@ -39,7 +39,7 @@ _PRIORITY = [
 ]
 _META = [
     "PATID_A", "PATID_B", "match_rule", "confidence", "rules_fired",
-    "is_suspicious", "high_fanout_ssn", "n_blocks", "source_blocks", "cluster_id",
+    "is_suspicious", "n_blocks", "source_blocks", "cluster_id",
 ]
 
 
@@ -118,5 +118,5 @@ def main() -> None:
     print(f"\nWorkbook written to {output}")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     main()

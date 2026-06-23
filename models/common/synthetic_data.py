@@ -37,7 +37,7 @@ from __future__ import annotations
 import pandas as pd
 
 # Column names mirror blocking.py's COL_* constants (single source of truth).
-from src.features.blocking import (
+from src.preprocessing.blocking import (
     COL_PATID,
     COL_FIRST_NM,
     COL_LAST_NM,

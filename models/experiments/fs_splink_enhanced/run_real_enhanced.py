@@ -184,7 +184,7 @@ def main() -> None:
     result.to_parquet(out_path, index=False)
     logger.info("Wrote %d scored pairs -> %s (eval_schema)", len(result), out_path)
 
-    from src.config.config import settings as _empi_settings
+    from src.config import settings as _empi_settings
     _empi_settings.matches_model_dir.mkdir(parents=True, exist_ok=True)
     pm_path = _empi_settings.matches_model_dir / (
         f"{fs.MODEL_NAME}_matches_model__{args.data_version}.parquet"

@@ -34,7 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from models.experiments.fs_splink_enhanced import fellegi_sunter_enhanced as fs
 from models.common import synthetic_data as sd
-from src.features.blocking import run_batch_blocking, _compute_derived_columns
+from src.preprocessing.blocking import run_batch_blocking, _compute_derived_columns
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

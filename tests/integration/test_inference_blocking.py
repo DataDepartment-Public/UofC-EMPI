@@ -29,7 +29,7 @@ ARCHITECTURE NOTE:
 import pytest
 import pandas as pd
 
-from src.features.blocking import (
+from src.preprocessing.blocking import (
     build_blocking_index,
     run_inference_blocking,
 )

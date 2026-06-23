@@ -4,7 +4,7 @@ test layers (unit, integration, regression).
 
 PATH SETUP:
     Adds the project root (EMPI_latest/) to sys.path so that imports
-    like `from src.features.blocking import ...` resolve correctly
+    like `from src.preprocessing.blocking import ...` resolve correctly
     regardless of where pytest is invoked from.
 """
 import logging
@@ -35,7 +35,7 @@ logging.disable(logging.CRITICAL)
 # synthetic_data.py live elsewhere in your tree.
 from models.experiments.fs_splink_baseline import fellegi_sunter_baseline as fs
 from models.common import synthetic_data as sd
-from src.features.blocking import run_batch_blocking, _compute_derived_columns
+from src.preprocessing.blocking import run_batch_blocking, _compute_derived_columns
 
 # Splink salts u-sampling by CPU count; on a single-CPU host that collapses to
 # 1 and raises an error (see NEW ISSUE A in fellegi_sunter_baseline.py).

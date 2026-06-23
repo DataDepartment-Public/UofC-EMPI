@@ -59,7 +59,7 @@ import jellyfish
 import pandas as pd
 import numpy as np
 
-from src.config.config import settings
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def _filter_valid_records(df: pd.DataFrame) -> pd.DataFrame:
 # CleanedRecords contract, and blocking reads them from the cleaned frame.
 # Importing here keeps the encoding identical across stages and gives a
 # fallback path when the cleaned frame predates the contract change.
-from src.data.transformations import _dm_primary  # noqa: E402
+from src.preprocessing.transformations import _dm_primary  # noqa: E402
 
 
 def _soundex(name: str) -> str | None:

@@ -69,7 +69,7 @@ import splink.comparison_level_library as cll
 # Reuse blocking.py as the single source of truth for derived columns + names.
 # NOTE: path matches the conftest.py convention (PROJECT_ROOT on sys.path).
 # If blocking.py lives elsewhere in your tree, update this single import.
-from src.features.blocking import (
+from src.preprocessing.blocking import (
     _compute_derived_columns,
     COL_PATID,
     COL_FIRST_NM,

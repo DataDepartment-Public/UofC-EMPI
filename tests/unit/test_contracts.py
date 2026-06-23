@@ -62,9 +62,9 @@ def _matches(**override) -> pd.DataFrame:
     base = {
         "PATID_A": ["A"],
         "PATID_B": ["B"],
-        "match_rule": ["EXACT_SSN"],
+        "match_rule": ["SSN_DOB"],
         "confidence": [1.0],
-        "rules_fired": ["EXACT_SSN"],
+        "rules_fired": ["SSN_DOB"],
         "is_suspicious": [False],
         "high_fanout_ssn": [False],
         "cluster_id": [0],

@@ -35,7 +35,7 @@ import jellyfish
 import numpy as np
 import pandas as pd
 
-from src.config.config import settings
+from src.config import configure_logging, settings
 
 logger = logging.getLogger(__name__)
 
@@ -520,7 +520,10 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--export", type=Path, default=None,
                     help="Optional .csv path to write the adjudicated sample")
+    ap.add_argument("--log-level", type=str, default=None,
+                    help="Override EMPI_LOG_LEVEL (DEBUG/INFO/WARNING/...).")
     args = ap.parse_args()
+    configure_logging(level=args.log_level)
 
     root = Path(__file__).resolve().parents[2]
     cleaned, matches, non_matches = _load_run(args.run_id, root)

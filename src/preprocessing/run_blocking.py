@@ -4,20 +4,20 @@ cleaned dataset from Parquet, runs all 8 active blocking schemes, prints audit
 statistics, and saves the candidate pairs to a parquet.
 
 LOCATION:
-    src/features/run_blocking.py
+    src/preprocessing/run_blocking.py
 
 USAGE:
     From the project root (UofC-EMPI/):
-        python src/features/run_blocking.py
+        python src/preprocessing/run_blocking.py
 
-    From src/features/ directly:
+    From src/preprocessing/ directly:
         python run_blocking.py
 
     With a custom input path:
-        python src/features/run_blocking.py --input path/to/cleaned.parquet
+        python src/preprocessing/run_blocking.py --input path/to/cleaned.parquet
 
     With a custom output directory:
-        python src/features/run_blocking.py --output path/to/outputs/
+        python src/preprocessing/run_blocking.py --output path/to/outputs/
 
 What the script does:
     1. Resolves the project root so imports work from any working directory
@@ -48,31 +48,25 @@ from datetime import datetime
 from pathlib import Path
  
 # ── Path resolution ───────────────────────────────────────────────────────
-# This file lives at src/features/run_blocking.py.
-# The project root is two levels up (src/features → src → project root).
-# Adding the project root to sys.path allows `from src.features.blocking`
+# This file lives at src/preprocessing/run_blocking.py.
+# The project root is two levels up (src/preprocessing → src → project root).
+# Adding the project root to sys.path allows `from src.preprocessing.blocking`
 # to resolve correctly regardless of where the script is invoked from.
-_SCRIPT_DIR  = Path(__file__).resolve().parent          # src/features/
+_SCRIPT_DIR  = Path(__file__).resolve().parent          # src/preprocessing/
 _PROJECT_ROOT = _SCRIPT_DIR.parent.parent               # UofC-EMPI/
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
  
 # Imports below must follow the sys.path insertion above, hence noqa: E402.
 import pandas as pd  # noqa: E402
-from src.config.config import settings  # noqa: E402
+from src.config import configure_logging, settings  # noqa: E402
 from src.contracts import CandidatePairs, CleanedRecords, validate  # noqa: E402
-from src.features.blocking import (  # noqa: E402
+from src.preprocessing.blocking import (  # noqa: E402
     run_batch_blocking,
     get_blocking_stats,
     save_candidate_pairs,
 )
- 
-# ── Logging configuration ─────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+
 logger = logging.getLogger(__name__)
  
 # ── Default paths (sourced from the central config) ─────────────────────────
@@ -287,9 +281,9 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python src/features/run_blocking.py
-  python src/features/run_blocking.py --input data/processed/MDM_Population_cleaned_v1_2026_05_24.parquet
-  python src/features/run_blocking.py --output data/blocking/
+  python src/preprocessing/run_blocking.py
+  python src/preprocessing/run_blocking.py --input data/processed/MDM_Population_cleaned_v1_2026_05_24.parquet
+  python src/preprocessing/run_blocking.py --output data/blocking/
         """,
     )
     parser.add_argument(
@@ -306,8 +300,15 @@ Examples:
         help=f"Output directory for candidate pairs parquet "
              f"(default: {DEFAULT_OUTPUT_DIR})",
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default=None,
+        help="Override EMPI_LOG_LEVEL for this run (DEBUG/INFO/WARNING/...).",
+    )
 
     args = parser.parse_args()
+    configure_logging(level=args.log_level)
     input_path = args.input or _latest_cleaned_parquet(
         DEFAULT_INPUT_DIR, DEFAULT_INPUT_STEM
     )

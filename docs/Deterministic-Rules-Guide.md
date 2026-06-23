@@ -2,7 +2,9 @@
 
 This document describes the deterministic matching rules used in the EMPI (Enterprise Master Patient Index) pipeline to identify potential duplicate patient records.
 
-> **Status:** Regenerated 2026-06-15 from the current code (`src/models/deterministic_rules.py`) and a full run on the real 163,364-record `MDM_Population.csv`.
+> **Status:** Regenerated 2026-06-20 from the current code (`src/models/deterministic_rules.py`) and a full run on the real 163,364-record `MDM_Population.csv` (run `real_20260620`). This revision reflects three changes since the prior version: the SSN rule now requires a corroborating DOB (`SSN_DOB`, replacing the bare `EXACT_SSN`); first/last name agreement is **fuzzy** (single-typo tolerant); and the stage now emits a **three-way** decision (match / reject / review). See the [Three-way decision](#three-way-decision) section.
+>
+> For the blocking stage itself see [Blocking-Guide.md](Blocking-Guide.md).
 
 ## Overview
 
@@ -41,18 +43,21 @@ To prevent memory issues and false positive clusters:
 
 ## Match Rules
 
-Rules are evaluated in descending confidence order; the highest-confidence rule that fires becomes the pair's `match_rule`, and every rule that fired is recorded in `rules_fired`. A predicate requires **both** sides to be non-null and equal.
+Rules are evaluated in descending confidence order; the highest-confidence rule that fires becomes the pair's `match_rule`, and every rule that fired is recorded in `rules_fired`. Every predicate requires **both** sides to be non-null; all predicates demand exact equality **except** first/last name, which are matched fuzzily (see [Fuzzy name matching](#fuzzy-name-matching)).
 
 | # | Rule | Confidence | Conditions |
 |---|------|-----------|------------|
-| 1 | **EXACT_SSN** | 1.000 | `SSN_clean` agrees |
+| 1 | **SSN_DOB** | 1.000 | `SSN_clean` **and** `BirthDT_clean` agree |
 | 2 | **NAME_DOB_EMAIL** | 0.990 | first + last + DOB + email agree |
 | 3 | **NAME_DOB_PHONE** | 0.985 | first + last + DOB + a shared phone |
 | 4 | **NAME_DOB_SEX** | 0.980 | first + last + DOB + sex agree |
 | 5 | **NAME_DOB_ADDRESS** | 0.970 | first + last + DOB + street address agree |
 
-### Rule 1 — EXACT_SSN (1.000)
-Matches records with identical, **valid** Social Security Numbers. Validity is enforced in cleaning: structurally invalid SSNs (bad area/group/serial, known advertising SSNs) and low-entropy placeholders (e.g. `333333330`) are nulled out before this rule ever sees them, so they cannot fire. Remaining SSN matches with name/DOB discrepancies are still possible (name changes, data-entry typos) and are surfaced via `is_suspicious`.
+### Rule 1 — SSN_DOB (1.000)
+Matches records with identical, **valid** Social Security Numbers **corroborated by an agreeing date of birth**. The bare SSN-only rule (`EXACT_SSN`) was removed: an SSN match whose DOB is missing or disagreeing no longer auto-confirms and instead flows to the downstream probabilistic stage. SSN validity is still enforced in cleaning — structurally invalid SSNs (bad area/group/serial, known advertising SSNs) and low-entropy placeholders (e.g. `333333330`) are nulled out before this rule sees them. Requiring DOB trades a small amount of recall on single-source SSN matches for protection against typo'd / shared / placeholder SSNs that DOB cannot vouch for. Confirmed pairs whose last name disagrees are still surfaced via `is_suspicious`.
+
+### Fuzzy name matching
+First and last name agreement is **single-typo tolerant**: two names agree when they are exactly equal, OR their Jaro-Winkler similarity ≥ `NAME_JW_THRESHOLD` (0.92), OR their Damerau-Levenshtein distance ≤ `NAME_LEV_MAX` (1). This closes the documented recall gap on name typos (e.g. `MEAGAN` ↔ `MEGAN`, `SMITH` ↔ `SMYTH`) — pairs blocking caught but exact matching previously dropped. Fuzzy matching is used **only to confirm** a match, never to reject one. A side effect: because the `is_suspicious` last-name check is *strict*, fuzzy-matched name pairs are flagged suspicious (and the suspicious rate rose accordingly — see Results), correctly routing the typo cases to clerical review.
 
 ### Rule 2 — NAME_DOB_EMAIL (0.990)
 First name, last name, DOB **and** email all agree. This is the **only** way email participates in a deterministic decision — email on its own is not trustworthy (see [Why email-only was removed](#why-email-only-was-removed)).
@@ -68,34 +73,80 @@ First name, last name, DOB and street address (`AddressLine1_clean`) all agree.
 
 ---
 
+## Three-way decision
+
+Every candidate pair the blocking stage produces lands in exactly one of three
+buckets (`src/models/deterministic_rules.classify_non_matches`):
+
+| Decision | Condition | Destination |
+|----------|-----------|-------------|
+| **match** | a rule confirmed it (`apply_rules`) | auto-merge |
+| **reject** | no rule fired **and ≥3 strong identifiers strictly disagree** (full SSN / first / last / DOB) | dropped — written to `data/rejects/` for audit, **not** sent downstream |
+| **review** | no rule fired and < 3 contradictions | `data/non_matches/` → downstream probabilistic / ML stage |
+
+The throw-out is deliberately strict: one or two disagreeing fields are not
+enough to reject (a pair can carry two independent typos — see the calibration
+below); only three independent strong-identifier conflicts mark a pair a
+confident non-match. Fuzzy name matching is **not** used in the contradiction
+count — names are compared strictly there, so a typo counts toward a
+contradiction but, on its own, only routes a pair to review.
+
+### Decision distribution (run `real_20260620`)
+
+| Decision | Pairs | Notes |
+|----------|-------|-------|
+| match | 44,786 | confirmed by a rule |
+| reject | 126,903 | ≥3 contradictions; dropped |
+| review | 33,116 | → probabilistic stage |
+| *(candidate pairs)* | *204,805* | from blocking |
+
+> **Calibration of the reject threshold (= 3).** Adjudicating reject samples by
+> contradiction count on `real_20260620` gave the **false-reject rate** (truly
+> same-person pairs wrongly dropped): **~10% at 2 contradictions**, but **0% at
+> 3 and 4**. So two strong-identifier conflicts are *not* decisive — a real match
+> can carry two independent typos — while three are. The threshold was set to 3:
+> the 11,589 two-contradiction pairs now route to **review** (where the
+> probabilistic stage can still reject them) instead of being discarded, recovering
+> the ~10% of them that are true matches. After the change the review set
+> adjudicates to 57% same-person (down from 85% at threshold 2), as expected —
+> it now carries the mostly-non-matching two-contradiction pairs as well. The
+> fuzzy cutoffs (`NAME_JW_THRESHOLD` 0.92, `NAME_LEV_MAX` 1) remain conventional
+> single-typo values; rigorous fuzzy calibration needs a labeled set.
+
 ## Results Summary
 
-Full run on `MDM_Population.csv` (163,364 records, 158,735 valid after cleaning).
+Full run on `MDM_Population.csv` (163,364 records, 158,724 valid after cleaning; run `real_20260620`).
 
 ### Match Distribution
 
 | Match Rule | Count | % of Matches |
 |------------|-------|--------------|
-| NAME_DOB_SEX | 15,632 | 43.9% |
-| NAME_DOB_PHONE | 11,921 | 33.5% |
-| EXACT_SSN | 4,616 | 13.0% |
-| NAME_DOB_EMAIL | 2,474 | 6.9% |
-| NAME_DOB_ADDRESS | 963 | 2.7% |
-| **Total** | **35,606** | **100%** |
+| NAME_DOB_SEX | 20,402 | 45.6% |
+| NAME_DOB_PHONE | 15,700 | 35.1% |
+| SSN_DOB | 4,577 | 10.2% |
+| NAME_DOB_EMAIL | 2,878 | 6.4% |
+| NAME_DOB_ADDRESS | 1,229 | 2.7% |
+| **Total** | **44,786** | **100%** |
 
 ### Coverage & Quality
 
 | Metric | Value |
 |--------|-------|
 | Total patients | 163,364 |
-| Patients in ≥1 match | 51,014 |
-| Coverage rate | 31.2% |
+| Patients in ≥1 match | 62,912 |
+| Coverage rate | 38.5% |
 | Average match confidence | 0.984 |
-| Suspicious match rate | 2.5% (895 matches) |
-| Distinct clusters | 22,246 |
-| Max cluster size | 9 |
+| Suspicious match rate | 11.5% (5,165 matches) |
+| Distinct clusters | 27,215 |
+| Max cluster size | 8 |
 
-Pairs that no rule confirms (≈169k) are written to `data/non_matches/` as the input to the downstream probabilistic / ML matching stage.
+The higher match count and coverage vs the prior version come from **fuzzy name
+matching** newly confirming name-typo pairs; the same fuzzy matching also drives
+the higher suspicious rate (the strict `is_suspicious` flag marks the typo'd
+names — 4,914 of the 5,165 suspicious matches are last-name-only).
+
+`review` pairs (21,527) are written to `data/non_matches/` as the input to the
+downstream probabilistic / ML stage; `reject` pairs (138,492) are dropped.
 
 ---
 
@@ -125,13 +176,13 @@ It produces, **without ground-truth labels**:
 
 | Rule | Decided | Precision\* | 95% CI |
 |------|---------|-------------|--------|
-| EXACT_SSN | 370 | 100.0% | 100.0 – 100.0 |
-| NAME_DOB_EMAIL | 400 | 100.0% | 100.0 – 100.0 |
-| NAME_DOB_PHONE | 400 | 100.0% | 100.0 – 100.0 |
-| NAME_DOB_SEX | 400 | 100.0% | 100.0 – 100.0 |
-| NAME_DOB_ADDRESS | 400 | 100.0% | 100.0 – 100.0 |
+| SSN_DOB | 275 | 100.0% | 100.0 – 100.0 |
+| NAME_DOB_EMAIL | 300 | 100.0% | 100.0 – 100.0 |
+| NAME_DOB_PHONE | 300 | 100.0% | 100.0 – 100.0 |
+| NAME_DOB_SEX | 299 | 100.0% | 100.0 – 100.0 |
+| NAME_DOB_ADDRESS | 300 | 100.0% | 100.0 – 100.0 |
 
-\*Precision = SAME / (SAME + DIFFERENT); UNCERTAIN excluded. Zero adjudicated false positives across ~1,970 decided pairs. The CI collapses to a point because no resample produced a DIFFERENT; the true bound is limited by the adjudicator's own accuracy, not sampling.
+\*Precision = SAME / (SAME + DIFFERENT); UNCERTAIN excluded (run `real_20260620`, `--n 300`). Zero adjudicated false positives. The CI collapses to a point because no resample produced a DIFFERENT; the true bound is limited by the adjudicator's own accuracy, not sampling. Note the adjudicator's name-similarity tolerance means fuzzy-confirmed name-typo pairs are scored SAME, so precision stays at 100% even with fuzzy matching on.
 
 ### Confidence calibration
 
@@ -139,7 +190,7 @@ Assigned rule confidences are **conservative** — no rule's adjudicated precisi
 
 | Rule | Assigned confidence | Adjudicated precision | Gap |
 |------|--------------------|----------------------|-----|
-| EXACT_SSN | 1.000 | 100.0% | 0.0 |
+| SSN_DOB | 1.000 | 100.0% | 0.0 |
 | NAME_DOB_EMAIL | 0.990 | 100.0% | −1.0 |
 | NAME_DOB_PHONE | 0.985 | 100.0% | −1.5 |
 | NAME_DOB_SEX | 0.980 | 100.0% | −2.0 |
@@ -153,27 +204,47 @@ How often each rule fires, and how often it is the **sole** rule confirming a pa
 
 | Rule | Times fired | Sole confirmations | Sole % |
 |------|-------------|--------------------|--------|
-| NAME_DOB_SEX | 27,500 | 14,292 | 52.0% |
-| NAME_DOB_PHONE | 15,331 | 3,542 | 23.1% |
-| EXACT_SSN | 4,615 | 1,299 | 28.1% |
-| NAME_DOB_ADDRESS | 7,541 | 963 | 12.8% |
-| NAME_DOB_EMAIL | 2,676 | 187 | 7.0% |
+| NAME_DOB_SEX | 34,994 | 18,667 | 53.3% |
+| NAME_DOB_PHONE | 19,488 | 4,835 | 24.8% |
+| NAME_DOB_ADDRESS | 9,047 | 1,229 | 13.6% |
+| SSN_DOB | 4,577 | 982 | 21.5% |
+| NAME_DOB_EMAIL | 3,091 | 210 | 6.8% |
 
-`NAME_DOB_SEX` does the most unique work. `NAME_DOB_EMAIL` is the most redundant (only 7% sole) but still uniquely confirms 187 pairs, so it earns its place. Heaviest co-firing is `NAME_DOB_SEX`×`NAME_DOB_PHONE` (9,761 shared pairs) — expected, since both build on the same name+DOB core.
+`NAME_DOB_SEX` does the most unique work. `NAME_DOB_EMAIL` is the most redundant (only 6.8% sole) but still uniquely confirms 210 pairs, so it earns its place. Heaviest co-firing is `NAME_DOB_SEX`×`NAME_DOB_PHONE` (12,209 shared pairs) — expected, since both build on the same name+DOB core.
 
-### Recall / false-negative estimate (the limiting factor)
+### Recall / what reaches the probabilistic stage
 
-Precision is essentially solved; **recall is where the deterministic stage is intentionally incomplete.** Adjudicating 1,500 *rejected* pairs (blocking surfaced them, no rule confirmed) estimates how many true matches the rules miss:
+Precision is essentially solved; the open question is **recall** — what the
+deterministic stage hands to the probabilistic stage, and what it discards.
 
-- **18.9%** of rejected pairs look like the same person overall, but the rate is wildly uneven by block:
-  - **Phone-only (B5) rejections: 3.0%** same-person — correctly rejected; a shared phone alone is mostly *different* people (households, clinics). This validates having no phone-only rule.
-  - **Non-phone (name/DOB-block) rejections: 67%** same-person — these are genuine deterministic-stage misses.
+The `review` set (33,116 pairs routed downstream) adjudicates to **57%
+same-person** (1,000 sampled: 570 SAME, 301 DIFFERENT, 129 UNCERTAIN). Fuzzy
+matching already *confirmed* the clear name-typo pairs (they are now matches),
+and the `reject` bucket removed the ≥3-contradiction non-matches; what remains is
+a mix of the two-contradiction pairs (mostly true non-matches the probabilistic
+stage will filter) and the one residual cause of genuine misses:
 
-Two causes, both by design routed to the downstream probabilistic stage:
-1. **Name typos/variants defeat exact matching** — e.g. `MEAGAN LEE` vs `MEGAN LEE`, `POE HTOO` vs `POE TOO` (same DOB). The rules require *exact* first+last equality, so phonetic near-matches blocking caught are not confirmed.
-2. **Identical name+DOB but no agreeing 4th field** — e.g. `KRYSTAL SMITH 1984-12-25` on both sides with no matching sex/phone/address/email. The rules deliberately demand a corroborator (because common name + birthday can collide), so these stay unconfirmed.
+- **Identical name+DOB but no agreeing 4th field** — e.g. `KRYSTAL SMITH
+  1984-12-25` on both sides with no matching sex/phone/address/email. The rules
+  deliberately demand a corroborator (common name + birthday can collide), so
+  these stay unconfirmed and route to the probabilistic stage to adjudicate.
 
-> This 67% is an **upper bound** on missed matches: for common surnames some name+DOB pairs are genuine collisions the rules *correctly* declined. The unambiguous misses are the name-typo cases — the strongest argument for the planned fuzzy/probabilistic stage (Stage 4).
+The earlier dominant miss — **name typos defeating exact matching** (`MEAGAN LEE`
+vs `MEGAN LEE`) — is now largely **caught** by [fuzzy name
+matching](#fuzzy-name-matching), which is why the match count and coverage rose.
+
+> Caveat: the review set being 85% same-person means the probabilistic stage's
+> job is mostly *confirmation*, not discrimination. The 5 adjudicated DIFFERENT
+> (and 141 UNCERTAIN) are the genuine collisions to be careful with.
+
+### Blocking recall
+
+Blocking's own recall — does it even surface the pairs the rules can confirm? —
+is measured by `src/evaluation/blocking_eval.py` (rules as ground truth). On run
+`real_20260620` it is **97.9%**: of 45,743 rule-confirmable pairs found in a wide
+candidate set, blocking emitted 44,786 and missed 957. The misses skew to
+**SSN_DOB (400)** — pairs sharing SSN+DOB that B1 did not emit, most likely
+high-fan-out SSNs hit by the governance cap. See [Blocking-Guide.md](Blocking-Guide.md).
 
 ---
 
@@ -182,12 +253,23 @@ Two causes, both by design routed to the downstream probabilistic stage:
 Two deterministic-rule failure modes were diagnosed on the real data and fixed **upstream**, because no confidence tuning can repair a bad input value:
 
 ### Placeholder SSNs
-A single placeholder SSN (`333333330`) had chained **22 unrelated patients** into one 33-record `EXACT_SSN` cluster at confidence 1.000. These values are structurally valid (they pass area/group/serial checks and `python-stdnum`), so they must be caught by entropy. `src/data/transformations.clean_ssn` now nulls any SSN that has ≤2 distinct digits, has one digit filling ≥7 of 9 positions, or is a full ascending/descending digit run (e.g. `012345678`), in addition to `python-stdnum` structural validation. Effect: max cluster size dropped 33 → 9, SSN fan-out 25 → 6, and EXACT_SSN precision rose from ~88% to ~100%.
+A single placeholder SSN (`333333330`) had once chained **22 unrelated patients** into one 33-record SSN cluster at confidence 1.000. These values are structurally valid (they pass area/group/serial checks and `python-stdnum`), so they must be caught by entropy. `src/data/transformations.clean_ssn` now nulls any SSN that has ≤2 distinct digits, has one digit filling ≥7 of 9 positions, or is a full ascending/descending digit run (e.g. `012345678`), in addition to `python-stdnum` structural validation. Effect: max cluster size dropped 33 → 9 (now 8), SSN fan-out 25 → 6, and the SSN rule's precision rose from ~88% to ~100%.
 
-### Residual EXACT_SSN risk and the fan-out control
-After the placeholder fixes, EXACT_SSN runs at ~99.95% on the proxy: of ~4,616 matches only **8** have last-name *and* DOB disagreeing and just **2** disagree on all of first/last/DOB — and the discordant cases are already flagged `is_suspicious`, so they route to review. Mandatory field corroboration was deliberately **not** added: it would drop legitimate single-source SSN matches to fix ~2 errors.
+### SSN risk and the corroboration / fan-out controls
+SSN matches now carry **two** layers of protection:
 
-The remaining frequency risk is a *valid* SSN shared by many distinct identities (a shared/fraudulent number). This is now handled by the **`high_fanout_ssn`** flag: any confirmed match whose shared SSN is carried by at least `EMPI_SSN_FANOUT_THRESHOLD` distinct patients (default **4**) is flagged for clerical review rather than silently trusted at confidence 1.000. On the full dataset this flags **457** matches, **372** of which `is_suspicious` does *not* catch (the SSN is shared but the other fields agree or are null, so disagreement cannot be proven). The flag is informational — it does not drop the match — and is surfaced in the `run_rules` audit report and the evaluation workbook.
+1. **Mandatory DOB corroboration (`SSN_DOB`).** Unlike the former `EXACT_SSN`,
+   an SSN match must agree on date of birth to confirm. This was the deliberate
+   reversal of the earlier "no mandatory corroboration" stance — a shared/typo'd
+   SSN with a disagreeing DOB no longer auto-merges; it routes to review. SSN_DOB
+   adjudicates at 100% precision (above).
+2. **High-fan-out flag.** A *valid* SSN shared by many distinct identities (a
+   shared or fraudulent number) is still risky even with DOB agreement. Any
+   confirmed match whose shared SSN is carried by ≥ `EMPI_SSN_FANOUT_THRESHOLD`
+   distinct patients (default **4**) is flagged `high_fanout_ssn` for clerical
+   review rather than silently trusted. (On `real_20260620`, shared-SSN fan-out
+   tops out at 6.) The flag is informational — it does not drop the match — and
+   is surfaced in the `run_rules` audit report.
 
 ### Why email-only was removed
 A standalone `EMAIL_EXACT` rule (confidence 0.995) previously confirmed any pair sharing an email. On the real data it ran at only **63–80% precision**: shared family/clinic inboxes linked parents to children, siblings, twins, and unrelated patients (e.g. `pcruz@nyap.org`). Email is only trustworthy when corroborated by name + DOB — which is exactly `NAME_DOB_EMAIL`. The bare-email rule was removed; pairs that match on email alone now flow to the downstream probabilistic stage as non-matches rather than being auto-confirmed.
@@ -201,99 +283,102 @@ A confirmed pair is flagged `is_suspicious` when:
 - Last name differs between records (both present), OR
 - Both SSNs are present but differ
 
-These are confirmed matches that warrant clerical review — typically minor spelling variations, single-digit DOB typos, hyphenation/suffix differences, or name changes. After the upstream fixes the suspicious rate is **2.5%** (down from 23.7% when placeholder-SSN and email-only false positives inflated it).
+These are confirmed matches that warrant clerical review — typically minor spelling variations, hyphenation/suffix differences, or name changes. The suspicious rate is **11.5%** (5,165 matches), up from 2.5% in the prior version. The increase is a direct, expected consequence of **fuzzy name matching**: pairs are now confirmed on near-equal names, and the `is_suspicious` last-name check is *strict*, so those typo'd last names register as a disagreement. In other words, the typo matches fuzzy matching newly recovers are exactly the ones flagged for a human to eyeball.
 
-### Typology of the 894 suspicious matches
+### Typology of the 5,165 suspicious matches (run `real_20260620`)
 
 | Disagreeing field | Count | Interpretation |
 |-------------------|-------|----------------|
-| Last name only | 674 (75%) | Maiden-name changes, hyphenation, spelling — usually still the same person |
-| SSN only | 183 (20%) | Name+DOB agree but SSNs differ → one record likely has a wrong/typo'd SSN |
-| DOB only | 30 (3%) | Name agrees, DOB differs |
-| Multiple fields | 7 (<1%) | Highest-risk; two or more identifiers disagree |
+| Last name only | 4,914 (95%) | Fuzzy-matched name typos, maiden-name changes, hyphenation — usually still the same person |
+| SSN only | 204 (4%) | Name+DOB agree but SSNs differ → one record likely has a wrong/typo'd SSN |
+| Multiple fields | 47 (<1%) | Highest-risk; two or more identifiers disagree |
+| DOB only | 0 | No rule confirms a DOB-disagreeing pair (all rules require exact DOB), so DOB-only suspicion is now unreachable |
 
-Of the **37** matches with a DOB disagreement, only **7** are recoverable minor typos (day/month transposition or ±1 day/month); the other 30 are larger differences where the rest of the identity still matched. Last-name disagreement dominates suspicious matches, consistent with the recall analysis: real-world name variation is this pipeline's primary source of identity noise.
+Last-name disagreement overwhelmingly dominates, consistent with the design: real-world name variation is this pipeline's primary source of identity noise, and fuzzy matching deliberately surfaces it for review rather than dropping it.
 
 ---
 
 ## Cluster Analysis
 
-Large match clusters can indicate bad blocking keys, unfiltered placeholder values, or overly broad rules. The current maximum cluster is **9 records**, with 77% of clusters being clean 2-record pairs. Any future cluster above ~15 members should be auto-flagged for manual review (a recommended circuit-breaker, not yet enforced in code).
+Large match clusters can indicate bad blocking keys, unfiltered placeholder values, or overly broad rules. On `real_20260620` there are **27,215 clusters**, the maximum cluster is **8 records**, and **76%** are clean 2-record pairs (20,806 of 27,215; 94 clusters of size 6–20; none above 20). Any future cluster above ~15 members should be auto-flagged for manual review (a recommended circuit-breaker, not yet enforced in code).
 
 ---
 
 ## Appendix: generated evaluation report
 
-Verbatim output of `python -m src.evaluation.rule_eval --run-id merged_eval --n 400` on the full dataset (run `merged_eval`, 2026-06-15, post-merge with develop). Reproducible from any run's artifacts.
+Verbatim output of `python -m src.evaluation.rule_eval --run-id real_20260620 --n 300` on the full dataset (run `real_20260620`, 2026-06-20). Reproducible from any run's artifacts.
 
 ```
 ============================================================
   DETERMINISTIC RULES — AUTOMATED EVALUATION
 ============================================================
   cleaned_records       163364
-  confirmed_matches     35605
-  patients_matched      51012
-  suspicious_rate       2.5
+  confirmed_matches     44786
+  patients_matched      62912
+  suspicious_rate       11.5
 
   PER-RULE AGREEMENT PROFILE (%)
             rule     n  first  last   dob   ssn  email  phone  address   sex
-    NAME_DOB_SEX 15632  100.0 100.0 100.0   0.0    0.0    0.0      8.6 100.0
-  NAME_DOB_PHONE 11921  100.0 100.0 100.0   0.0    0.0  100.0     26.9  60.7
-       EXACT_SSN  4615   94.7  85.2  99.2 100.0    5.4   39.5     32.9  80.8
-  NAME_DOB_EMAIL  2474  100.0 100.0 100.0   0.0  100.0   72.3     26.6  64.3
-NAME_DOB_ADDRESS   963  100.0 100.0 100.0   0.0    0.0    0.0    100.0   0.0
+    NAME_DOB_SEX 20402   85.9  90.5 100.0   0.0    0.0    0.0      8.5 100.0
+  NAME_DOB_PHONE 15700   88.2  86.9 100.0   0.0    0.0  100.0     24.8  60.1
+         SSN_DOB  4577   94.8  85.3 100.0 100.0    5.4   39.5     32.7  80.9
+  NAME_DOB_EMAIL  2878   92.5  93.0 100.0   0.0  100.0   72.7     26.8  64.6
+NAME_DOB_ADDRESS  1229   86.1  91.6 100.0   0.0    0.0    0.0    100.0   0.0
 
   PRECISION + 95% CI (adjudicator, NOT ground truth)
             rule  decided  precision_pct  ci95_low  ci95_high
-       EXACT_SSN      370          100.0     100.0      100.0
-NAME_DOB_ADDRESS      400          100.0     100.0      100.0
-  NAME_DOB_EMAIL      400          100.0     100.0      100.0
-  NAME_DOB_PHONE      400          100.0     100.0      100.0
-    NAME_DOB_SEX      400          100.0     100.0      100.0
+NAME_DOB_ADDRESS      300          100.0     100.0      100.0
+  NAME_DOB_EMAIL      300          100.0     100.0      100.0
+  NAME_DOB_PHONE      300          100.0     100.0      100.0
+    NAME_DOB_SEX      299          100.0     100.0      100.0
+         SSN_DOB      275          100.0     100.0      100.0
 
   CONFIDENCE CALIBRATION
             rule  assigned_confidence  adjudicated_precision_pct  gap
-       EXACT_SSN                1.000                      100.0  0.0
+         SSN_DOB                1.000                      100.0  0.0
   NAME_DOB_EMAIL                0.990                      100.0 -1.0
   NAME_DOB_PHONE                0.985                      100.0 -1.5
     NAME_DOB_SEX                0.980                      100.0 -2.0
 NAME_DOB_ADDRESS                0.970                      100.0 -3.0
 
   RULE OVERLAP (diagonal = total fires; __sole__ = unique)
-                  EXACT_SSN  NAME_DOB_ADDRESS  NAME_DOB_EMAIL  NAME_DOB_PHONE  NAME_DOB_SEX  __sole__  __sole_pct__
-EXACT_SSN              4615              1374             202            1621          3046      1299          28.1
-NAME_DOB_ADDRESS       1374              7541             700            4814          5029       963          12.8
-NAME_DOB_EMAIL          202               700            2676            1922          1731       187           7.0
-NAME_DOB_PHONE         1621              4814            1922           15331          9761      3542          23.1
-NAME_DOB_SEX           3046              5029            1731            9761         27500     14292          52.0
+                  NAME_DOB_ADDRESS  NAME_DOB_EMAIL  NAME_DOB_PHONE  NAME_DOB_SEX  SSN_DOB  __sole__  __sole_pct__
+NAME_DOB_ADDRESS              9047             813            5627          5937     1421      1229          13.6
+NAME_DOB_EMAIL                 813            3091            2233          2009      213       210           6.8
+NAME_DOB_PHONE                5627            2233           19488         12209     1696      4835          24.8
+NAME_DOB_SEX                  5937            2009           12209         34994     3297     18667          53.3
+SSN_DOB                       1421             213            1696          3297     4577       982          21.5
 
   SUSPICIOUS TYPOLOGY
-    total_suspicious        894
-    last_name_only          674
-    dob_only                30
-    ssn_only                183
-    multi_field             7
-    dob_diffs_total         37
-    dob_diffs_minor_typo    7
+    total_suspicious        5165
+    last_name_only          4914
+    dob_only                0
+    ssn_only                204
+    multi_field             47
+    dob_diffs_total         0
+    dob_diffs_minor_typo    0
 
-  FALSE-NEGATIVE ESTIMATE (rejected pairs adjudicated)
+  FALSE-NEGATIVE ESTIMATE (review pairs adjudicated)
     sampled                 1000
-    SAME                    184
-    DIFFERENT               756
-    UNCERTAIN               60
-    missed_match_rate_pct   18.4
-      B3|B4|B8         n=65    same=64
-      B5               n=749   same=24
-      B3|B4|B7|B8      n=22    same=22
-      B3|B8            n=19    same=15
-      B8               n=16    same=8
-      B3|B4|B5|B8      n=7     same=7
-      B3|B7|B8         n=6     same=6
-      B5|B8            n=6     same=6
+    SAME                    570
+    DIFFERENT               301
+    UNCERTAIN               129
+    missed_match_rate_pct   57.0
+      B3|B4|B8         n=260   same=260
+      B3|B4|B7|B8      n=98    same=96
+      B5               n=181   same=61
+      B4|B8            n=39    same=31
+      B3|B8            n=29    same=26
+      B5|B8            n=28    same=26
+      B8               n=40    same=20
 
   SSN fan-out:   shared=3841, max=6
   Email fan-out: shared=4289, max=7
-  Clusters: {'n_clusters': 22245, 'size_2': 17250, 'size_3_5': 4933, 'size_6_20': 62, 'size_gt_20': 0, 'max_size': 9}
+  Clusters: {'n_clusters': 27215, 'size_2': 20806, 'size_3_5': 6315, 'size_6_20': 94, 'size_gt_20': 0, 'max_size': 8}
 ```
 
-> Note: the CLI's false-negative sample defaults to n=1000 (shown here); the 1,500-sample run cited in the [Recall](#recall--false-negative-estimate-the-limiting-factor) section gives the same ~19% headline and the same block ranking.
+> Note: the FALSE-NEGATIVE / missed-match section now adjudicates the **review**
+> set (the < 2-contradiction pairs routed downstream), not all unconfirmed pairs —
+> the `reject` bucket is excluded. That is why the SAME rate is high (85%): the
+> review set is, by construction, the pool of likely matches the rules could not
+> confirm outright.

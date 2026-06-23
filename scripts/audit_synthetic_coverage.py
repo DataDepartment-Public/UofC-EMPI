@@ -30,7 +30,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.features.blocking import _dm_primary, _soundex  # noqa: E402
+from src.preprocessing.blocking import _dm_primary, _soundex  # noqa: E402
 
 POS_THRESHOLD = 20  # Positives below this flag the level for manual review (not dropped)
 

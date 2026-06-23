@@ -52,7 +52,7 @@ from models.experiments.fs_splink_enhanced_2.comparisons import (
 
 # Reuse blocking's derivation + column constants (single source of truth for
 # the shim columns the candidate-pairs blocking rule needs).
-from src.features.blocking import (
+from src.preprocessing.blocking import (
     _COL_DOB_STR,
     _COL_PHONES_SET,
     _compute_derived_columns,

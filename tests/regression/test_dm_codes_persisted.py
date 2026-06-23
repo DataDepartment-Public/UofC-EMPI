@@ -21,8 +21,8 @@ from __future__ import annotations
 import pandas as pd
 import pandas.testing as pdt
 
-from src.data.transformations import _dm_primary, transform_dataframe
-from src.features.blocking import (
+from src.preprocessing.transformations import _dm_primary, transform_dataframe
+from src.preprocessing.blocking import (
     _COL_DM_FN,
     _COL_DM_LN,
     _compute_derived_columns,

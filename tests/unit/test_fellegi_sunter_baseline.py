@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 
 from models.experiments.fs_splink_baseline import fellegi_sunter_baseline as fs
-from src.features.blocking import COL_FIRST_NM, COL_LAST_NM, COL_EMAIL, _COL_PHONES_SET
+from src.preprocessing.blocking import COL_FIRST_NM, COL_LAST_NM, COL_EMAIL, _COL_PHONES_SET
 
 
 # ===========================================================================

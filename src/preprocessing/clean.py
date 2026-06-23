@@ -23,9 +23,9 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 # Imports below must follow the sys.path insertion above, hence noqa: E402.
-from src.config.config import settings  # noqa: E402
+from src.config import settings  # noqa: E402
 from src.contracts import CleanedRecords, validate  # noqa: E402
-from src.data.transformations import transform_dataframe  # noqa: E402
+from src.preprocessing.transformations import transform_dataframe  # noqa: E402
 
 DEFAULT_RAW_DIR = settings.raw_dir
 DEFAULT_PROCESSED_DIR = settings.processed_dir

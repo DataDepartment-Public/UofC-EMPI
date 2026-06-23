@@ -95,15 +95,26 @@ ARTIFACTS_ENH2 = PROJECT_ROOT / "models" / "artifacts" / "fs_splink_enhanced_2"
 
 
 def _resolve_eval(model_name: str, full_pool: bool = False) -> Path:
-    suffix = "_full_pool" if full_pool else ""
-    cands = sorted(OUTPUTS_DIR.glob(f"{model_name}__*{suffix}.parquet"))
-    # Filter out the wrong suffix (e.g. when looking for non-full-pool, drop _full_pool files)
-    if not full_pool:
-        cands = [c for c in cands if not c.stem.endswith("_full_pool")]
+    # Only enhanced_2 has separate `_full_pool` vs non_matches variants. Baseline
+    # and enhanced runners default to scoring the full candidate pool and write a
+    # single output per data-version (no suffix). For those two models, both
+    # full_pool=True and full_pool=False resolve to the same file — the cell then
+    # filters to review-tier via an inner-join when a non_matches view is wanted.
+    has_pool_variants = (model_name == "fs_splink_enhanced_2")
+    if has_pool_variants:
+        cands = sorted(OUTPUTS_DIR.glob(f"{model_name}__*.parquet"))
+        cands = [c for c in cands
+                 if c.stem.endswith("_full_pool") == full_pool
+                 and "synthetic" not in c.stem]
+    else:
+        cands = sorted(OUTPUTS_DIR.glob(f"{model_name}__*.parquet"))
+        cands = [c for c in cands
+                 if not c.stem.endswith("_full_pool")
+                 and "synthetic" not in c.stem]
     if not cands:
         raise FileNotFoundError(
             f"No eval-schema parquet for {model_name} (full_pool={full_pool}). "
-            f"Looked under {OUTPUTS_DIR} for {model_name}__*{suffix}.parquet."
+            f"Looked under {OUTPUTS_DIR}."
         )
     # Most recent mtime wins (handles multiple data-version tags).
     return max(cands, key=lambda p: p.stat().st_mtime)

@@ -115,6 +115,15 @@ recall = |R ∩ B| / |R|        misses = R − B
   pair (C(S,2)). An unbiased local cross-check; O(S²) with per-pair fuzzy rule
   matching, so keep S small (a few hundred).
 
+By default the evaluation builds **R** over the *valid-record* population only
+(`valid_record != False`) — the same records production blocking sees — so the
+recall denominator never counts pairs blocking was filtered from emitting. Pass
+`--include-invalid` for the diagnostic all-records view. Measuring over all records
+re-introduces the validity-filter artifact diagnosed in
+[Blocking-Recall-RCA.md](../Blocking-Recall-RCA.md): ~745 of the apparent "misses"
+are pairs where one record was dropped as invalid before blocking, which deflates
+the headline number.
+
 ### Running it
 
 ```bash
@@ -134,27 +143,32 @@ python -m src.evaluation.blocking_eval --run-id <run_id> --method sample --n 400
 
 ### Measured recall (run `real_20260620`)
 
-Loose method on the full 163,364-record dataset:
+Loose method on the full 163,364-record dataset (158,724 valid), 8-block scheme:
 
-| Metric | Value |
-|--------|-------|
-| Wide candidate pairs (DOB + Soundex-last) | 9,631,646 |
-| Production candidate pairs | 204,805 |
-| Rule-confirmed in wide set (R) | 45,743 |
-| Caught by blocking (R ∩ B) | 44,786 |
-| Missed (R − B) | 957 |
-| **Estimated blocking recall** | **97.9%** |
+| Metric | All records | Valid records (default) |
+|--------|------------:|------------------------:|
+| Production candidate pairs | 204,805 | 204,805 |
+| Rule-confirmed in wide set (R) | 45,743 | 44,998 |
+| Caught by blocking (R ∩ B) | 44,786 | 44,786 |
+| Missed (R − B) | 957 | 212 |
+| **Estimated blocking recall** | 97.9% | **99.5%** |
 
-Missed pairs by rule: **SSN_DOB 400**, NAME_DOB_SEX 322, NAME_DOB_PHONE 160,
-NAME_DOB_ADDRESS 40, NAME_DOB_EMAIL 35. The SSN_DOB misses are the notable
-finding — pairs that share SSN *and* DOB that B1 (exact SSN) did not emit. The
-most likely cause is the **governance cap**: a high-fan-out SSN whose group
-exceeds 500 records is truncated, so not all of its pairs are generated. Worth a
-look if SSN recall matters.
+Measured apples-to-apples over the valid population (the default), recall is
+**99.5%**. The 745-pair difference is the validity-filter artifact (one record
+dropped as invalid before blocking), not a blocking defect — see
+[Blocking-Recall-RCA.md](../Blocking-Recall-RCA.md).
 
-Caught pairs by block (where recall actually comes from): B8 42,993 · B3 42,803 ·
-B4 38,323 · B7 20,268 · B5 19,598 · B1 4,577 · B9 3,786 · B6 3,127. The coarse
-phonetic blocks (B8, B3, B4) carry the bulk of recall.
+The remaining **212** valid-population misses are the one genuine blocking-scheme
+gap: pairs that share a first name + exact DOB but whose **last name differs by a
+typo that breaks both Soundex and Double Metaphone**. Every name+DOB block
+(B3/B4/B7/B8/B9) anchors on the last name, so such a typo escapes all of them at
+once. The robust fix is **q-gram / n-gram (sub-quadratic, typo-tolerant)
+blocking**, tracked under the embedding/graph blocking research; an in-block fuzzy
+patch on B8 was evaluated and rejected as not worth the quadratic cost for the
+residual (see that research item). The earlier hypothesis that the SSN_DOB misses
+were a governance-cap artifact was **disproven** by the RCA — the largest SSN
+group on this data is 6, far under the 500 cap; those misses are all
+invalid-record pairs.
 
 > The `sample` method is low-power on a dataset this size: a 600-record sample
 > contains essentially no within-sample duplicate pairs (R ≈ 0), so use `loose`

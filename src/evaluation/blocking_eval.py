@@ -18,6 +18,12 @@ gap. This module quantifies that gap.
     3. Run production blocking over the same records -> B (candidate pairs).
     4. Blocking misses = R - B; recall = |R ∩ B| / |R|.
 
+R and B are built over the same population: by default invalid records
+(`valid_record == False`, which production blocking drops) are excluded from the
+wide set too, so the recall denominator only counts pairs blocking is actually
+allowed to emit. Measuring over all records instead (`include_invalid=True`)
+re-introduces the validity-filter artifact diagnosed in Blocking-Recall-RCA.md.
+
 Reports estimated recall, which rule each missed pair fired (where blocking
 under-covers), and which production blocks catch the hits.
 
@@ -42,7 +48,7 @@ import jellyfish
 import pandas as pd
 
 from src.config import configure_logging, settings
-from src.preprocessing.blocking import run_batch_blocking
+from src.preprocessing.blocking import _filter_valid_records, run_batch_blocking
 from src.models.deterministic_rules import apply_rules
 
 logger = logging.getLogger(__name__)
@@ -100,24 +106,35 @@ def wide_candidate_pairs(
     sample_size: int = 500,
     seed: int = 7,
     max_group: int | None = None,
+    include_invalid: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build a candidate set wider than production blocking.
 
     Returns ``(wide_pairs, records)`` where ``records`` is the record subset the
     evaluation runs over (the sample for ``method="sample"``, the full frame for
     ``method="loose"``), so production blocking is compared over the same records.
+
+    By default ``records`` excludes rows the cleaning stage flagged
+    ``valid_record == False`` — production blocking drops them too, so building the
+    ground-truth set **R** over the same valid population keeps the recall metric
+    apples-to-apples. Without this the denominator includes pairs blocking is never
+    allowed to emit (one record was filtered out before blocking), which deflates
+    the headline number — the validity-filter artifact diagnosed in
+    Blocking-Recall-RCA.md (745 of the 957 "misses"). Pass ``include_invalid=True``
+    to measure over all records (diagnostic only).
     """
     max_group = max_group or settings.governance_threshold
+    pool = cleaned if include_invalid else _filter_valid_records(cleaned)
 
     if method == "sample":
-        n = min(sample_size, len(cleaned))
-        records = cleaned.sample(n=n, random_state=seed).reset_index(drop=True)
+        n = min(sample_size, len(pool))
+        records = pool.sample(n=n, random_state=seed).reset_index(drop=True)
         pairs = {
             _canonical(a, b)
             for a, b in combinations(sorted(records[COL_PATID]), 2)
         }
     elif method == "loose":
-        records = cleaned
+        records = pool
         dob_pairs = _pairs_from_groups(
             records, records[COL_BIRTH_DT].astype("string"), max_group
         )
@@ -171,9 +188,18 @@ def evaluate_blocking(
     sample_size: int = 500,
     seed: int = 7,
     n_examples: int = 15,
+    include_invalid: bool = False,
 ) -> BlockingEvalReport:
-    """Estimate production blocking's recall against rule-confirmed matches."""
-    wide, records = wide_candidate_pairs(cleaned, method, sample_size, seed)
+    """Estimate production blocking's recall against rule-confirmed matches.
+
+    By default the ground-truth set is built over the valid-record population only
+    (see ``wide_candidate_pairs``), so recall is not deflated by pairs blocking was
+    never allowed to emit. Pass ``include_invalid=True`` for the diagnostic
+    all-records view.
+    """
+    wide, records = wide_candidate_pairs(
+        cleaned, method, sample_size, seed, include_invalid=include_invalid
+    )
 
     confirmed = apply_rules(wide, records)  # R — ground-truth positives
     production = run_batch_blocking(records)  # B — production candidate pairs
@@ -225,6 +251,7 @@ def evaluate_blocking(
 
     headline = {
         "method": method,
+        "population": "all records" if include_invalid else "valid records only",
         "records_evaluated": len(records),
         "wide_pairs": len(wide),
         "production_pairs": len(production),
@@ -258,6 +285,10 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=500,
                     help="Sample size for method=sample (kept small: O(S^2))")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--include-invalid", action="store_true",
+                    help="Measure recall over ALL records, including "
+                         "valid_record=False (diagnostic; default filters them "
+                         "to match production blocking's population).")
     ap.add_argument("--log-level", type=str, default=None,
                     help="Override EMPI_LOG_LEVEL (DEBUG/INFO/WARNING/...).")
     args = ap.parse_args()
@@ -266,7 +297,8 @@ def main() -> None:
     root = Path(__file__).resolve().parents[2]
     cleaned = _load_cleaned(args.run_id, root)
     report = evaluate_blocking(
-        cleaned, method=args.method, sample_size=args.n, seed=args.seed
+        cleaned, method=args.method, sample_size=args.n, seed=args.seed,
+        include_invalid=args.include_invalid,
     )
     print(report.to_text())
 

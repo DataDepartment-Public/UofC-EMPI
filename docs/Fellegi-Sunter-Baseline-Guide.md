@@ -381,6 +381,12 @@ These motivated the enhanced model. Repeated here for completeness; full discuss
 
 ---
 
+## 14. What's next — Phase E3 refactor
+
+This module (`fellegi_sunter_baseline.py`) is scheduled for replacement in **Phase E3-1 / E3-2** of the FS Refactor + Repo Cleanup plan. The plan refactors `fs_splink_baseline/` onto the shared `models/common/fs_base.py` OO scaffold that `fs_splink_enhanced_2/` already consumes: `fellegi_sunter_baseline.py` becomes a thin `FSBaseline(FSModel)` subclass in `fs_baseline.py`, with comparisons extracted to `comparisons.py`. Runners and tests are rewritten against the `FSModel` API in the same phase; no shim layer is introduced. The baseline's head-to-head reference role, threshold constants, and evaluation-schema output are all preserved — only the internal implementation shape changes. See `docs/superpowers/specs/2026-06-23-fs-refactor-design.md` for the full design.
+
+---
+
 ## See also
 
 - `docs/Fellegi-Sunter-Enhanced-Guide.md` — the production matcher built on top of this baseline's lessons.

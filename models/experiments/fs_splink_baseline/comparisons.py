@@ -1,9 +1,9 @@
 """Comparison registry for fs_splink_baseline.
 
-Each comparison is declared as a `ComparisonSpec(name, builder)` so the
-`BASELINE_REGISTRY` lives at module-import time without paying the Splink
-import cost.  Builders return the Splink comparison dict directly (via
-`_comparison_to_dict`), matching the enhanced_2 pattern.
+Each comparison is declared as a `ComparisonSpec(name, builder)` where each
+`builder` is a lazy callable that returns a Splink comparison dict (via
+`_comparison_to_dict`).  Splink itself is imported eagerly at module level
+because `_comparison_to_dict` calls `SettingsCreator` to materialise the dict.
 
 Comparisons in declared order (matches the existing `build_settings()` output):
 

@@ -20,8 +20,11 @@ from splink import SettingsCreator
 from models.common.fs_base import ClassificationConfig, EMTraining, FSModel
 from models.experiments.fs_splink_baseline.comparisons import (
     BASELINE_REGISTRY,
+    COL_DOB_STR,
     COL_PATID,
     COL_PHONES_ARRAY,
+    COL_SSN_LAST4,
+    COL_ZIP,
     EM_BLOCKING_RULES,
     PRIOR_RULES,
 )
@@ -29,6 +32,22 @@ from src.preprocessing.blocking import (
     _COL_PHONES_SET,
     _compute_derived_columns,
 )
+
+# Required columns that must be present after derivation — same list as
+# `fellegi_sunter_baseline.REQUIRED_MODEL_COLUMNS`.
+REQUIRED_MODEL_COLUMNS = [COL_PATID, COL_DOB_STR, COL_SSN_LAST4, COL_ZIP]
+
+
+def _validate_required_columns(df: pd.DataFrame) -> None:
+    """Raise a clear error if derivation didn't run / inputs are malformed."""
+    missing = [c for c in REQUIRED_MODEL_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            "prepare_model_input is missing required columns "
+            f"{missing}. This usually means _compute_derived_columns() was not "
+            "run upstream or the cleaned input is malformed. Required: "
+            f"{REQUIRED_MODEL_COLUMNS}."
+        )
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +118,7 @@ class FSBaseline(FSModel):
             if shim not in df.columns:
                 df[shim] = pd.NA
 
+        _validate_required_columns(df)
         logger.info(
             "FSBaseline.prepare_model_input: %d records, %d columns",
             len(df), df.shape[1],

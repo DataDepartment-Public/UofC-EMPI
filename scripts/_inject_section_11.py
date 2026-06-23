@@ -148,21 +148,22 @@ df_review = pd.read_parquet(nm_path)[["PATID_A", "PATID_B"]] if nm_path else pd.
 df_reject = pd.read_parquet(rj_path)[["PATID_A", "PATID_B"]] if rj_path else pd.DataFrame(columns=["PATID_A","PATID_B"])
 df_matches11 = pd.read_parquet(mt_path)[["PATID_A","PATID_B"]] if mt_path else pd.DataFrame(columns=["PATID_A","PATID_B"])
 
-# ── Silver labels (positives-only, may be absent locally) ────────────────────
+# ── Silver labels (positives-only CSV, may be absent locally) ────────────────
 df_silver = None
 if SILVER_DIR.exists():
-    _silver_paths = sorted(SILVER_DIR.glob("*.parquet"))
+    _silver_paths = sorted(SILVER_DIR.glob("*.csv"))
     if _silver_paths:
         # Take the largest one — usually a single combined positives file
         _sp = max(_silver_paths, key=lambda p: p.stat().st_size)
-        df_silver = pd.read_parquet(_sp)
+        # dtype=str preserves PATID leading zeros (mirrors parquet roundtrip behaviour)
+        df_silver = pd.read_csv(_sp, dtype=str)
         # Normalize column case if needed
         if "PATID_A" not in df_silver.columns:
             df_silver = df_silver.rename(columns={c: c.upper() for c in df_silver.columns if c.lower() in {"patid_a","patid_b"}})
         df_silver = df_silver[["PATID_A","PATID_B"]].drop_duplicates().reset_index(drop=True)
         print(f"silver labels      : {_sp.name}  (n={len(df_silver):,})")
     else:
-        print("silver labels      : (none found in data/silver_labels/)")
+        print("silver labels      : (no *.csv files in data/silver_labels/)")
 else:
     print("silver labels      : (data/silver_labels/ absent — skipping recall figure)")
 

@@ -77,8 +77,8 @@ class FSBaseline(FSModel):
         review_floor=0.50,
     )
     training = EMTraining(
-        em_blocking_rules=[SSN_BLOCK, EMAIL_BLOCK, SOUNDEX_BLOCK],
-        prior_rules=[SSN_BLOCK, EMAIL_BLOCK, DM_LAST_DOB_BLOCK],
+        em_blocking_rules=[SSN_BLOCK, EMAIL_BLOCK, SOUNDEX_BLOCK],       # constants to be defined in E3-1 inside comparisons.py
+        prior_rules=[SSN_BLOCK, EMAIL_BLOCK, DM_LAST_DOB_BLOCK],         # constants to be defined in E3-1 inside comparisons.py
         recall=0.80,
     )
 
@@ -106,14 +106,12 @@ class FSEnhanced(FSModel):
         self.training = EMTraining(...)
 
     def prepare_model_input(self, df_clean): ...   # identical to baseline + Address shim
-    def build_settings(self):                      # calls registry.build_all() + priors
-        settings = self.registry.build_all() + splink_boilerplate(...)
-        apply_manual_priors(settings)              # from manual_priors.py
-        return settings
+    def build_settings(self):                      # calls registry.build_all() only
+        return self.registry.build_all() + splink_boilerplate(...)
 
     def train(self, linker, df_clean=None):
-        super().train(linker, df_clean)
-        # manual priors are locked at build_settings() time; no extra step needed here
+        super().train(linker, df_clean)            # u-estimation + 3 EM sessions
+        apply_manual_priors(linker)                # from manual_priors.py — locks priors AFTER EM
 
     def classify(self, df_predictions, df_clean):
         out = super().classify(df_predictions)     # n_blocks bump + thresholds

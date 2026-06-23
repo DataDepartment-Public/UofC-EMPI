@@ -603,7 +603,7 @@ The 26,920 auto_merge figure (~16% of scored non_matches) is **higher than expec
 
 ## 18. What's next — Phase E3 refactor
 
-This module (`fellegi_sunter_enhanced.py`) is scheduled for replacement in **Phase E3-3** of the FS Refactor + Repo Cleanup plan. The plan refactors `fs_splink_enhanced/` onto the shared `models/common/fs_base.py` OO scaffold that `fs_splink_enhanced_2/` already consumes: `fellegi_sunter_enhanced.py` becomes a thin `FSEnhanced(FSModel)` subclass in `fs_enhanced.py`, with comparisons extracted to `comparisons.py`. The veto layer (`deterministic_vetoes.py`) and manual-priors layer (`manual_priors.py`) stay as standalone helper modules; they are wired into `FSEnhanced` via subclass overrides of `classify()` and `train()` — no base-class hook points are added, keeping `fs_base.py` minimal. Runners and tests are rewritten against the `FSModel` API in the same phase; no shim layer is introduced. See `docs/superpowers/specs/2026-06-23-fs-refactor-design.md` for the full design.
+`fellegi_sunter_enhanced.py` is replaced in Phase E3-3 by a thin `FSEnhanced(FSModel)` subclass; `deterministic_vetoes.py` and `manual_priors.py` stay as standalone helpers wired in via `classify()` and `train()` overrides. No base-class hook points are added. See `docs/superpowers/specs/2026-06-23-fs-refactor-design.md`.
 
 ---
 

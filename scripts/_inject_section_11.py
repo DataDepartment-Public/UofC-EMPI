@@ -481,60 +481,77 @@ For each comparison level in the enhanced_2 model, plot m (P[level fires | match
 """),
 
     code("""# §11.5 — m/u inspection for enhanced_2 (reads trained_settings from diagnostics).
-_diag_jsons = sorted(ARTIFACTS_ENH2.glob("diagnostics__*.json")) if ARTIFACTS_ENH2.exists() else []
-# Prefer non-full-pool diagnostics for the m/u inspection (training is the same;
-# the non-full-pool variant is the production-shaped run).
-_diag_jsons = [p for p in _diag_jsons if not p.stem.endswith("_full_pool")] or _diag_jsons
+import traceback as _tb115
+print("§11.5 — cell entered.")
+try:
+    _all_diags = sorted(ARTIFACTS_ENH2.glob("diagnostics__*.json")) if ARTIFACTS_ENH2.exists() else []
+    print(f"§11.5 — found {len(_all_diags)} diagnostics files in {ARTIFACTS_ENH2}")
+    for _p in _all_diags:
+        print(f"           - {_p.name}")
+    # Prefer non-full-pool diagnostics (training is identical across modes;
+    # the non-full-pool variant is the production-shaped run).
+    _diag_jsons = [p for p in _all_diags if not p.stem.endswith("_full_pool")] or _all_diags
+    if not _diag_jsons:
+        print("§11.5 SKIPPED — no diagnostics files found.")
+    else:
+        _dj = max(_diag_jsons, key=lambda p: p.stat().st_mtime)
+        print(f"§11.5 — using: {_dj.name}")
+        _diag = _json11.loads(_dj.read_text())
+        _model_dict = _diag.get("trained_settings")
+        if _model_dict is None:
+            print(f"§11.5 SKIPPED — `trained_settings` missing/null in {_dj.name}.")
+            print(f"             keys present: {list(_diag.keys())}")
+            print("             Re-run enhanced_2 on the VM (commit 6332bc7+).")
+        else:
+            print(f"§11.5 — trained_settings has {len(_model_dict)} top-level keys")
+            _comps = _model_dict.get("comparisons", [])
+            print(f"§11.5 — {len(_comps)} comparisons found")
+            _rows = []
+            for comp in _comps:
+                c_name = comp.get("output_column_name") or comp.get("comparison_description", "?")
+                for lvl in comp.get("comparison_levels", []):
+                    if lvl.get("is_null_level"):
+                        continue
+                    _rows.append({
+                        "comparison": c_name,
+                        "level": (lvl.get("label_for_charts") or lvl.get("sql_condition") or "?")[:50],
+                        "m": lvl.get("m_probability"),
+                        "u": lvl.get("u_probability"),
+                    })
+            print(f"§11.5 — built {len(_rows)} level rows pre-dropna")
+            _mu = pd.DataFrame(_rows).dropna(subset=["m", "u"])
+            print(f"§11.5 — {len(_mu)} rows have non-null m and u")
+            if _mu.empty:
+                print("§11.5 SKIPPED — no rows have both m and u set. Sample row:",
+                      _rows[0] if _rows else "(no rows at all)")
+            else:
+                _mu["log2_bf"] = np.log2(_mu["m"] / _mu["u"].clip(lower=1e-9))
+                _mu = _mu.sort_values("log2_bf")
 
-_model_dict = None
-if _diag_jsons:
-    _dj = max(_diag_jsons, key=lambda p: p.stat().st_mtime)
-    _diag = _json11.loads(_dj.read_text())
-    _model_dict = _diag.get("trained_settings")
-    if _model_dict is None:
-        print(f"§11.5 SKIPPED — `trained_settings` key missing in {_dj.name}.")
-        print("Re-run enhanced_2 on the VM with the current runner version; the runner now")
-        print("embeds linker.misc.save_model_to_json() into the diagnostics file.")
+                fig, ax = plt.subplots(figsize=(11, max(4.0, 0.32 * len(_mu))))
+                _y = np.arange(len(_mu))
+                ax.barh(_y - 0.18, _mu["m"], 0.36, color="#2D7F4B", label="m (P[fires | match])")
+                ax.barh(_y + 0.18, _mu["u"], 0.36, color="#B2182B", label="u (P[fires | non-match])")
+                ax.set_yticks(_y)
+                ax.set_yticklabels([f"{r.comparison} — {r.level}" for r in _mu.itertuples()], fontsize=8)
+                ax.set_xscale("log")
+                ax.set_xlim(left=1e-6)
+                ax.set_xlabel("probability (log scale)")
+                ax.legend(loc="lower right")
+                ax.set_title(f"enhanced_2 — m vs u per comparison level (sorted by log2 BF)  ·  {VERSION_TAG}",
+                             fontsize=12, fontweight="bold")
 
-if _model_dict is None and not _diag_jsons:
-    print("§11.5 SKIPPED — no enhanced_2 diagnostics JSON in", ARTIFACTS_ENH2)
-
-    _rows = []
-    for comp in _model_dict.get("comparisons", []):
-        c_name = comp.get("output_column_name") or comp.get("comparison_description", "?")
-        for lvl in comp.get("comparison_levels", []):
-            if lvl.get("is_null_level"):
-                continue
-            _rows.append({
-                "comparison": c_name,
-                "level": lvl.get("label_for_charts", lvl.get("sql_condition", "?"))[:50],
-                "m": lvl.get("m_probability"),
-                "u": lvl.get("u_probability"),
-            })
-    _mu = pd.DataFrame(_rows).dropna(subset=["m", "u"])
-    _mu["log2_bf"] = np.log2(_mu["m"] / _mu["u"].clip(lower=1e-9))
-    _mu = _mu.sort_values("log2_bf")
-
-    fig, ax = plt.subplots(figsize=(11, max(4.0, 0.32 * len(_mu))))
-    _y = np.arange(len(_mu))
-    ax.barh(_y - 0.18, _mu["m"], 0.36, color="#2D7F4B", label="m (P[fires | match])")
-    ax.barh(_y + 0.18, _mu["u"], 0.36, color="#B2182B", label="u (P[fires | non-match])")
-    ax.set_yticks(_y)
-    ax.set_yticklabels([f"{r.comparison} — {r.level}" for r in _mu.itertuples()], fontsize=8)
-    ax.set_xscale("log")
-    ax.set_xlim(left=1e-6)
-    ax.set_xlabel("probability (log scale)")
-    ax.legend(loc="lower right")
-    ax.set_title(f"enhanced_2 — m vs u per comparison level (sorted by log2 BF)  ·  {VERSION_TAG}",
-                 fontsize=12, fontweight="bold")
-
-    out_path = FIGURES_DIR / f"enhanced_2_m_vs_u__{VERSION_TAG}.png"
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.show()
-    print(f"Saved: {out_path}")
-    print()
-    print("Anti-evidence levels (m < u) — these should NOT include the on-purpose anti-evidence levels:")
-    print(_mu[_mu["m"] < _mu["u"]][["comparison", "level", "m", "u", "log2_bf"]].to_string(index=False))
+                out_path = FIGURES_DIR / f"enhanced_2_m_vs_u__{VERSION_TAG}.png"
+                plt.savefig(out_path, bbox_inches="tight")
+                plt.show()
+                print(f"Saved: {out_path}")
+                print()
+                print("Anti-evidence levels (m < u) — should be the on-purpose anti-evidence levels:")
+                _anti = _mu[_mu["m"] < _mu["u"]][["comparison", "level", "m", "u", "log2_bf"]]
+                print(_anti.to_string(index=False) if not _anti.empty else "(none — every level has m >= u)")
+except Exception:
+    print("§11.5 — UNCAUGHT EXCEPTION:")
+    _tb115.print_exc()
 """),
 ]
 

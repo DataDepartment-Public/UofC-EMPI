@@ -324,7 +324,7 @@ def main() -> None:
         args.u_max_pairs, labels_records_df is not None,
     )
     try:
-        scored, prob_matches, eval_schema = _train_and_score(
+        scored, prob_matches, eval_schema, linker = _train_and_score(
             df_clean, scoring_pool, labels_df,
             label_col=args.label_col, u_max_pairs=args.u_max_pairs,
             labels_records_df=labels_records_df,
@@ -333,7 +333,7 @@ def main() -> None:
         # Single-CPU u-sampling salting issue. Should not occur on the VM,
         # but handle it gracefully if it does.
         logger.warning("Retrying with u_max_pairs=1e4 due to: %s", exc)
-        scored, prob_matches, eval_schema = _train_and_score(
+        scored, prob_matches, eval_schema, linker = _train_and_score(
             df_clean, scoring_pool, labels_df,
             label_col=args.label_col, u_max_pairs=1e4,
             labels_records_df=labels_records_df,
@@ -390,6 +390,13 @@ def main() -> None:
         },
         "n_pos_labels_used": n_pos,
     }
+    # Trained m/u weights (per Splink baseline + enhanced precedent): embed
+    # the linker's settings JSON so §11.5 can render per-comparison m vs u
+    # without re-running training. Non-PHI — model parameters only.
+    try:
+        diagnostics["trained_settings"] = linker.misc.save_model_to_json()
+    except Exception as exc:  # noqa: BLE001 — Splink version drift defensive guard
+        logger.warning("Splink save_model_to_json missing: %s", exc)
     with open(diag_path, "w") as f:
         json.dump(diagnostics, f, indent=2)
     logger.info("Wrote diagnostics -> %s", diag_path)
@@ -402,8 +409,8 @@ def _train_and_score(
     label_col: str,
     u_max_pairs: float,
     labels_records_df: pd.DataFrame | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Run the full FSEnhanced2 pipeline. Returns (classified, prob_matches, eval_schema)."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, object]:
+    """Run the full FSEnhanced2 pipeline. Returns (classified, prob_matches, eval_schema, linker)."""
     model = FSEnhanced2(
         labels_df=labels_df,
         label_col=label_col,
@@ -418,7 +425,7 @@ def _train_and_score(
     classified = model.classify(predictions)
     eval_schema = model.to_evaluation_schema(classified)
     prob_matches = model.to_probabilistic_matches(classified)
-    return classified, prob_matches, eval_schema
+    return classified, prob_matches, eval_schema, linker
 
 
 if __name__ == "__main__":

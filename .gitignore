@@ -75,6 +75,9 @@ htmlcov/
 # Notebook-generated figures
 notebooks/**/figures/
 
+#docs
+docs/Rejection-Rules-Analysis.md
+
 # Claude
 .claude/
 CLAUDE.md

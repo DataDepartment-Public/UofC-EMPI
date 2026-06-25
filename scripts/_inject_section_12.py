@@ -135,7 +135,12 @@ else:
         print(f"candidate pairs : {_cp_path.name}")
         # cleaned_path / df_clean are resolved/loaded earlier in the notebook (§2-3).
         _silver = pd.read_csv(SILVER_PATH_12, dtype={"PATID_A": str, "PATID_B": str})
-        _silver["label"] = _silver["label"].astype(int)
+        # Silver labels: column `silver_label` with boolean True/False. Normalize
+        # to an int `label` column (1/0) for the joins + groupby below.
+        _src_col = "silver_label" if "silver_label" in _silver.columns else "label"
+        _silver["label"] = _silver[_src_col].map(
+            {True: 1, False: 0, "True": 1, "False": 0, 1: 1, 0: 0}
+        ).astype(int)
 
         # Stratified 80/20 split (seed 42) — matches run_real_enhanced_3 defaults.
         _test = pd.concat([g.sample(frac=0.2, random_state=42)

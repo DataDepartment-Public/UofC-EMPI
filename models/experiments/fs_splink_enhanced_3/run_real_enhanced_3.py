@@ -23,7 +23,7 @@ produced regardless of which scoring pool you choose.
 Inputs (auto-resolved via `models.common.versioning.latest_versioned`; override
 with CLI flags):
     data/processed/MDM_Population_cleaned_v*_*.parquet           (records, real PHI)
-    data/silver_labels/silver_labels_v1_2026_06_21.csv          (supervised m labels)
+    data/silver_labels/silver_labels_v1_2026_06_21.csv          (PATID_A, PATID_B, silver_label[True/False])
     EITHER data/non_matches/non_matches_v*_*.parquet            (default scoring pool)
     OR     data/blocking/candidate_pairs_v*_*.parquet           (--score-full-candidate-pool)
 
@@ -152,6 +152,28 @@ def _resolve_with_fallback(dirs, globs) -> Path:
 # ── Silver-label handling ─────────────────────────────────────────────────────
 _REQUIRED_LABEL_COLS = ("PATID_A", "PATID_B")
 
+# The silver-labels file encodes the class as booleans (True/False); accept those
+# plus the common 0/1 and string spellings and normalize to int {0, 1}.
+_BINARY_MAP = {
+    True: 1, False: 0, 1: 1, 0: 0,
+    "True": 1, "False": 0, "TRUE": 1, "FALSE": 0, "true": 1, "false": 0,
+    "1": 1, "0": 0,
+}
+
+
+def _coerce_binary_label(series: pd.Series) -> pd.Series:
+    """Normalize a label column (bool True/False, 0/1, or their string forms) to int."""
+    if series.dtype == bool:
+        return series.astype(int)
+    coerced = series.map(_BINARY_MAP)
+    if coerced.isna().any():
+        bad = sorted(series[coerced.isna()].astype(str).unique())[:5]
+        raise ValueError(
+            f"Label column has unrecognised values (e.g. {bad}); expected "
+            "True/False, 0/1, or their string spellings."
+        )
+    return coerced.astype(int)
+
 
 def _load_silver_labels(path: Path, label_col: str) -> pd.DataFrame:
     df = pd.read_csv(path, dtype={"PATID_A": str, "PATID_B": str})
@@ -159,9 +181,10 @@ def _load_silver_labels(path: Path, label_col: str) -> pd.DataFrame:
     if missing:
         raise ValueError(
             f"Silver labels {path} missing required column(s) {missing}; "
-            f"have {sorted(df.columns)}. Expected PATID_A, PATID_B, {label_col!r}."
+            f"have {sorted(df.columns)}. Expected PATID_A, PATID_B, {label_col!r} "
+            "(label values True/False)."
         )
-    df[label_col] = df[label_col].astype(int)
+    df[label_col] = _coerce_binary_label(df[label_col])
     return df
 
 
@@ -291,8 +314,9 @@ def parse_args() -> argparse.Namespace:
                         "Output filenames get a `_full_pool` suffix.")
     p.add_argument("--silver-labels", type=Path, default=DEFAULT_SILVER_LABELS,
                    help=f"Silver-labels CSV (PATID_A, PATID_B, label). Default: {DEFAULT_SILVER_LABELS}.")
-    p.add_argument("--label-col", default="label",
-                   help="Binary label column in --silver-labels (default: 'label').")
+    p.add_argument("--label-col", default="silver_label",
+                   help="Label column in --silver-labels (default: 'silver_label'; "
+                        "values True/False, coerced to {1,0}).")
     p.add_argument("--test-size", type=float, default=0.2,
                    help="Fraction of silver labels held out for testing (default: 0.2).")
     p.add_argument("--split-seed", type=int, default=42,

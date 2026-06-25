@@ -10,6 +10,8 @@
 2. **m trained supervised from the real-cohort silver labels** (`data/silver_labels/silver_labels_v1_2026_06_21.csv`), not synthetic — via `estimate_m_from_pairwise_labels` on a train split.
 3. **lambda seeded from the pipeline's deterministic rules** via `estimate_probability_two_random_records_match`; **u from random sampling** on the cohort.
 4. **Evaluated on a held-out test split** of the same silver labels (which carry both positive and negative labels) — a real confusion matrix, precision, and recall, plus Splink's label-based accuracy and threshold-selection tools.
+
+> **Silver-labels schema:** `PATID_A, PATID_B, silver_label`, where `silver_label` is a boolean (`True` = match, `False` = non-match). The runner's `--label-col` defaults to `silver_label` and coerces `True`/`False` to `1`/`0`.
 5. Reuses the shared OO base (`models/common/fs_base.py`) — no new training machinery beyond two small backward-compatible hooks.
 
 ## Why this model exists

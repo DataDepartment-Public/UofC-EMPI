@@ -84,3 +84,24 @@ def test_load_silver_labels_accepts_valid(tmp_path):
     df = r._load_silver_labels(good, "label")
     assert df["label"].dtype.kind == "i"
     assert list(df.columns) == ["PATID_A", "PATID_B", "label"]
+
+
+def test_load_silver_labels_real_schema_bool(tmp_path):
+    """The actual silver-labels schema: `silver_label` column with True/False."""
+    f = tmp_path / "silver.csv"
+    pd.DataFrame(
+        {"PATID_A": ["a", "c"], "PATID_B": ["b", "d"], "silver_label": [True, False]}
+    ).to_csv(f, index=False)
+    df = r._load_silver_labels(f, "silver_label")
+    assert df["silver_label"].dtype.kind == "i"
+    assert list(df["silver_label"]) == [1, 0]
+
+
+def test_coerce_binary_label_handles_string_booleans():
+    s = pd.Series(["True", "False", "True"])
+    assert list(r._coerce_binary_label(s)) == [1, 0, 1]
+
+
+def test_coerce_binary_label_rejects_garbage():
+    with pytest.raises(ValueError, match="unrecognised values"):
+        r._coerce_binary_label(pd.Series(["yes", "no"]))

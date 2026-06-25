@@ -227,7 +227,24 @@ class SupervisedTraining(TrainingStrategy):
         labels_table_name: str = "synthetic_labels",
         unique_id_column: str = "PATID",
         labels_records_df: pd.DataFrame | None = None,
+        prior_rules: Sequence[str] | None = None,
+        prior_recall: float = 0.9,
     ):
+        """
+        Parameters
+        ----------
+        prior_rules : optional
+            High-precision deterministic matching rules (Splink `l.<col> =
+            r.<col>` SQL strings). When supplied, the overall match-prevalence
+            prior (lambda) is seeded via
+            `estimate_probability_two_random_records_match` on the live linker
+            *before* m/u estimation, assuming these rules capture `prior_recall`
+            of all true matches. When None (the enhanced_2 default), the prior is
+            left at Splink's settings default.
+        prior_recall : float, default 0.9
+            Assumed recall of `prior_rules` over all true matches. Ignored when
+            `prior_rules` is None.
+        """
         if label_col not in labels_df.columns:
             raise ValueError(
                 f"SupervisedTraining: label column {label_col!r} not in "
@@ -240,6 +257,8 @@ class SupervisedTraining(TrainingStrategy):
         self.labels_table_name = labels_table_name
         self.unique_id_column = unique_id_column
         self.labels_records_df = labels_records_df
+        self.prior_rules = list(prior_rules) if prior_rules else None
+        self.prior_recall = prior_recall
 
     # ─── PATID validation ────────────────────────────────────────────────────
     def _positives_only(self) -> pd.DataFrame:
@@ -289,6 +308,20 @@ class SupervisedTraining(TrainingStrategy):
         model: "FSModel | None" = None,
     ) -> None:
         positives = self._positives_only()
+
+        # Seed the match-prevalence prior (lambda) from deterministic rules on
+        # the live (real-cohort) linker before m/u estimation. No-op when the
+        # caller did not supply prior_rules.
+        if self.prior_rules:
+            logger.info(
+                "SupervisedTraining: seeding match-prevalence prior from %d "
+                "deterministic rule(s) (recall=%.2f)",
+                len(self.prior_rules), self.prior_recall,
+            )
+            linker.training.estimate_probability_two_random_records_match(
+                deterministic_matching_rules=list(self.prior_rules),
+                recall=self.prior_recall,
+            )
 
         if self.labels_records_df is None:
             # Single-linker path. Labels' PATIDs must be in df_clean (the live
@@ -585,18 +618,28 @@ class FSModel(ABC):
         candidate_pairs_df: pd.DataFrame,
         df_clean: pd.DataFrame,
         full_output: bool = False,
-    ) -> pd.DataFrame:
+        return_linker: bool = False,
+    ) -> pd.DataFrame | tuple[pd.DataFrame, Any]:
         """Train + predict + classify in one call.
 
         Returns the 5-col eval schema by default; set `full_output=True` for the
         rich classified frame (used by `to_probabilistic_matches` callers).
+
+        Set `return_linker=True` to also return the trained Splink linker as the
+        second element of a `(result, linker)` tuple. The linker is needed for
+        Splink's native diagnostic/evaluation charts (`linker.visualisations.*`,
+        `linker.evaluation.*`); the default `False` keeps the single-DataFrame
+        return for all existing callers.
         """
         df_model = self.prepare_model_input(df_clean)
         linker = self.build_linker(df_model, candidate_pairs_df)
         self.train(linker, df_clean)
         predictions = self.predict(linker, candidate_pairs_df)
         classified = self.classify(predictions)
-        return classified if full_output else self.to_evaluation_schema(classified)
+        result = classified if full_output else self.to_evaluation_schema(classified)
+        if return_linker:
+            return result, linker
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

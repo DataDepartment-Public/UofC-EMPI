@@ -134,10 +134,10 @@ Filled after the first VM run (`run_real_enhanced_3.py --score-full-candidate-po
 
 | Metric (auto_merge as positive) | Value |
 |---|---|
-| Precision | _TBD_ |
-| Recall | _TBD_ |
-| F1 | _TBD_ |
-| Confusion (tier × label) | _TBD_ |
+| Precision | 0.778 |
+| Recall | 0.9418 |
+| F1 | 0.8521 |
+| Confusion (tier × label) | 0: "auto_merge": 2744, "human_review": 447, ""no_match": 27577 ; 1: "auto_merge": 9619, "human_review": 475, "no_match": 119 |
 
 Sandbox reference (synthetic data, illustrative only): positive auto_merge recall ≈ 78%, precision ≈ 94%.
 

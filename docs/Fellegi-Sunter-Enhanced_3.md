@@ -1,6 +1,6 @@
 # Fellegi-Sunter Enhanced_3 — Model Build Guide
 
-> **Status:** in development on `feature/fs-baseline-splink`. Sections fill incrementally with each phase commit (E3-1 → E3-6). The headline match-weight table and test metrics are filled after the first VM run.
+> **Status:** built on `feature/fs-baseline-splink` (E3-1 → E3-6); first VM run scored + evaluated on data version **`v6_2026_06_25`**. Match-weight table, test metrics, and the "Results & insights" + "Proposed updates for enhanced_4" sections below reflect that run.
 
 ## TL;DR
 
@@ -77,24 +77,28 @@ Each of the seven comparisons has exactly three levels: a **null** no-evidence l
 
 ### Derived match-weight table (m / u / log₂ Bayes factor)
 
-Filled from the first VM run via validation-notebook **§12.4** (saved to `notebooks/fellegi_sunter/figures/enhanced_3_match_weights__<VERSION_TAG>.csv`). Each row is one comparison level.
+From the first VM run (`v6_2026_06_25`), via validation-notebook **§12.4** (saved to `notebooks/fellegi_sunter/figures/enhanced_3_match_weights__v6_2026_06_25.csv`). Each row is one comparison level; the match weight is log₂(m/u).
 
 | Comparison | Level | m | u | log₂ BF |
 |---|---|---|---|---|
-| FirstNM | Exact match | _TBD_ | _TBD_ | _TBD_ |
-| FirstNM | All other | _TBD_ | _TBD_ | _TBD_ |
-| LastNM | Exact match | _TBD_ | _TBD_ | _TBD_ |
-| LastNM | All other | _TBD_ | _TBD_ | _TBD_ |
-| BirthDT | Exact match | _TBD_ | _TBD_ | _TBD_ |
-| BirthDT | All other | _TBD_ | _TBD_ | _TBD_ |
-| SSN | Exact match | _TBD_ | _TBD_ | _TBD_ |
-| SSN | All other | _TBD_ | _TBD_ | _TBD_ |
-| Email | Exact match | _TBD_ | _TBD_ | _TBD_ |
-| Email | All other | _TBD_ | _TBD_ | _TBD_ |
-| Phones | Shared phone | _TBD_ | _TBD_ | _TBD_ |
-| Phones | All other | _TBD_ | _TBD_ | _TBD_ |
-| Address | Exact match | _TBD_ | _TBD_ | _TBD_ |
-| Address | All other | _TBD_ | _TBD_ | _TBD_ |
+| FirstNM | Exact match | 0.883 | 0.00119 | **+9.54** |
+| FirstNM | All other | 0.117 | 0.999 | −3.10 |
+| LastNM | Exact match | 0.807 | 0.00092 | **+9.78** |
+| LastNM | All other | 0.193 | 0.999 | −2.37 |
+| BirthDT | Exact match | 0.998 | 0.000045 | **+14.43** |
+| BirthDT | All other | 0.002 | 1.000 | **−8.93** |
+| SSN | Exact match | 0.938 | _untrained¹_ | _(default)_ |
+| SSN | All other | 0.062 | 1.000 | −4.02 |
+| Email | Exact match | 0.579 | _untrained¹_ | _(default)_ |
+| Email | All other | 0.421 | 1.000 | −1.25 |
+| Phones | Shared phone | 0.551 | 0.0000155 | **+15.12** |
+| Phones | All other | 0.449 | 1.000 | −1.16 |
+| Address | Exact match | 0.206 | 0.0000173 | **+13.54** |
+| Address | All other | 0.794 | 1.000 | −0.33 |
+
+¹ The SSN and Email **exact** levels never co-occur in random u-sampling (two random records essentially never share a full SSN or full email), so Splink leaves their u untrained and the exact weight falls back to a default rather than a data-grounded value. DOB / Phones / Address exact levels did get a (tiny) sampled u. See **Results & insights** and **Known limitations**.
+
+> **How to read this table** — two patterns drive everything downstream. (1) *Agreement is decisive*: every exact level is strongly positive (+9 to +15 bits). (2) *Disagreement is mostly cheap*: the "All other" weights are small for every field **except BirthDT** (−8.93), because among true matches a disagreeing field is common (e.g. m=0.79 for Address "All other" → 79% of true-match pairs differ on AddressLine1, so a differing address barely moves the score). That asymmetry is the precision story below.
 
 ## Training procedure
 
@@ -130,16 +134,60 @@ Reuses the base `FSModel.classify()`: the n_blocks log-odds bump (≥2 blocks, c
 
 ## Test-split evaluation results
 
-Filled after the first VM run (`run_real_enhanced_3.py --score-full-candidate-pool`; diagnostics JSON `test_metrics`):
+From the first VM run (`v6_2026_06_25`), validation-notebook §12.1. Held-out test split: **10,213 positives / 30,748 negatives**.
 
-| Metric (auto_merge as positive) | Value |
-|---|---|
-| Precision | 0.778 |
-| Recall | 0.9418 |
-| F1 | 0.8521 |
-| Confusion (tier × label) | 0: "auto_merge": 2744, "human_review": 447, ""no_match": 27577 ; 1: "auto_merge": 9619, "human_review": 475, "no_match": 119 |
+Confusion matrix (rows = silver label, cols = predicted tier):
+
+| silver label | no_match | human_review | auto_merge |
+|---|---|---|---|
+| different (0) | 27,529 | 437 | 2,782 |
+| same (1) | 70 | 464 | 9,679 |
+
+| Metric | auto_merge as positive | auto_merge ∪ human_review as positive |
+|---|---|---|
+| Precision | **0.777** (9,679 / 12,461) | 0.759 (10,143 / 13,362) |
+| Recall | **0.948** (9,679 / 10,213) | 0.993 (10,143 / 10,213) |
+| F1 | **0.854** | 0.860 |
+
+Headline: **recall is strong (94.8% at auto_merge, 99.3% if human_review counts), but auto_merge precision is only 77.7%** — 2,782 truly-different pairs auto-merge. The full analysis is in **Results & insights** below.
 
 Sandbox reference (synthetic data, illustrative only): positive auto_merge recall ≈ 78%, precision ≈ 94%.
+
+## Results & insights (v6_2026_06_25)
+
+All figures referenced below were produced by validation-notebook §12 and saved to
+`notebooks/fellegi_sunter/figures/<name>__v6_2026_06_25.{png,csv}`.
+
+1. **High recall, precision-limited.** The model recovers almost every true match (94.8% to auto_merge, 99.3% to auto_merge ∪ human_review) but auto-merges 2,782 truly-different pairs — **77.7% auto_merge precision**. For an MPI where an auto-merge silently fuses two patients' records, that false-merge rate is the gating problem, not recall. *(confusion PNG)*
+
+2. **Under-penalizing disagreement is the root cause.** The match-weight table shows every "All other" (disagreement) level is weak except BirthDT. This is not a bug in training — it is what the silver-label positives say: a disagreeing field is *common* among true matches, so m(All-other) is high and log₂(m/u) ≈ 0:
+   - Address All-other **−0.33** (m=0.794 → 79% of true matches differ on AddressLine1)
+   - Phones All-other **−1.16** (m=0.449), Email All-other **−1.25** (m=0.421)
+   - FirstNM **−3.10**, LastNM **−2.37**, SSN **−4.02**
+   - only **BirthDT All-other −8.93** (m=0.002) actually bites.
+   So a conflicting SSN, email, address, or phone barely lowers a score. *(match-weights CSV/PNG)*
+
+3. **DOB + one name alone clears auto-merge.** Exact BirthDT (+14.4) + exact FirstNM or LastNM (+9.5) is ≈ +24 bits — enough to overcome the strongly negative prior and land at probability ≈ 1.0 **with no corroborating identifier**. Because the other disagreement penalties are tiny (finding 2), nothing pulls such a pair back. This is the false-positive mechanism: different people who share a birthday and a common name (and twins / siblings). *(waterfall PNG shows the mirror case — a DOB *mismatch* of −8.93 correctly sinks a same-surname pair to p≈0.00006.)*
+
+4. **The false positives are high-confidence, so threshold-tuning will not rescue precision.** The 2,782 false auto-merges sit at score ≥ 0.95 by definition; the human_review band (0.40–0.95) holds only 437 negatives. Raising the auto-merge threshold would shed recall faster than it sheds false merges. **The fix must be structural — stronger disagreement weights — not a threshold move.** *(score-histogram PNG; confirm precisely against the threshold-selection tool once exported.)*
+
+5. **Address agreement is over-weighted relative to how rare it is.** Exact AddressLine1 contributes **+13.5 bits** (near-conclusive) but only 21% of true matches actually share it (m=0.206). A near-conclusive reward on a *household-shared* signal inflates scores for same-address / different-person pairs — exactly the failure enhanced_2's `Household_discount` composite was built to catch. *(match-weights CSV)*
+
+6. **SSN and Email exact `u` are untrained.** Two random records never share a full SSN or email in u-sampling, so those exact levels fall back to a default u rather than a data-grounded one (DOB/Phones/Address got a tiny sampled u). Their exact weights are therefore not calibrated from this cohort — a latent risk if the default diverges from reality. *(match-weights CSV footnote ¹; m_u_parameters / parameter_estimates PNGs)*
+
+7. **Scores are bimodal / over-confident.** The full pool splits 138,214 no_match / 4,678 human_review / 61,913 auto_merge — only **2.3%** lands in the review band. Two-level comparisons admit few intermediate score combinations, so pairs are pushed to the extremes and clerical review gets a near-empty queue. *(score-histogram PNG)*
+
+8. **What this says vs enhanced_2.** enhanced_3's deliberate simplicity is what made findings 2/3/5 legible — they were always implicit, but a one-Bayes-factor-per-field model surfaces them cleanly. enhanced_2 already carries the machinery that targets them (multi-level mismatch bands like JW<0.5 and SSN 9-digit conflict, the `Household_discount` composite, manual priors). The takeaway is not "enhanced_2 is better" but "enhanced_3 isolated *which* of enhanced_2's extra parts are load-bearing for precision."
+
+## Proposed updates for enhanced_4 (prioritized by expected precision impact)
+
+- **P1 — Turn "All other" into explicit *conflict* vs *missing* levels.** The single biggest lever (findings 2, 3). Split each disagreement level so a *populated-and-conflicting* field is penalized hard while a *missing* field stays neutral: SSN full-9 conflict, Email different-domain/local conflict, BirthDT year-gap, name JW<0.5. The enhanced_2 builders (`models/experiments/fs_splink_enhanced_2/comparisons.py`) already implement these — port them.
+- **P2 — Stop DOB+name-only auto-merges; add a household-discount composite.** Require at least one corroborating strong identifier (SSN / email / phone) before a DOB+name pair can auto-merge, and penalize "shared address but identity conflict" (findings 3, 5). Reuse enhanced_2's `Household_discount`.
+- **P3 — Ground the SSN & Email exact `u`.** Set literature- or cohort-informed u for the untrained exact levels (finding 6), mirroring `models/experiments/fs_splink_enhanced/manual_priors.py` (`fix_u_probability`).
+- **P4 — Re-tune thresholds *with* the threshold-selection tool, expecting limited gain.** Because the FPs are high-confidence (finding 4), document precision/recall across candidate thresholds rather than nudging 0.95 — and treat structural fixes (P1/P2) as the real precision lever.
+- **P5 — Add near-match levels to repopulate the review band.** Name JW bands, ±1-day / month-day-swap DOB, SSN last-4 (findings 1, 7) — recovers the 534 positives currently missed and gives clerical review a meaningful, non-empty queue.
+
+Recommended sequencing: **P1 → P2** first (directly attack the false-merge rate), then **P3 / P5** (calibration + recall/queue), with **P4** as a measurement step throughout.
 
 ## How to run
 
@@ -166,8 +214,10 @@ The full train→score round-trip is exercised by `run_synthetic_enhanced_3.py` 
 
 ## Known limitations
 
-- **u untrained for rare exact levels.** SSN / DOB / Email / Phones exact-match levels are ~never seen in random u-sampling, so they keep Splink's default u. This under-states their discriminating power slightly. A future refinement could set literature-informed u for these levels (mirroring `manual_priors.py` in the enhanced module).
-- **Deliberately under-expressive.** No typo tolerance (JW), no near-DOB, no SSN last-4, no household anti-evidence. enhanced_3 will under-recall positives with a single corrupted identity field and cannot discount same-household false positives the way enhanced_2 does. That is the explicit interpretability trade-off — compare head-to-head in the validation notebook before promoting.
+- **Auto_merge precision ceiling ≈ 78% (measured, v6).** The dominant limitation: 2,782 truly-different test pairs auto-merge because disagreement levels under-penalize (see **Results & insights** findings 2–4). This is structural, not a threshold artifact — addressed by enhanced_4 P1/P2.
+- **`u` untrained for the SSN & Email exact levels.** Confirmed in the v6 match-weights CSV: those two exact levels never co-occur in random u-sampling, so they keep Splink's default u (DOB/Phones/Address did get a tiny sampled u). Their exact weights are not cohort-calibrated. Fix: enhanced_4 P3 (manual/literature u, mirroring `manual_priors.py`).
+- **Deliberately under-expressive.** No typo tolerance (JW), no near-DOB, no SSN last-4, no household anti-evidence. enhanced_3 under-recalls positives with a single corrupted identity field (534 missed in the v6 test split) and cannot discount same-household false positives the way enhanced_2 does. That is the explicit interpretability trade-off — and the v6 results quantify exactly which of those omissions cost the most (enhanced_4 P1/P2/P5).
+- **Over-confident score distribution.** Only 2.3% of the full pool lands in the 0.40–0.95 review band, so clerical review gets a near-empty queue (finding 7).
 - **Test metrics use un-bumped scores** (see Classification).
 
 ## See also

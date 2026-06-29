@@ -132,6 +132,12 @@ class TestMatches:
         with pytest.raises(_SCHEMA_ERR):
             validate(_matches(match_rule=["NOT_A_RULE"]), Matches)
 
+    def test_rejects_review_tier_rule(self):
+        # Review-tier rules (NAME_DOB_SEX / NAME_DOB_ADDRESS) are never auto-merged,
+        # so they must not appear in the Matches (auto-merge) artifact.
+        with pytest.raises(_SCHEMA_ERR):
+            validate(_matches(match_rule=["NAME_DOB_SEX"]), Matches)
+
     def test_empty_frame_is_skipped(self):
         out = validate(pd.DataFrame(), Matches)  # allow_empty default True
         assert out.empty

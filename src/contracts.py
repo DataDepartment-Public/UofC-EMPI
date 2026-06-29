@@ -58,6 +58,13 @@ RULE_NAMES: tuple[str, ...] = (
     "NAME_DOB_PHONE", "NAME_DOB_SEX", "NAME_DOB_ADDRESS",
 )
 
+#: Auto-merge-tier rule names — keep in sync with
+#: deterministic_rules.AUTO_MERGE_RULES. NAME_DOB_SEX / NAME_DOB_ADDRESS are
+#: review-tier and must never appear in the (auto-merge) Matches artifact.
+AUTO_MERGE_RULE_NAMES: tuple[str, ...] = (
+    "SSN_DOB", "NAME_DOB_EMAIL", "NAME_DOB_PHONE",
+)
+
 SEX_VALUES: tuple[str, ...] = ("MALE", "FEMALE", "OTHER")
 MATCH_SOURCES: tuple[str, ...] = ("deterministic", "model")
 
@@ -150,8 +157,10 @@ class Matches(pa.DataFrameModel):
 
     PATID_A: Series[str] = pa.Field(nullable=False, coerce=True)
     PATID_B: Series[str] = pa.Field(nullable=False, coerce=True)
-    match_rule: Series[str] = pa.Field(nullable=False, coerce=True, isin=list(RULE_NAMES))
-    confidence: Series[float] = pa.Field(nullable=False, coerce=True, ge=0.97, le=1.0)
+    match_rule: Series[str] = pa.Field(
+        nullable=False, coerce=True, isin=list(AUTO_MERGE_RULE_NAMES)
+    )
+    confidence: Series[float] = pa.Field(nullable=False, coerce=True, ge=0.985, le=1.0)
     rules_fired: Series[str] = pa.Field(nullable=False, coerce=True)
     is_suspicious: Series[bool] = pa.Field(nullable=False, coerce=True)
     high_fanout_ssn: Series[bool] = pa.Field(nullable=False, coerce=True)

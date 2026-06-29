@@ -62,6 +62,39 @@ class Settings(BaseSettings):
         description="Per-key record cap; blocks larger than this are capped.",
     )
 
+    # ── Stacked blocker: q-gram pass (src/preprocessing/qgram_blocking.py) ────
+    # The 8-block scheme is unioned with a typo-tolerant char-n-gram cosine pass
+    # restricted to a coarse DOB block, then pruned by meta-blocking (below).
+    # Validated recommended config: fulldob block, char (2,4)-grams, cosine >=0.30.
+    qgram_block_kind: str = Field(
+        default="fulldob",
+        description="Coarse block the q-gram cosine is restricted to within "
+        "('fulldob' = exact birth date, or 'birthyear').",
+    )
+    qgram_threshold: float = Field(
+        default=0.30,
+        description="Minimum char-n-gram cosine similarity for a q-gram "
+        "candidate pair. Pending gold-label confirmation.",
+    )
+    qgram_ngram_min: int = Field(default=2, description="Min char n-gram size.")
+    qgram_ngram_max: int = Field(default=4, description="Max char n-gram size.")
+    qgram_min_df: int = Field(
+        default=2,
+        description="TfidfVectorizer min_df — drop n-grams rarer than this.",
+    )
+
+    # ── Stacked blocker: meta-blocking prune (src/preprocessing/meta_blocking.py) ─
+    cnp_top_k: int = Field(
+        default=10,
+        description="Cardinality Node Pruning: keep an edge if it is in the "
+        "top-k ARCS-weighted edges of either endpoint.",
+    )
+    cnp_qgram_only_weight: float = Field(
+        default=0.5,
+        description="ARCS weight assigned to q-gram-only edges (no 8-block "
+        "source) when meta-blocking ranks them.",
+    )
+
     # ── Rules ───────────────────────────────────────────────────────────────
     ssn_fanout_threshold: int = Field(
         default=4,

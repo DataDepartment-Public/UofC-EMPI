@@ -54,8 +54,9 @@ from src.contracts import (  # noqa: E402
 )
 from src.preprocessing.clean import _load as _read_raw, write_cleaned  # noqa: E402
 from src.preprocessing.transformations import transform_dataframe  # noqa: E402
-from src.preprocessing.blocking import run_batch_blocking  # noqa: E402
+from src.preprocessing.stacked_blocking import run_stacked_blocking  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
+    AUTO_MERGE_RULES,
     apply_rules,
     assign_clusters,
     classify_non_matches,
@@ -137,8 +138,8 @@ def run_pipeline(
     cleaned_path = settings.processed_dir / f"{settings.cleaned_stem}_{run_id}.parquet"
     write_cleaned(cleaned, cleaned_path)
 
-    # ── Stage 2: block ────────────────────────────────────────────────────
-    candidate_pairs = run_batch_blocking(cleaned)
+    # ── Stage 2: block (stacked: 8-block ∪ q-gram → CNP/ARCS prune) ────────
+    candidate_pairs = run_stacked_blocking(cleaned)
     validate(candidate_pairs, CandidatePairs)
     logger.info("[2/3] BLOCK — %d candidate pairs", len(candidate_pairs))
     pairs_path = settings.blocking_dir / f"candidate_pairs_{run_id}.parquet"
@@ -146,26 +147,42 @@ def run_pipeline(
 
     # ── Stage 3: deterministic rules ──────────────────────────────────────
     assert_patid_coverage(candidate_pairs, cleaned)  # guaranteed in-process; guard anyway
-    matches = apply_rules(
+    confirmed = apply_rules(
         candidate_pairs, cleaned, ssn_fanout_threshold=settings.ssn_fanout_threshold
     )
+    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; the rest
+    # (NAME_DOB_SEX / NAME_DOB_ADDRESS) are confirmed but routed to review.
+    is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
+    matches = confirmed[is_auto].reset_index(drop=True)
+    review_confirmed = confirmed[~is_auto].reset_index(drop=True)
     if not matches.empty:
         clusters = assign_clusters(matches)
         matches = matches.copy()
         matches["cluster_id"] = matches["PATID_A"].map(clusters)
     validate(matches, Matches)
-    # Three-way split: review -> downstream; reject -> dropped (audited separately).
-    decided = classify_non_matches(candidate_pairs, matches, cleaned)
-    non_matches = (
-        decided[decided["decision"] == "review"][list(candidate_pairs.columns)]
-        .reset_index(drop=True)
-    )
+    # Three-way split. `confirmed` (both tiers) is removed from the contradiction
+    # split so review-tier pairs are never reject-scored; they join review below.
+    decided = classify_non_matches(candidate_pairs, confirmed, cleaned)
+    pair_cols = list(candidate_pairs.columns)
+    non_matches = pd.concat(
+        [
+            review_confirmed[pair_cols],
+            decided[decided["decision"] == "review"][pair_cols],
+        ]
+    ).reset_index(drop=True)
     rejects = decided[decided["decision"] == "reject"].reset_index(drop=True)
     validate(non_matches, NonMatches)
-    stats = get_match_stats(matches, n_records=len(cleaned), decided=decided)
+    stats = get_match_stats(
+        matches,
+        n_records=len(cleaned),
+        decided=decided,
+        review_matches=review_confirmed,
+    )
     logger.info(
-        "[3/3] RULES — %d matches, %d review, %d reject, %d clusters",
-        len(matches), len(non_matches), len(rejects), stats.get("n_clusters", 0),
+        "[3/3] RULES — %d auto-merge, %d review (%d rule-confirmed), %d reject, "
+        "%d clusters",
+        len(matches), len(non_matches), len(review_confirmed), len(rejects),
+        stats.get("n_clusters", 0),
     )
     matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)

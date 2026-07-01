@@ -14,8 +14,8 @@ Coverage:
       form Parquet produces).
     - The is_suspicious flag follows the guide's definition exactly.
     - Passthrough columns survive; empty / malformed inputs are handled.
-    - assign_clusters links transitive matches; get_match_stats reports
-      coverage, quality, and cluster stats.
+    - get_match_stats reports coverage, quality, and cluster stats (clustering
+      itself is tested in tests/unit/test_clustering.py).
 """
 
 import numpy as np
@@ -28,7 +28,6 @@ from src.models.deterministic_rules import (
     REVIEW_RULES,
     RULES,
     apply_rules,
-    assign_clusters,
     classify_non_matches,
     get_match_stats,
     get_non_matches,
@@ -707,30 +706,6 @@ class TestNonMatches:
     def test_missing_required_columns_raises(self):
         with pytest.raises(ValueError, match="PATID_B"):
             get_non_matches(pd.DataFrame({"PATID_A": ["A"]}), pd.DataFrame())
-
-
-# ── Clustering ─────────────────────────────────────────────────────────────────
-class TestClustering:
-    def test_transitive_link_one_cluster(self):
-        clusters = assign_clusters(
-            pd.DataFrame({"PATID_A": ["A", "B"], "PATID_B": ["B", "C"]})
-        )
-        assert clusters["A"] == clusters["B"] == clusters["C"]
-
-    def test_separate_components_distinct_ids(self):
-        clusters = assign_clusters(
-            pd.DataFrame({"PATID_A": ["A", "C"], "PATID_B": ["B", "D"]})
-        )
-        assert clusters["A"] == clusters["B"]
-        assert clusters["C"] == clusters["D"]
-        assert clusters["A"] != clusters["C"]
-
-    def test_cluster_ids_are_contiguous(self):
-        clusters = assign_clusters(
-            pd.DataFrame({"PATID_A": ["A", "C", "E"],
-                          "PATID_B": ["B", "D", "F"]})
-        )
-        assert sorted(set(clusters.values())) == [0, 1, 2]
 
 
 # ── Stats ──────────────────────────────────────────────────────────────────────

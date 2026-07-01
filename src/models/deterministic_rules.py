@@ -23,8 +23,11 @@ PUBLIC API:
     apply_rules(candidate_pairs, df_clean)      -> pd.DataFrame (confirmed pairs)
     get_non_matches(candidate_pairs, matches)   -> pd.DataFrame (unconfirmed pairs)
     classify_non_matches(pairs, matches, clean) -> pd.DataFrame (+ reject/review)
-    assign_clusters(matches)                    -> dict[str, int] (PATID -> cluster)
     get_match_stats(matches, n_records)         -> dict         (audit report)
+
+    Connected-component clustering now lives in `src/models/clustering.py`
+    (stage 5 of the pipeline) — see `assign_clusters` / `build_cluster_assignments`
+    there. `get_match_stats` imports it for the cluster-size stats below.
 
 THREE-WAY DECISION:
     Each candidate pair lands in one of three buckets:
@@ -68,6 +71,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import settings
+from src.models.clustering import assign_clusters
 
 logger = logging.getLogger(__name__)
 
@@ -691,46 +695,6 @@ def classify_non_matches(
         len(out) - n_reject,
     )
     return out
-
-
-def assign_clusters(matches: pd.DataFrame) -> dict[str, int]:
-    """Group confirmed matches into connected-component clusters.
-
-    Treats every confirmed pair as an undirected edge and runs union-find to
-    assign each PATID a cluster id. PATIDs not appearing in `matches` are not
-    included (singletons). Cluster ids are deterministic: the smallest PATID in
-    a component (by sort order) seeds its id ordering.
-
-    Returns
-    -------
-    dict[str, int]
-        PATID -> integer cluster id (ids are contiguous starting at 0).
-    """
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        parent.setdefault(x, x)
-        root = x
-        while parent[root] != root:
-            root = parent[root]
-        while parent[x] != root:  # path compression
-            parent[x], x = root, parent[x]
-        return root
-
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra == rb:
-            return
-        # Keep the lexicographically smaller root for deterministic output.
-        lo, hi = (ra, rb) if ra < rb else (rb, ra)
-        parent[hi] = lo
-
-    for a, b in zip(matches["PATID_A"], matches["PATID_B"]):
-        union(a, b)
-
-    roots = sorted({find(p) for p in parent})
-    root_to_id = {root: i for i, root in enumerate(roots)}
-    return {patid: root_to_id[find(patid)] for patid in parent}
 
 
 def get_match_stats(

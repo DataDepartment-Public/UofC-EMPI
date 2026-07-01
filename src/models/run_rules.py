@@ -69,10 +69,10 @@ from src.contracts import (  # noqa: E402
     validate,
 )
 from src.config import configure_logging  # noqa: E402
+from src.models.clustering import assign_clusters  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
     AUTO_MERGE_RULES,
     apply_rules,
-    assign_clusters,
     classify_non_matches,
     get_match_stats,
 )

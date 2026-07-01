@@ -4,21 +4,26 @@ Runs the stages **in process**, passing DataFrames stage-to-stage rather than
 re-resolving "the latest file in the directory":
 
     raw  ──►  clean/transform  ──►  blocking  ──►  deterministic rules
-                                                      ├─► matches
+                                                      ├─► matches ──┐
                                                       └─► non-matches
+                                                                    ▼
+                                                            clustering (terminal)
+                                                              └─► cluster assignments
 
-Because one in-memory cleaned frame feeds both blocking and rules, the lineage
-mismatch the standalone CLIs are vulnerable to cannot occur here. Every boundary
-is validated against the contracts in `src/contracts.py`, and a single `run_id`
-ties all artifacts together via a `RunManifest` written to `data/runs/`.
+Because one in-memory cleaned frame feeds every stage, the lineage mismatch the
+standalone CLIs are vulnerable to cannot occur here. Every boundary is validated
+against the contracts in `src/contracts.py`, and a single `run_id` ties all
+artifacts together via a `RunManifest` written to `data/runs/`.
 
 USAGE:
     python -m src.pipeline                         # uses settings.raw_input
     python -m src.pipeline --input data/raw/MDM_Population.csv
     python -m src.pipeline --run-id 20260603T120000Z   # override the run id
 
-Stages 4 (probabilistic model) and 5 (clustering) are not built yet; the clear
-insertion point is marked below.
+Stage 4 (probabilistic model, `docs/Data-Contract.md`) is not built yet; today
+clustering runs directly over the deterministic auto-merge matches. Once a
+model stage lands, its edges should union into the same clustering input
+(see `src/models/clustering.py`).
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from src.contracts import (  # noqa: E402
     ArtifactRef,
     CandidatePairs,
     CleanedRecords,
+    ClusterAssignments,
     Matches,
     NonMatches,
     RunManifest,
@@ -55,10 +61,10 @@ from src.contracts import (  # noqa: E402
 from src.preprocessing.clean import _load as _read_raw, write_cleaned  # noqa: E402
 from src.preprocessing.transformations import transform_dataframe  # noqa: E402
 from src.preprocessing.stacked_blocking import run_stacked_blocking  # noqa: E402
+from src.models.clustering import assign_clusters, build_cluster_assignments  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
     AUTO_MERGE_RULES,
     apply_rules,
-    assign_clusters,
     classify_non_matches,
     get_match_stats,
 )
@@ -132,7 +138,7 @@ def run_pipeline(
     validate(cleaned, CleanedRecords)
     n_valid = int(cleaned["valid_record"].sum())
     logger.info(
-        "[1/3] CLEAN — %d raw → %d cleaned rows (%d valid)",
+        "[1/4] CLEAN — %d raw → %d cleaned rows (%d valid)",
         len(raw_df), len(cleaned), n_valid,
     )
     cleaned_path = settings.processed_dir / f"{settings.cleaned_stem}_{run_id}.parquet"
@@ -141,7 +147,7 @@ def run_pipeline(
     # ── Stage 2: block (stacked: 8-block ∪ q-gram → CNP/ARCS prune) ────────
     candidate_pairs = run_stacked_blocking(cleaned)
     validate(candidate_pairs, CandidatePairs)
-    logger.info("[2/3] BLOCK — %d candidate pairs", len(candidate_pairs))
+    logger.info("[2/4] BLOCK — %d candidate pairs", len(candidate_pairs))
     pairs_path = settings.blocking_dir / f"candidate_pairs_{run_id}.parquet"
     candidate_pairs.to_parquet(pairs_path, index=False)
 
@@ -179,7 +185,7 @@ def run_pipeline(
         review_matches=review_confirmed,
     )
     logger.info(
-        "[3/3] RULES — %d auto-merge, %d review (%d rule-confirmed), %d reject, "
+        "[3/4] RULES — %d auto-merge, %d review (%d rule-confirmed), %d reject, "
         "%d clusters",
         len(matches), len(non_matches), len(review_confirmed), len(rejects),
         stats.get("n_clusters", 0),
@@ -191,8 +197,18 @@ def run_pipeline(
     rejects_path = settings.rejects_dir / f"rejects_{run_id}.parquet"
     rejects.to_parquet(rejects_path, index=False)
 
-    # ── Stages 4–5 (model, clustering): add here, feeding the uniform Edges
-    #    contract into a terminal clustering step over all confirmed edges. ──
+    # ── Stage 4: cluster (terminal) — connected components over the deterministic
+    #    auto-merge edges. Once a probabilistic model stage exists, its edges
+    #    should union into `matches` here before clustering. ────────────────
+    cluster_assignments = build_cluster_assignments(matches, cleaned)
+    validate(cluster_assignments, ClusterAssignments)
+    n_total_clusters = int(cluster_assignments["cluster_id"].nunique())
+    logger.info(
+        "[4/4] CLUSTER — %d records → %d clusters (incl. singletons)",
+        len(cluster_assignments), n_total_clusters,
+    )
+    clusters_path = settings.clusters_dir / f"cluster_assignments_{run_id}.parquet"
+    cluster_assignments.to_parquet(clusters_path, index=False)
 
     # ── Manifest ──────────────────────────────────────────────────────────
     root = settings.project_root
@@ -206,6 +222,7 @@ def run_pipeline(
         matches=_artifact_ref(matches_path, matches, root),
         non_matches=_artifact_ref(non_matches_path, non_matches, root),
         rejects=_artifact_ref(rejects_path, rejects, root),
+        clusters=_artifact_ref(clusters_path, cluster_assignments, root),
         counts={
             "raw_rows": len(raw_df),
             "cleaned_rows": len(cleaned),
@@ -215,6 +232,7 @@ def run_pipeline(
             "non_matches": len(non_matches),
             "rejects": len(rejects),
             "clusters": int(stats.get("n_clusters", 0)),
+            "total_clusters": n_total_clusters,
         },
     )
     manifest_path = settings.runs_dir / f"run_{run_id}.json"

@@ -241,13 +241,68 @@ Test metrics use un-bumped scores (the test pairs carry no blocking provenance),
 
 ## Test-split evaluation results
 
-_TBD — pending first VM run (`run_real_enhanced_4.py --score-full-candidate-pool`)_
+### Test-Split Configuration
 
-The key metric to watch is whether auto_merge precision rises materially above enhanced_3's ~78% at comparable recall, and how many true matches the corroboration gate demotes (the recall cost). The diagnostics JSON records `gate_demotions_full_pool` for production scoring and the test-split confusion matrix for held-out evaluation; both reflect the full system including the gate.
+| Parameter | Value |
+|---|---|
+| Test Size | 0.2 |
+| Split Seed | 42 |
+| Total Train Samples | 163,844 |
+| Train Positives | 40,854 |
+| Total Test Samples | 40,961 |
+
+### Overall Pool & Evaluation Metrics
+
+| Metric | Value |
+|---|---|
+| Gate Demotions (Full Pool) | 51,720 |
+| Scoring Pool Rows | 204,805 |
+| Scored Full Candidate Pool | True |
+| U Max Pairs | 1,000,000.0 |
+| Probability of 2 Random Records Match | 0.00000301 |
+
+### Predicted Tier Counts
+
+| Tier | Count |
+|---|---|
+| no_match | 133,175 |
+| human_review | 56,435 |
+| auto_merge | 15,195 |
+
+### Score Quantiles
+
+| Quantile | Value |
+|---|---|
+| Min | 1.00e-12 |
+| 25th Percentile (p25) | 0.0000204 |
+| Median | 0.0100804 |
+| 75th Percentile (p75) | 0.9999923 |
+| Max | 0.9999999 |
+
+### Untrained U Probabilities After Training
+*(These comparison levels did not have enough data to train a U probability)*
+
+| Comparison | Level |
+|---|---|
+| LastNM_clean | full_name_compact exact match |
+| SSN | All other comparisons |
+| Email | Exact username (different domain) |
+| Phones_array | Array intersection size >= 2 |
 
 ## Results & insights
 
-_TBD — pending first VM run (`run_real_enhanced_4.py --score-full-candidate-pool`)_
+Confusion matrix (rows = silver label, cols = predicted tier):
+
+| silver label | no_match | human_review | auto_merge |
+|---|---|---|---|
+| different (0) | 26,610 | 3,694 | 444 |
+| same (1) | 13 | 7,620 | 2,580 |
+
+| Metric | auto_merge as positive | auto_merge ∪ human_review as positive |
+|---|---|---|
+| Precision | **0.853** (2,580 / 3,024) | 0.711 (10,200 / 14,338) |
+| Recall | **0.253** (2,580 / 10,213) | 0.999 (10,200 / 10,213) |
+| F1 | **0.390** | 0.831 |
 
 > Sub-note: the key metric to watch is whether auto_merge precision rises materially above enhanced_3's ~78% at comparable recall, and how many true matches the gate demotes (the recall cost). If precision rises but recall drops substantially, the next iteration should consider relaxing the gate (e.g. allowing a single strong household signal rather than two) or adding more near-match levels (P5 in enhanced_3's roadmap) to repopulate the gate's keep-branch for genuine duplicates that lack SSN/email.
 

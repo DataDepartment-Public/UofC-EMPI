@@ -101,7 +101,48 @@ In enhanced_3, an SSN or email disagreement fell into "All other" with weight �
 
 ### Derived match-weight table (m / u / log₂ Bayes factor)
 
-_TBD — pending first VM run (`run_real_enhanced_4.py --score-full-candidate-pool`)_
+| comparison | level | m | u | log2_bayes_factor |
+| :--- | :--- | :--- | :--- | :--- |
+| FirstNM_clean | Exact match on FirstNM_clean | 0.883414 | 0.001191 | 9.535 |
+| FirstNM_clean | Jaro-Winkler distance of FirstNM_clean >= 0.92 | 0.080017 | 0.000935 | 6.419 |
+| FirstNM_clean | Jaro-Winkler distance of FirstNM_clean >= 0.88 | 0.018823 | 0.000823 | 4.515 |
+| FirstNM_clean | Jaro-Winkler distance of FirstNM_clean < 0.5 | 0.003158 | 0.560076 | -7.471 |
+| FirstNM_clean | All other comparisons | 0.014589 | 0.436975 | -4.905 |
+| LastNM_clean | Exact match on LastNM_clean | 0.806634 | 0.000916 | 9.782 |
+| LastNM_clean | full_name_compact exact match | 0.014835 | NaN | NaN |
+| LastNM_clean | Jaro-Winkler distance of LastNM_clean >= 0.95 | 0.039780 | 0.000121 | 8.364 |
+| LastNM_clean | Jaro-Winkler distance of LastNM_clean >= 0.88 | 0.077307 | 0.000500 | 7.271 |
+| LastNM_clean | LastNM Double-Metaphone match | 0.005043 | 0.000479 | 3.395 |
+| LastNM_clean | Jaro-Winkler distance of LastNM_clean < 0.5 | 0.021126 | 0.637410 | -4.915 |
+| LastNM_clean | All other comparisons | 0.035275 | 0.360573 | -3.354 |
+| _dob_str | Exact match on date of birth | 0.997944 | 0.000045 | 14.428 |
+| _dob_str | DOB month-day swap (same year) | 0.000220 | 0.000019 | 3.568 |
+| _dob_str | DamerauLevenshtein distance <= 1 | 0.001371 | 0.001178 | 0.218 |
+| _dob_str | Abs date difference <= 1 day | 0.000073 | 0.000010 | 2.813 |
+| _dob_str | Abs date difference <= 1 month | 0.000098 | 0.001845 | -4.236 |
+| _dob_str | Abs date difference <= 1 year | 0.000171 | 0.024892 | -7.183 |
+| _dob_str | All other comparisons | 0.000122 | 0.972011 | -12.955 |
+| SSN | Exact match on SSN_clean | 0.938458 | 0.000033 | 14.801 |
+| SSN | Last 4 digits match | 0.022472 | 0.000105 | 7.747 |
+| SSN | Both populated, full 9-digit mismatch | 0.039070 | 0.999895 | -4.678 |
+| SSN | All other comparisons | NaN | NaN | NaN |
+| Email | Exact match on Email_clean | 0.578816 | 0.000022 | 14.703 |
+| Email | Exact username (different domain) | 0.020218 | NaN | NaN |
+| Email | Jaro-Winkler on full email >= 0.88 | 0.152084 | 0.000086 | 10.796 |
+| Email | All other comparisons | 0.248882 | 0.999914 | -2.006 |
+| Phones_array | Array intersection size >= 2 | 0.003549 | NaN | NaN |
+| Phones_array | Array intersection size >= 1 | 0.475204 | 0.000014 | 15.060 |
+| Phones_array | All other comparisons | 0.521246 | 0.999986 | -0.940 |
+| ZIP | Exact match on ZipCD_clean_base | 0.528022 | 0.013976 | 5.240 |
+| ZIP | First 3 digits match | 0.368087 | 0.399785 | -0.119 |
+| ZIP | All other comparisons | 0.103891 | 0.586239 | -2.496 |
+| StateCD_clean | Exact match on StateCD_clean | 0.992106 | 0.640923 | 0.630 |
+| StateCD_clean | All other comparisons | 0.007894 | 0.359077 | -5.507 |
+| Household_discount | Household indicator without identity match | 0.000196 | 0.000022 | 3.141 |
+| Household_discount | All other comparisons | 0.999804 | 0.999978 | -0.000 |
+| Address | Exact match on AddressLine1_clean | 0.206354 | 0.000017 | 13.543 |
+| Address | Same City + State + Zip | 0.331997 | 0.013857 | 4.582 |
+| Address | All other comparisons | 0.461649 | 0.986126 | -1.095 |
 
 ## Training procedure
 

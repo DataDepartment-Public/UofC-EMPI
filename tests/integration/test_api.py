@@ -47,21 +47,29 @@ def client(test_settings):
 
 def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
     """Write a tiny manifest + Parquet run and publish it — the shortcut most
-    /records, /clusters, /audit tests need without running the real pipeline."""
+    /records, /clusters, /audit tests need without running the real pipeline.
+
+    P1<->P2 auto-merge (SSN_DOB); P3 true singleton; P4<->P5 review-tier
+    candidate (NAME_DOB_SEX) — exercises the review-queue/raw-data routes too.
+    """
     from src.api import publish
 
     cleaned = pd.DataFrame({
-        "PATID": ["P1", "P2", "P3"],
-        "FirstNM_clean": ["Jane", "Jane", "John"],
-        "LastNM_clean": ["Doe", "Doe", "Smith"],
-        "BirthDT_clean": pd.to_datetime(["1990-01-01", "1990-01-01", "1985-05-05"]),
-        "SSN_clean": ["123456789", "123456789", None],
-        "last_4_SSN": ["6789", "6789", None],
-        "Email_clean": [None, None, None],
-        "ZipCD_clean_base": ["60601", "60601", None],
-        "AddressLine1_clean": [None, None, None],
-        "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE"],
-        "valid_record": [True, True, True],
+        "PATID": ["P1", "P2", "P3", "P4", "P5"],
+        "FirstNM_clean": ["Jane", "Jane", "John", "Amy", "Amy"],
+        "LastNM_clean": ["Doe", "Doe", "Smith", "Lee", "Lee"],
+        "BirthDT_clean": pd.to_datetime(
+            ["1990-01-01", "1990-01-01", "1985-05-05", "1975-03-03", "1975-03-03"]
+        ),
+        "SSN_clean": ["123456789", "123456789", None, None, None],
+        "last_4_SSN": ["6789", "6789", None, None, None],
+        "Email_clean": [None, None, None, None, None],
+        "ZipCD_clean_base": ["60601", "60601", None, None, None],
+        "AddressLine1_clean": [None, None, None, None, None],
+        "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE", "FEMALE", "FEMALE"],
+        "FirstNM_raw": ["JANE", "JANE", "JOHN", "AMY", "AMY"],
+        "SSN_raw": ["123-45-6789", "123456789", None, None, None],
+        "valid_record": [True, True, True, True, True],
     })
     cleaned_path = settings.processed_dir / f"cleaned_{run_id}.parquet"
     cleaned.to_parquet(cleaned_path, index=False)
@@ -76,7 +84,25 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
     matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
 
-    clusters = pd.DataFrame({"PATID": ["P1", "P2", "P3"], "cluster_id": [0, 0, 1]})
+    non_matches = pd.DataFrame({
+        "PATID_A": ["P4"], "PATID_B": ["P5"],
+        "source_blocks": ["B3"], "n_blocks": [1],
+    })
+    non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
+    non_matches.to_parquet(non_matches_path, index=False)
+
+    review_evidence = pd.DataFrame({
+        "PATID_A": ["P4"], "PATID_B": ["P5"],
+        "match_rule": ["NAME_DOB_SEX"], "confidence": [0.98],
+        "rules_fired": ["NAME_DOB_SEX"], "is_suspicious": [False],
+        "high_fanout_ssn": [False], "source_blocks": ["B3"], "n_blocks": [1],
+    })
+    review_evidence_path = settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
+    review_evidence.to_parquet(review_evidence_path, index=False)
+
+    clusters = pd.DataFrame({
+        "PATID": ["P1", "P2", "P3", "P4", "P5"], "cluster_id": [0, 0, 1, 2, 3],
+    })
     clusters_path = settings.clusters_dir / f"clusters_{run_id}.parquet"
     clusters.to_parquet(clusters_path, index=False)
 
@@ -87,10 +113,15 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
 
     manifest = RunManifest(
         run_id=run_id, created_utc="2026-07-01T00:00:00Z",
-        raw_input=ref(cleaned_path, 3), cleaned=ref(cleaned_path, 3),
+        raw_input=ref(cleaned_path, 5), cleaned=ref(cleaned_path, 5),
         candidate_pairs=ref(matches_path, 1), matches=ref(matches_path, 1),
-        non_matches=ref(matches_path, 0), clusters=ref(clusters_path, 3),
-        counts={"matches": 1},
+        non_matches=ref(non_matches_path, 1),
+        review_evidence=ref(review_evidence_path, 1),
+        clusters=ref(clusters_path, 5),
+        counts={
+            "raw_rows": 5, "valid_records": 5, "candidate_pairs": 2, "matches": 1,
+            "non_matches": 1,
+        },
     )
     (settings.runs_dir / f"run_{run_id}.json").write_text(manifest.model_dump_json())
 
@@ -160,25 +191,46 @@ class TestRecords:
         resp = client.get("/records")
         assert resp.status_code == 200
         body = resp.json()
-        assert body["total"] == 2  # one matched entity + one singleton
+        # matched pair (1) + true singleton (1) + review-tier singletons (2)
+        assert body["total"] == 4
         mids = {item["mid"] for item in body["items"]}
-        assert len(mids) == 2
+        assert len(mids) == 4
+
+    def test_review_status_entity_has_candidates(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.get("/records", params={"origin": "review"})
+        body = resp.json()
+        assert body["total"] == 2
+        entity = body["items"][0]
+        assert len(entity["review_candidates"]) == 1
+        assert entity["review_candidates"][0]["match_rule"] == "NAME_DOB_SEX"
+
+    def test_get_raw_record(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.get("/records/P1/raw")
+        assert resp.status_code == 200
+        assert resp.json()["fields"]["FirstNM_raw"] == "JANE"
+
+    def test_get_raw_record_unknown_404s(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.get("/records/P-nope/raw")
+        assert resp.status_code == 404
 
     def test_search_filters(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
         resp = client.get("/records", params={"search": "Smith"})
         assert resp.json()["total"] == 1
 
-    def test_status_filter(self, client, test_settings):
+    def test_is_merged_filter(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
-        resp = client.get("/records", params={"status": "merged"})
+        resp = client.get("/records", params={"is_merged": "true"})
         body = resp.json()
         assert body["total"] == 1
         assert body["items"][0]["is_merged"] is True
 
     def test_get_cluster(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
-        mid = client.get("/records", params={"status": "merged"}).json()["items"][0]["mid"]
+        mid = client.get("/records", params={"is_merged": "true"}).json()["items"][0]["mid"]
         resp = client.get(f"/clusters/{mid}")
         assert resp.status_code == 200
         assert len(resp.json()["members"]) == 2
@@ -281,3 +333,42 @@ class TestAudit:
         ]
         assert len(p2_entities) == 1
         assert len(p2_entities[0]["members"]) == 1  # still standalone
+
+
+class TestDashboard:
+    def test_summary(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.get("/dashboard/summary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total_records"] == 5
+        assert body["duplicate_clusters"] == 1
+        assert body["matched_records"] == 2
+        assert body["needs_review_records"] == 2
+        assert body["status_counts"]["auto_match"] == 2
+        assert body["status_counts"]["needs_review"] == 2
+        assert body["status_counts"]["no_match"] == 1
+        assert body["last_run_id"] == "r1"
+        assert "SSN_DOB" in body["confidence_thresholds"]
+        assert len(body["history"]) == 1
+
+    def test_summary_reflects_manual_merge(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        client.post(
+            "/audit/merge",
+            json={"mid": matched_mid, "patids": ["P3"]},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        resp = client.get("/dashboard/summary")
+        assert resp.json()["manual_merge_actions"] == 1
+
+    def test_summary_empty_state(self, client, test_settings):
+        resp = client.get("/dashboard/summary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total_records"] == 0
+        assert body["last_run_id"] is None

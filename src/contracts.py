@@ -281,6 +281,7 @@ class RunManifest(BaseModel):
     non_matches: ArtifactRef
     rejects: ArtifactRef | None = None
     clusters: ArtifactRef | None = None
+    review_evidence: ArtifactRef | None = None
     counts: dict[str, int] = Field(default_factory=dict)
 
 

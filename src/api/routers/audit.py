@@ -29,6 +29,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _single_member_origin(conn, patid: str) -> str:
+    """What a lone leftover record's origin should be — 'review' if it still
+    has an unresolved review-queue candidate, else 'none'. A singleton can
+    never be 'deterministic'/'merge' (those require >=2 members)."""
+    return "review" if store.review_candidates_for_patid(conn, patid) else "none"
+
+
 @router.post("/merge", response_model=MergeResponse)
 def merge(
     body: MergeRequest,
@@ -53,6 +60,8 @@ def merge(
             conn, body.mid, target["entity"]["run_id"], "merge",
             is_merged=True, confidence=target["entity"]["confidence"],
             updated_utc=now,
+            match_rule=target["entity"].get("match_rule"),
+            evidence=f"Manually merged by {reviewer_id}",
         )
         audit_id = store.insert_audit_log(
             conn,
@@ -68,7 +77,7 @@ def merge(
 
     detail = store.get_entity(conn, body.mid)
     return MergeResponse(
-        audit_id=audit_id, entity=_to_entity(detail["entity"], detail["members"])
+        audit_id=audit_id, entity=_to_entity(conn, detail["entity"], detail["members"])
     )
 
 
@@ -92,7 +101,8 @@ def unmerge(
     conn.execute("BEGIN")
     try:
         store.upsert_entity(
-            conn, new_mid, source["entity"]["run_id"], "none",
+            conn, new_mid, source["entity"]["run_id"],
+            _single_member_origin(conn, body.patid),
             is_merged=False, confidence=None, updated_utc=now,
         )
         store.upsert_entity_member(
@@ -100,12 +110,18 @@ def unmerge(
             is_primary=True, added_by=reviewer_id, updated_utc=now,
         )
 
-        remaining = store.member_count(conn, body.mid)
-        if remaining <= 1:
+        remaining_patids = [
+            m["patid"] for m in store.get_entity(conn, body.mid)["members"]
+            if m["patid"] != body.patid
+        ]
+        if len(remaining_patids) <= 1:
+            leftover_origin = (
+                _single_member_origin(conn, remaining_patids[0])
+                if remaining_patids else source["entity"]["origin"]
+            )
             store.upsert_entity(
-                conn, body.mid, source["entity"]["run_id"], source["entity"]["origin"],
-                is_merged=False, confidence=source["entity"]["confidence"],
-                updated_utc=now,
+                conn, body.mid, source["entity"]["run_id"], leftover_origin,
+                is_merged=False, confidence=None, updated_utc=now,
             )
 
         audit_id = store.insert_audit_log(
@@ -123,7 +139,7 @@ def unmerge(
     detail = store.get_entity(conn, new_mid)
     return UnmergeResponse(
         audit_id=audit_id, new_mid=new_mid,
-        entity=_to_entity(detail["entity"], detail["members"]),
+        entity=_to_entity(conn, detail["entity"], detail["members"]),
     )
 
 

@@ -194,6 +194,18 @@ def run_pipeline(
     matches.to_parquet(matches_path, index=False)
     non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
+    # Review-tier rule provenance (match_rule/confidence/rules_fired) does not
+    # survive the `non_matches_path` write above — `non_matches` is trimmed to
+    # the closed NonMatches/CandidatePairs schema. Keep the full
+    # `review_confirmed` columns in a companion artifact so a consumer (the API
+    # publish step) can show *why* a review-tier pair was flagged, not just
+    # that it was. Not part of the documented Data-Contract stage boundaries;
+    # no strict pandera contract, since nothing else in the pipeline depends
+    # on it.
+    review_evidence_path = (
+        settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
+    )
+    review_confirmed.to_parquet(review_evidence_path, index=False)
     rejects_path = settings.rejects_dir / f"rejects_{run_id}.parquet"
     rejects.to_parquet(rejects_path, index=False)
 
@@ -223,6 +235,7 @@ def run_pipeline(
         non_matches=_artifact_ref(non_matches_path, non_matches, root),
         rejects=_artifact_ref(rejects_path, rejects, root),
         clusters=_artifact_ref(clusters_path, cluster_assignments, root),
+        review_evidence=_artifact_ref(review_evidence_path, review_confirmed, root),
         counts={
             "raw_rows": len(raw_df),
             "cleaned_rows": len(cleaned),

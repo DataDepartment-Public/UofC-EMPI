@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api import store
-from src.api.routers import audit, health, records, runs
+from src.api.routers import audit, dashboard, health, records, runs
 from src.config import configure_logging, settings
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,7 @@ app.include_router(health.router)
 app.include_router(runs.router)
 app.include_router(records.router)
 app.include_router(audit.router)
+app.include_router(dashboard.router)
 
 
 __all__ = ["app"]

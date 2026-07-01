@@ -103,9 +103,27 @@ class TestListEntities:
         )
         conn.commit()
 
-    def test_status_filter(self, conn):
+    def test_is_merged_filter(self, conn):
         self._seed(conn)
-        rows, total = store.list_entities(conn, status="merged")
+        rows, total = store.list_entities(conn, is_merged=True)
+        assert total == 1
+        assert rows[0]["mid"] == "M-1"
+
+    def test_origin_filter(self, conn):
+        self._seed(conn)
+        rows, total = store.list_entities(conn, origin="none")
+        assert total == 1
+        assert rows[0]["mid"] == "M-2"
+
+    def test_ssn_last4_filter(self, conn):
+        self._seed(conn)
+        rows, total = store.list_entities(conn, ssn_last4="1234")
+        assert total == 1
+        assert rows[0]["mid"] == "M-1"
+
+    def test_birth_date_filter(self, conn):
+        self._seed(conn)
+        rows, total = store.list_entities(conn, birth_date="1990-01-01")
         assert total == 1
         assert rows[0]["mid"] == "M-1"
 
@@ -146,3 +164,77 @@ class TestAuditLog:
         rows = store.list_audit_log(conn, since="2026-03-01T00:00:00")
         assert len(rows) == 1
         assert rows[0]["patids"] == "P2"
+
+
+class TestRecordRaw:
+    def test_bulk_upsert_and_get(self, conn):
+        store.upsert_entity(conn, "M-1", "r1", "none", False, None, "t0")
+        store.upsert_entity_member(conn, "P1", "M-1", True, "pipeline", "t0")
+        conn.commit()
+        store.upsert_record_raw_bulk(
+            conn, [("P1", '{"FirstNM_raw": "JANE"}', "r1")]
+        )
+        conn.commit()
+        assert store.get_record_raw(conn, "P1") == '{"FirstNM_raw": "JANE"}'
+
+    def test_get_missing_returns_none(self, conn):
+        assert store.get_record_raw(conn, "P-nope") is None
+
+
+class TestReviewCandidate:
+    def test_replace_review_candidates_for_run(self, conn):
+        store.replace_review_candidates_for_run(
+            conn, "r1",
+            [("P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0")],
+        )
+        conn.commit()
+        rows = store.review_candidates_for_patid(conn, "P1")
+        assert len(rows) == 1
+        assert rows[0]["patid_b"] == "P2"
+        assert store.review_candidates_for_patid(conn, "P2")[0]["patid_a"] == "P1"
+
+    def test_replace_clears_stale_rows_for_same_run(self, conn):
+        store.replace_review_candidates_for_run(
+            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0")]
+        )
+        conn.commit()
+        store.replace_review_candidates_for_run(conn, "r1", [])  # nothing this time
+        conn.commit()
+        assert store.review_candidates_for_patid(conn, "P1") == []
+
+    def test_patids_with_review_candidates(self, conn):
+        store.replace_review_candidates_for_run(
+            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0")]
+        )
+        conn.commit()
+        assert store.patids_with_review_candidates(conn) == {"P1", "P2"}
+
+
+class TestDashboardSummary:
+    def test_aggregates_reflect_live_state(self, conn):
+        store.upsert_entity(conn, "M-1", "r1", "deterministic", True, 0.99, "t0")
+        store.upsert_entity_member(conn, "P1", "M-1", True, "pipeline", "t0")
+        store.upsert_entity_member(conn, "P2", "M-1", False, "pipeline", "t0")
+        store.upsert_entity(conn, "M-2", "r1", "review", False, None, "t0")
+        store.upsert_entity_member(conn, "P3", "M-2", True, "pipeline", "t0")
+        store.upsert_entity(conn, "M-3", "r1", "none", False, None, "t0")
+        store.upsert_entity_member(conn, "P4", "M-3", True, "pipeline", "t0")
+        store.insert_audit_log(
+            conn, ts_utc="t0", user="u", action="merge", patids="P5",
+            mid="M-1", prev_state="a", next_state="b", run_id="r1",
+        )
+        conn.commit()
+
+        summary = store.dashboard_summary(conn)
+        assert summary["total_records"] == 4
+        assert summary["duplicate_clusters"] == 1
+        assert summary["matched_records"] == 2
+        assert summary["needs_review_records"] == 1
+        assert summary["no_match_records"] == 1
+        assert summary["manual_merge_actions"] == 1
+        assert summary["manual_unmerge_actions"] == 0
+
+    def test_empty_db(self, conn):
+        summary = store.dashboard_summary(conn)
+        assert summary["total_records"] == 0
+        assert summary["duplicate_clusters"] == 0

@@ -57,6 +57,7 @@ class RecordAttrs(BaseModel):
     zip_code: str | None = None
     address1: str | None = None
     sex: str | None = None
+    phone: str | None = None
 
 
 class EntityMember(RecordAttrs):
@@ -66,14 +67,39 @@ class EntityMember(RecordAttrs):
     updated_utc: str
 
 
+class CandidatePatient(RecordAttrs):
+    """A review-candidate's one side — same display fields as `EntityMember`,
+    so the Model Explanation page can build a full feature-comparison table
+    for review pairs too, not just confirmed members."""
+
+    patid: str
+
+
+class ReviewCandidate(BaseModel):
+    """An unresolved candidate pair from the review queue — not a confirmed
+    membership. See `src/api/store.py` `review_candidate` table."""
+
+    patid_a: str
+    patid_b: str
+    match_rule: str | None
+    confidence: float | None
+    evidence: str | None
+    source_blocks: str | None
+    patient_a: CandidatePatient
+    patient_b: CandidatePatient
+
+
 class Entity(BaseModel):
     mid: str
     run_id: str
     origin: Literal["deterministic", "review", "merge", "none"]
     is_merged: bool
     confidence: float | None
+    match_rule: str | None = None
+    evidence: str | None = None
     updated_utc: str
     members: list[EntityMember] = Field(default_factory=list)
+    review_candidates: list[ReviewCandidate] = Field(default_factory=list)
 
 
 class RecordsPage(BaseModel):
@@ -81,6 +107,11 @@ class RecordsPage(BaseModel):
     page: int
     page_size: int
     items: list[Entity]
+
+
+class RawRecord(BaseModel):
+    patid: str
+    fields: dict[str, object]
 
 
 class MergeRequest(BaseModel):
@@ -104,6 +135,42 @@ class UnmergeResponse(BaseModel):
     entity: Entity
 
 
+class MatchStatusCounts(BaseModel):
+    """FR-11: the three-way Auto-match / Needs review / No match bar chart."""
+
+    auto_match: int
+    needs_review: int
+    no_match: int
+
+
+class DashboardSummary(BaseModel):
+    """`GET /dashboard/summary` — KPI aggregates for the Dashboard tab
+    (FR-4..FR-17). Live counts come from `empi.db`; `total_raw_rows`,
+    `invalid_records`, `candidate_pairs`, and `auto_match_rate` come from the
+    latest `RunManifest.counts` (empi.db only holds valid, published records)."""
+
+    last_run_id: str | None
+    last_run_created_utc: str | None
+    model_version: str | None
+
+    total_raw_rows: int
+    total_records: int
+    invalid_records: int
+    duplicate_clusters: int
+    matched_records: int
+    matched_pct: float
+    unmerged_pct: float
+    needs_review_records: int
+    manual_merge_actions: int
+    manual_unmerge_actions: int
+    manual_merge_pct: float
+    manual_unmerge_pct: float
+    auto_match_rate: float
+    status_counts: MatchStatusCounts
+    confidence_thresholds: dict[str, float]
+    history: list[dict]
+
+
 class AuditLogRow(BaseModel):
     id: int
     ts_utc: str
@@ -125,8 +192,13 @@ __all__ = [
     "ReadyResponse",
     "RecordAttrs",
     "EntityMember",
+    "CandidatePatient",
+    "ReviewCandidate",
     "Entity",
     "RecordsPage",
+    "RawRecord",
+    "MatchStatusCounts",
+    "DashboardSummary",
     "MergeRequest",
     "MergeResponse",
     "UnmergeRequest",

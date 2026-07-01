@@ -3,11 +3,14 @@ fixtures — no need to run the real pipeline.
 
 Coverage:
     - A fresh publish creates entities/members/record_attrs for a run with a
-      matched pair and a singleton.
+      matched pair, a true singleton, and a review-tier candidate pair.
     - Re-publishing the same run is idempotent (upsert, not duplicate).
     - Reconciliation: once a PATID is reviewer-locked (appears in audit_log),
       a later publish never repoints its entity_member.mid — instead it
       writes an entity_suggestion row. (docs/API-Design.md §2, "sticky unmerge".)
+    - Review-tier pairs (non_matches + review_evidence) become
+      review_candidate rows and upgrade a singleton's origin to 'review'.
+    - Raw fields land in record_raw.
 """
 
 import sqlite3
@@ -36,24 +39,31 @@ def fixture_settings(tmp_path):
     settings.runs_dir = tmp_path / "data" / "runs"
     settings.clusters_dir = tmp_path / "data" / "clusters"
     settings.matches_dir = tmp_path / "data" / "matches"
+    settings.non_matches_dir = tmp_path / "data" / "non_matches"
     settings.processed_dir = tmp_path / "data" / "processed"
     settings.ensure_dirs()
     return settings
 
 
 def _write_run(settings: Settings, run_id: str):
+    # P1<->P2 auto-merge (SSN_DOB); P3 true singleton; P4<->P5 review-tier
+    # candidate (NAME_DOB_SEX) — P4/P5 never appear in `matches`.
     cleaned = pd.DataFrame({
-        "PATID": ["P1", "P2", "P3"],
-        "FirstNM_clean": ["Jane", "Jane", "John"],
-        "LastNM_clean": ["Doe", "Doe", "Smith"],
-        "BirthDT_clean": pd.to_datetime(["1990-01-01", "1990-01-01", "1985-05-05"]),
-        "SSN_clean": ["123456789", "123456789", None],
-        "last_4_SSN": ["6789", "6789", None],
-        "Email_clean": [None, None, None],
-        "ZipCD_clean_base": ["60601", "60601", None],
-        "AddressLine1_clean": [None, None, None],
-        "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE"],
-        "valid_record": [True, True, True],
+        "PATID": ["P1", "P2", "P3", "P4", "P5"],
+        "FirstNM_clean": ["Jane", "Jane", "John", "Amy", "Amy"],
+        "LastNM_clean": ["Doe", "Doe", "Smith", "Lee", "Lee"],
+        "BirthDT_clean": pd.to_datetime(
+            ["1990-01-01", "1990-01-01", "1985-05-05", "1975-03-03", "1975-03-03"]
+        ),
+        "SSN_clean": ["123456789", "123456789", None, None, None],
+        "last_4_SSN": ["6789", "6789", None, None, None],
+        "Email_clean": [None, None, None, None, None],
+        "ZipCD_clean_base": ["60601", "60601", None, None, None],
+        "AddressLine1_clean": [None, None, None, None, None],
+        "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE", "FEMALE", "FEMALE"],
+        "FirstNM_raw": ["JANE", "JANE", "JOHN", "AMY", "AMY"],
+        "SSN_raw": ["123-45-6789", "123456789", None, None, None],
+        "valid_record": [True, True, True, True, True],
     })
     cleaned_path = settings.processed_dir / f"cleaned_{run_id}.parquet"
     cleaned.to_parquet(cleaned_path, index=False)
@@ -68,7 +78,26 @@ def _write_run(settings: Settings, run_id: str):
     matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
 
-    clusters = pd.DataFrame({"PATID": ["P1", "P2", "P3"], "cluster_id": [0, 0, 1]})
+    non_matches = pd.DataFrame({
+        "PATID_A": ["P4"], "PATID_B": ["P5"],
+        "source_blocks": ["B3"], "n_blocks": [1],
+    })
+    non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
+    non_matches.to_parquet(non_matches_path, index=False)
+
+    review_evidence = pd.DataFrame({
+        "PATID_A": ["P4"], "PATID_B": ["P5"],
+        "match_rule": ["NAME_DOB_SEX"], "confidence": [0.98],
+        "rules_fired": ["NAME_DOB_SEX"], "is_suspicious": [False],
+        "high_fanout_ssn": [False],
+        "source_blocks": ["B3"], "n_blocks": [1],
+    })
+    review_evidence_path = settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
+    review_evidence.to_parquet(review_evidence_path, index=False)
+
+    clusters = pd.DataFrame({
+        "PATID": ["P1", "P2", "P3", "P4", "P5"], "cluster_id": [0, 0, 1, 2, 3],
+    })
     clusters_path = settings.clusters_dir / f"clusters_{run_id}.parquet"
     clusters.to_parquet(clusters_path, index=False)
 
@@ -77,9 +106,11 @@ def _write_run(settings: Settings, run_id: str):
 
     manifest = RunManifest(
         run_id=run_id, created_utc="2026-07-01T00:00:00Z",
-        raw_input=ref(cleaned_path, 3), cleaned=ref(cleaned_path, 3),
+        raw_input=ref(cleaned_path, 5), cleaned=ref(cleaned_path, 5),
         candidate_pairs=ref(matches_path, 1), matches=ref(matches_path, 1),
-        non_matches=ref(matches_path, 0), clusters=ref(clusters_path, 3),
+        non_matches=ref(non_matches_path, 1),
+        review_evidence=ref(review_evidence_path, 1),
+        clusters=ref(clusters_path, 5),
         counts={},
     )
     (settings.runs_dir / f"run_{run_id}.json").write_text(manifest.model_dump_json())
@@ -91,10 +122,11 @@ class TestPublishRun:
         _write_run(fixture_settings, "r1")
         counts = publish.publish_run(conn, "r1", fixture_settings)
 
-        assert counts["clusters_seen"] == 2
-        assert counts["entities_upserted"] == 2
-        assert counts["members_upserted"] == 3
+        assert counts["clusters_seen"] == 4
+        assert counts["entities_upserted"] == 4
+        assert counts["members_upserted"] == 5
         assert counts["locked_skipped"] == 0
+        assert counts["review_candidates"] == 1
 
         matched = store.get_entity_mid_for_patid(conn, "P1")
         assert matched == store.get_entity_mid_for_patid(conn, "P2")
@@ -104,8 +136,23 @@ class TestPublishRun:
         matched_entity = store.get_entity(conn, matched)
         assert matched_entity["entity"]["is_merged"] == 1
         assert matched_entity["entity"]["confidence"] == 1.0
+        assert matched_entity["entity"]["match_rule"] == "SSN_DOB"
         singleton_entity = store.get_entity(conn, singleton_mid)
         assert singleton_entity["entity"]["is_merged"] == 0
+        assert singleton_entity["entity"]["origin"] == "none"
+
+    def test_review_candidate_upgrades_origin(self, conn, fixture_settings):
+        _write_run(fixture_settings, "r1")
+        publish.publish_run(conn, "r1", fixture_settings)
+
+        p4_mid = store.get_entity_mid_for_patid(conn, "P4")
+        p4_entity = store.get_entity(conn, p4_mid)
+        assert p4_entity["entity"]["origin"] == "review"
+
+        candidates = store.review_candidates_for_patid(conn, "P4")
+        assert len(candidates) == 1
+        assert candidates[0]["match_rule"] == "NAME_DOB_SEX"
+        assert candidates[0]["confidence"] == 0.98
 
     def test_record_attrs_denormalized(self, conn, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -117,6 +164,13 @@ class TestPublishRun:
         assert row["ssn_last4"] == "6789"
         assert row["birth_date"] == "1990-01-01"
 
+    def test_raw_fields_denormalized(self, conn, fixture_settings):
+        _write_run(fixture_settings, "r1")
+        publish.publish_run(conn, "r1", fixture_settings)
+        raw_json = store.get_record_raw(conn, "P1")
+        assert raw_json is not None
+        assert "JANE" in raw_json
+
     def test_republish_is_idempotent(self, conn, fixture_settings):
         _write_run(fixture_settings, "r1")
         publish.publish_run(conn, "r1", fixture_settings)
@@ -127,7 +181,11 @@ class TestPublishRun:
 
         assert mid_before == mid_after
         n_entities = conn.execute("SELECT COUNT(*) AS n FROM entity").fetchone()["n"]
-        assert n_entities == 2
+        assert n_entities == 4
+        n_candidates = conn.execute(
+            "SELECT COUNT(*) AS n FROM review_candidate"
+        ).fetchone()["n"]
+        assert n_candidates == 1  # replaced, not duplicated
 
     def test_reviewer_locked_patid_not_repointed(self, conn, fixture_settings):
         _write_run(fixture_settings, "r1")

@@ -17,3 +17,6 @@ phonetics
 # python-stdnum: structural US SSN validation (area/group/serial + known-bogus
 # advertising SSNs) used by src/data/transformations.clean_ssn.
 python-stdnum
+# scikit-learn: char-n-gram TF-IDF vectorizer + sparse cosine for the q-gram
+# blocking pass (src/preprocessing/qgram_blocking.py), part of the stacked blocker.
+scikit-learn

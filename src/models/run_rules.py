@@ -70,6 +70,7 @@ from src.contracts import (  # noqa: E402
 )
 from src.config import configure_logging  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
+    AUTO_MERGE_RULES,
     apply_rules,
     assign_clusters,
     classify_non_matches,
@@ -133,13 +134,28 @@ def _print_report(stats: dict, version: str) -> None:
         print(f"{divider}\n")
         return
 
-    print("\n  MATCH DISTRIBUTION")
+    print("\n  MATCH DISTRIBUTION (auto-merge)")
     total = stats["total_matches"]
     for rule, count in stats["match_distribution"].items():
         pct = 100 * count / total
         bar = "█" * min(int(count / 1000), 30)
         print(f"    {rule:<18} {count:>10,}  ({pct:5.1f}%)  {bar}")
     print(f"    {'Total':<18} {total:>10,}")
+
+    review_dist = stats.get("review_match_distribution")
+    if review_dist:
+        print("\n  REVIEW-TIER RULES (confirmed but routed to review, not merged)")
+        for rule, count in review_dist.items():
+            bar = "█" * min(int(count / 1000), 30)
+            print(f"    {rule:<18} {count:>10,}  {bar}")
+        print(f"    {'Total':<18} {sum(review_dist.values()):>10,}")
+
+    dist = stats.get("decision_distribution")
+    if dist:
+        print("\n  THREE-WAY ROUTING")
+        print(f"    {'auto-merge':<18} {dist['match']:>10,}")
+        print(f"    {'review':<18} {dist['review']:>10,}")
+        print(f"    {'reject':<18} {dist['reject']:>10,}")
 
     print("\n  COVERAGE")
     print(f"    Patients matched:         {stats['patients_matched']:>12,}")
@@ -196,13 +212,26 @@ def main(
     # Lineage guard: the cleaned frame and the pairs must be from the same run.
     assert_patid_coverage(candidate_pairs, df_clean)
 
-    matches = apply_rules(candidate_pairs, df_clean)
+    confirmed = apply_rules(candidate_pairs, df_clean)
 
-    # Three-way split of the pairs no rule confirmed:
-    #   review -> downstream probabilistic matching; reject -> dropped (audited).
-    decided = classify_non_matches(candidate_pairs, matches, df_clean)
+    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; the
+    # review-tier rules (NAME_DOB_SEX / NAME_DOB_ADDRESS) are confirmed but routed
+    # to review rather than auto-merged.
+    is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
+    matches = confirmed[is_auto].reset_index(drop=True)
+    review_confirmed = confirmed[~is_auto].reset_index(drop=True)
 
-    stats = get_match_stats(matches, n_records=len(df_clean), decided=decided)
+    # Three-way split of the pairs no AUTO-MERGE rule confirmed. Passing the full
+    # `confirmed` set keeps review-tier pairs out of the contradiction split (they
+    # join review explicitly below) so they are never reject-scored.
+    decided = classify_non_matches(candidate_pairs, confirmed, df_clean)
+
+    stats = get_match_stats(
+        matches,
+        n_records=len(df_clean),
+        decided=decided,
+        review_matches=review_confirmed,
+    )
     _print_report(stats, version)
 
     # Attach cluster ids so downstream consumers get linked-entity groupings.
@@ -218,10 +247,16 @@ def main(
     matches.to_parquet(output_path, index=False)
     logger.info("Matches saved to %s (%d rows)", output_path, len(matches))
 
-    review = decided[decided["decision"] == "review"]
     rejects = decided[decided["decision"] == "reject"]
+    pair_cols = list(candidate_pairs.columns)
 
-    non_matches = review[list(candidate_pairs.columns)].reset_index(drop=True)
+    # Review output = review-tier rule confirmations + unconfirmed-but-uncertain.
+    non_matches = pd.concat(
+        [
+            review_confirmed[pair_cols],
+            decided[decided["decision"] == "review"][pair_cols],
+        ]
+    ).reset_index(drop=True)
     validate(non_matches, NonMatches)  # contract: non-matches (review) output
     nm_version = _next_version(non_match_dir, stem="non_matches")
     non_match_path = non_match_dir / f"non_matches_{nm_version}_{date_tag}.parquet"

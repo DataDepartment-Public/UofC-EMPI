@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     matches_dir: Path = _DATA / "matches"
     non_matches_dir: Path = _DATA / "non_matches"
     rejects_dir: Path = _DATA / "rejects"
+    clusters_dir: Path = _DATA / "clusters"
     runs_dir: Path = _DATA / "runs"
     log_dir: Path = _PROJECT_ROOT / "logs"
 
@@ -165,6 +166,7 @@ class Settings(BaseSettings):
             self.matches_dir,
             self.non_matches_dir,
             self.rejects_dir,
+            self.clusters_dir,
             self.runs_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)

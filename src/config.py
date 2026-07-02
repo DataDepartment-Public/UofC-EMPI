@@ -53,6 +53,26 @@ class Settings(BaseSettings):
     runs_dir: Path = _DATA / "runs"
     log_dir: Path = _PROJECT_ROOT / "logs"
 
+    # ── API service (src/api/) ──────────────────────────────────────────────
+    db_path: Path = Field(
+        default=_DATA / "empi.db",
+        description="SQLite file holding the resolved output (entities, "
+        "membership, audit log) the API serves and reviewers edit.",
+    )
+    api_cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000"],
+        description="Allowed browser origins for the future Next.js front-end "
+        "(see docs/Application-Architecture.md).",
+    )
+    reviewer_header: str = Field(
+        default="X-Reviewer-Id",
+        description="Header the API trusts for reviewer identity on /audit/* "
+        "(set by a front-end BFF; never client-asserted in a real deploy).",
+    )
+    records_page_size: int = Field(
+        default=50, description="Default page size for GET /records."
+    )
+
     # ── Defaults ────────────────────────────────────────────────────────────
     raw_input: Path = _DATA / "raw" / "MDM_Population.csv"
     cleaned_stem: str = "MDM_Population_cleaned"
@@ -161,6 +181,7 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         """Create every output directory this run will write to."""
         for d in (
+            self.raw_dir,
             self.processed_dir,
             self.blocking_dir,
             self.matches_dir,
@@ -168,6 +189,7 @@ class Settings(BaseSettings):
             self.rejects_dir,
             self.clusters_dir,
             self.runs_dir,
+            self.db_path.parent,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

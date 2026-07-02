@@ -20,3 +20,8 @@ python-stdnum
 # scikit-learn: char-n-gram TF-IDF vectorizer + sparse cosine for the q-gram
 # blocking pass (src/preprocessing/qgram_blocking.py), part of the stacked blocker.
 scikit-learn
+# FastAPI service (src/api/) — docs/API-Design.md. SQLite (empi.db) is stdlib.
+fastapi
+uvicorn[standard]
+python-multipart
+httpx

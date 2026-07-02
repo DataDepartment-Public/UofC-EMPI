@@ -25,12 +25,16 @@ data/processed/*
 data/blocking/*
 data/matches/*
 data/non_matches/*
+data/rejects/*
+data/clusters/*
 data/runs/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/blocking/.gitkeep
 !data/matches/.gitkeep
 !data/non_matches/.gitkeep
+!data/rejects/.gitkeep
+!data/clusters/.gitkeep
 !data/runs/.gitkeep
 *.csv
 *.parquet
@@ -38,6 +42,8 @@ data/runs/*
 *.pickle
 *.xlsx
 *.xls
+# empi.db (src/api/) — the resolved-output DB is runtime state, not source.
+*.db
 
 # Logs
 logs/*

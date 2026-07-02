@@ -3,12 +3,20 @@
 Runs the stages **in process**, passing DataFrames stage-to-stage rather than
 re-resolving "the latest file in the directory":
 
-    raw  ──►  clean/transform  ──►  blocking  ──►  deterministic rules
-                                                      ├─► matches ──┐
-                                                      └─► non-matches
-                                                                    ▼
-                                                            clustering (terminal)
-                                                              └─► cluster assignments
+    raw ─► clean ─► blocking ─► deterministic rules
+                                    ├─► matches ─────────────────────────┐
+                                    └─► non-matches                       │
+                                          │                               │
+                                          ▼                               │
+                                  Stage 4: FS matcher (if a model         │
+                                  is active) — scores non-matches,        │
+                                  emits ProbabilisticMatches (audit) +    │
+                                  FSFeatures (GBT candidates). Does NOT    │
+                                  feed clustering.                         │
+                                                                          ▼
+                                                          clustering (terminal,
+                                                          deterministic edges only)
+                                                            └─► cluster assignments
 
 Because one in-memory cleaned frame feeds every stage, the lineage mismatch the
 standalone CLIs are vulnerable to cannot occur here. Every boundary is validated
@@ -20,10 +28,12 @@ USAGE:
     python -m src.pipeline --input data/raw/MDM_Population.csv
     python -m src.pipeline --run-id 20260603T120000Z   # override the run id
 
-Stage 4 (probabilistic model, `docs/Data-Contract.md`) is not built yet; today
-clustering runs directly over the deterministic auto-merge matches. Once a
-model stage lands, its edges should union into the same clustering input
-(see `src/models/clustering.py`).
+Stage 4 (the Fellegi-Sunter matcher, `src/models/fs_matcher/`) loads a pre-trained
+model artifact and scores the deterministic rules' `non_matches` pool. It is a
+candidate + feature generator for a downstream GBT — its output does NOT enter
+clustering, which continues to cluster the deterministic auto-merge edges only.
+If no active FS model is resolvable, Stage 4 is skipped (train + promote one with
+`python -m src.models.fs_matcher.train --promote`).
 """
 
 from __future__ import annotations
@@ -54,9 +64,11 @@ from src.contracts import (  # noqa: E402
     ClusterAssignments,
     Matches,
     NonMatches,
+    ProbabilisticMatches,
     RunManifest,
     assert_patid_coverage,
     validate,
+    validate_fs_features,
 )
 from src.preprocessing.clean import _load as _read_raw, write_cleaned  # noqa: E402
 from src.preprocessing.transformations import transform_dataframe  # noqa: E402
@@ -68,6 +80,9 @@ from src.models.deterministic_rules import (  # noqa: E402
     classify_non_matches,
     get_match_stats,
 )
+# registry.resolve_active_model imports no heavy deps (json/pathlib only); the
+# FS matcher itself (which pulls splink) is lazy-imported inside Stage 4.
+from src.models.fs_matcher.registry import resolve_active_model  # noqa: E402
 
 logger = logging.getLogger("eMPI.pipeline")
 
@@ -138,7 +153,7 @@ def run_pipeline(
     validate(cleaned, CleanedRecords)
     n_valid = int(cleaned["valid_record"].sum())
     logger.info(
-        "[1/4] CLEAN — %d raw → %d cleaned rows (%d valid)",
+        "[1/5] CLEAN — %d raw → %d cleaned rows (%d valid)",
         len(raw_df), len(cleaned), n_valid,
     )
     cleaned_path = settings.processed_dir / f"{settings.cleaned_stem}_{run_id}.parquet"
@@ -147,7 +162,7 @@ def run_pipeline(
     # ── Stage 2: block (stacked: 8-block ∪ q-gram → CNP/ARCS prune) ────────
     candidate_pairs = run_stacked_blocking(cleaned)
     validate(candidate_pairs, CandidatePairs)
-    logger.info("[2/4] BLOCK — %d candidate pairs", len(candidate_pairs))
+    logger.info("[2/5] BLOCK — %d candidate pairs", len(candidate_pairs))
     pairs_path = settings.blocking_dir / f"candidate_pairs_{run_id}.parquet"
     candidate_pairs.to_parquet(pairs_path, index=False)
 
@@ -185,7 +200,7 @@ def run_pipeline(
         review_matches=review_confirmed,
     )
     logger.info(
-        "[3/4] RULES — %d auto-merge, %d review (%d rule-confirmed), %d reject, "
+        "[3/5] RULES — %d auto-merge, %d review (%d rule-confirmed), %d reject, "
         "%d clusters",
         len(matches), len(non_matches), len(review_confirmed), len(rejects),
         stats.get("n_clusters", 0),
@@ -209,14 +224,62 @@ def run_pipeline(
     rejects_path = settings.rejects_dir / f"rejects_{run_id}.parquet"
     rejects.to_parquet(rejects_path, index=False)
 
-    # ── Stage 4: cluster (terminal) — connected components over the deterministic
-    #    auto-merge edges. Once a probabilistic model stage exists, its edges
-    #    should union into `matches` here before clustering. ────────────────
+    # ── Stage 4: Fellegi-Sunter matcher (candidate/feature generator) ──────
+    # Scores the rules' non_matches pool with the pre-trained active FS model.
+    # Emits a full ProbabilisticMatches AUDIT frame and the candidate-filtered
+    # FSFeatures parquet for the downstream GBT. Its output does NOT feed
+    # clustering. Skipped (with a clear log) when no active model is resolvable
+    # or the non_matches pool is empty — so a pre-deployment pipeline still runs.
+    matches_model_path: Path | None = None
+    fs_features_path: Path | None = None
+    active_model = resolve_active_model(settings)
+    if active_model is None:
+        logger.info(
+            "[4/5] MODEL — skipped (no active FS model; train + promote one with "
+            "`python -m src.models.fs_matcher.train --promote`)"
+        )
+    elif non_matches.empty:
+        logger.info("[4/5] MODEL — skipped (no non-match pairs to score)")
+    else:
+        logger.info(
+            "[4/5] MODEL — scoring %d non-match pairs with FS model %s...",
+            len(non_matches), active_model.name,
+        )
+        # Lazy import keeps splink/duckdb out of the import path when Stage 4 is
+        # skipped (registry.resolve_active_model above pulls no heavy deps).
+        from src.models.fs_matcher.matcher import (
+            FSMatcher,
+            classification_config_from_settings,
+        )
+        _model = FSMatcher(classification_config=classification_config_from_settings(settings))
+        _trained = FSMatcher.load_settings(active_model)
+        classified = _model.score(non_matches, cleaned, _trained)
+
+        prob_matches = _model.to_probabilistic_matches(classified)
+        validate(prob_matches, ProbabilisticMatches)
+        matches_model_path = settings.matches_model_dir / f"matches_model_{run_id}.parquet"
+        prob_matches.to_parquet(matches_model_path, index=False)
+
+        fs_features = _model.to_fs_features(classified, candidates_only=True)
+        validate_fs_features(fs_features)
+        fs_features_path = settings.fs_output_dir / f"fs_features_{run_id}.parquet"
+        fs_features.to_parquet(fs_features_path, index=False)
+
+        tier_counts = {k: int(v) for k, v in
+                       prob_matches["classification_tier"].value_counts().items()}
+        logger.info(
+            "[4/5] MODEL — tiers %s → %d GBT candidates → %s",
+            tier_counts, len(fs_features), _rel(fs_features_path, settings.project_root),
+        )
+
+    # ── Stage 5: cluster (terminal) — connected components over the deterministic
+    #    auto-merge edges ONLY. The FS output above is a GBT candidate/feature
+    #    branch and is deliberately NOT unioned here. ─────────────────────────
     cluster_assignments = build_cluster_assignments(matches, cleaned)
     validate(cluster_assignments, ClusterAssignments)
     n_total_clusters = int(cluster_assignments["cluster_id"].nunique())
     logger.info(
-        "[4/4] CLUSTER — %d records → %d clusters (incl. singletons)",
+        "[5/5] CLUSTER — %d records → %d clusters (incl. singletons)",
         len(cluster_assignments), n_total_clusters,
     )
     clusters_path = settings.clusters_dir / f"cluster_assignments_{run_id}.parquet"
@@ -236,6 +299,14 @@ def run_pipeline(
         rejects=_artifact_ref(rejects_path, rejects, root),
         clusters=_artifact_ref(clusters_path, cluster_assignments, root),
         review_evidence=_artifact_ref(review_evidence_path, review_confirmed, root),
+        matches_model=(
+            _artifact_ref(matches_model_path, prob_matches, root)
+            if matches_model_path is not None else None
+        ),
+        fs_features=(
+            _artifact_ref(fs_features_path, fs_features, root)
+            if fs_features_path is not None else None
+        ),
         counts={
             "raw_rows": len(raw_df),
             "cleaned_rows": len(cleaned),

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     processed_dir: Path = _DATA / "processed"
     blocking_dir: Path = _DATA / "blocking"
     matches_dir: Path = _DATA / "matches"
+    matches_model_dir: Path = _DATA / "matches_model"
     non_matches_dir: Path = _DATA / "non_matches"
     rejects_dir: Path = _DATA / "rejects"
     clusters_dir: Path = _DATA / "clusters"
@@ -229,6 +230,7 @@ class Settings(BaseSettings):
             self.rejects_dir,
             self.clusters_dir,
             self.runs_dir,
+            self.matches_model_dir,
             self.fs_model_dir,
             self.fs_output_dir,
             self.db_path.parent,

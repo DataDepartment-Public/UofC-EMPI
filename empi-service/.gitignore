@@ -59,6 +59,19 @@ models/experiments/*
 *.h5
 *.pkl
 
+# FS matcher model store (trained Splink JSON + .meta.json + active.json) —
+# produced on the VM by `python -m src.models.fs_matcher.train`; runtime, not source.
+models/fs/*
+!models/fs/.gitkeep
+
+# FS matcher outputs — GBT feature parquet (data/FS_output) + the
+# ProbabilisticMatches audit frame (data/matches_model). (Parquet is already
+# globally ignored; keep the dirs on a fresh clone via .gitkeep.)
+data/FS_output/*
+!data/FS_output/.gitkeep
+data/matches_model/*
+!data/matches_model/.gitkeep
+
 # IDE
 .vscode/
 .idea/

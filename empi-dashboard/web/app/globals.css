@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+/* AllianceChicago brand palette — docs/Alliance-Chicago-Branding.md */
+:root {
+  --brand-blue: #0063a2;
+  --brand-blue-bright: #0274be;
+  --brand-cyan: #06aad6;
+  --brand-teal: #00b5b3;
+  --brand-gold: #ed9f21;
+  --brand-green: #7dad5f;
+  --brand-lime: #b7d433;
+
+  /* FR-13: fixed match-status color coding */
+  --status-auto: #5bae5b;
+  --status-review: #ed9f21;
+  --status-nomatch: #d9534f;
+
+  --ink: #2f3437;
+  --ink-2: #424242;
+  --gray: #808285;
+  --gray-2: #69727d;
+  --line: #e3e7ea;
+  --bg: #f4f6f8;
+  --card: #ffffff;
+}
+
+@theme inline {
+  --font-sans: var(--font-montserrat);
+  --font-secondary: var(--font-raleway);
+
+  --color-brand-blue: var(--brand-blue);
+  --color-brand-blue-bright: var(--brand-blue-bright);
+  --color-brand-cyan: var(--brand-cyan);
+  --color-brand-teal: var(--brand-teal);
+  --color-brand-gold: var(--brand-gold);
+  --color-brand-green: var(--brand-green);
+  --color-brand-lime: var(--brand-lime);
+
+  --color-status-auto: var(--status-auto);
+  --color-status-review: var(--status-review);
+  --color-status-nomatch: var(--status-nomatch);
+
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-gray: var(--gray);
+  --color-gray-2: var(--gray-2);
+  --color-line: var(--line);
+  --color-bg: var(--bg);
+  --color-card: var(--card);
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-montserrat), system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-montserrat), sans-serif;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(16, 42, 67, 0.08), 0 1px 2px rgba(16, 42, 67, 0.06);
+}

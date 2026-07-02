@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Entity Matching Dashboard — AllianceChicago (Demo)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&family=Raleway:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --blue:        #0063A2;
+    --blue-bright: #0274BE;
+    --cyan:        #06AAD6;
+    --teal:        #00B5B3;
+    --gold:        #ED9F21;
+    --green:       #7DAD5F;
+    --lime:        #B7D433;
+    --red:         #d9534f;
+    --status-auto:   #5BAE5B;
+    --status-review: #ED9F21;
+    --status-nomatch:#d9534f;
+    --ink:    #2f3437;
+    --ink-2:  #424242;
+    --gray:   #808285;
+    --gray-2: #69727d;
+    --line:   #e3e7ea;
+    --bg:     #f4f6f8;
+    --card:   #ffffff;
+    --shadow: 0 1px 3px rgba(16,42,67,.08), 0 1px 2px rgba(16,42,67,.06);
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: 'Montserrat', system-ui, -apple-system, sans-serif;
+    color: var(--ink); background: var(--bg); font-size: 14px; line-height: 1.5;
+  }
+  h1,h2,h3,h4 { font-family: 'Montserrat', sans-serif; margin: 0; }
+  .muted { color: var(--gray); }
+
+  /* ---------- Top nav ---------- */
+  .topbar {
+    background: #fff; border-bottom: 3px solid var(--blue); padding: 0 24px;
+    display: flex; align-items: center; gap: 18px; height: 64px;
+    position: sticky; top: 0; z-index: 50; box-shadow: var(--shadow);
+  }
+  .logo { display: flex; align-items: baseline; font-weight: 800; font-size: 22px; letter-spacing: -.5px; }
+  .logo .a1 { color: var(--blue); } .logo .a2 { color: var(--cyan); }
+  .logo-mark {
+    width: 34px; height: 34px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--blue), var(--cyan));
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 900; font-size: 18px; margin-right: 10px;
+  }
+  .topbar .divider { width: 1px; height: 30px; background: var(--line); }
+  .app-title { font-weight: 600; font-size: 16px; color: var(--ink-2); }
+  .app-title .sub { display:block; font-size: 11px; font-weight: 500; color: var(--gray); letter-spacing:.04em; text-transform: uppercase; }
+  .demo-badge {
+    margin-left: auto; background: #fff4dc; color: #9a6b00; border: 1px solid #f0d488;
+    border-radius: 999px; font-size: 11px; font-weight: 700; padding: 4px 12px; letter-spacing:.03em;
+  }
+
+  /* ---------- Tabs ---------- */
+  .tabs { display: flex; gap: 4px; padding: 0 24px; background: #fff; border-bottom: 1px solid var(--line); position: sticky; top: 64px; z-index: 40; }
+  .tab { border: none; background: none; cursor: pointer; font-family: 'Montserrat'; font-weight: 600; font-size: 14px; color: var(--gray-2); padding: 14px 18px; border-bottom: 3px solid transparent; transition: .15s; }
+  .tab:hover { color: var(--blue); }
+  .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+
+  /* ---------- Layout ---------- */
+  .page { max-width: 1180px; margin: 0 auto; padding: 26px 24px 60px; }
+  .page-head { display:flex; align-items:flex-end; justify-content:space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+  .page-head h2 { font-size: 22px; color: var(--ink-2); font-weight: 800; }
+  .page-head p { margin: 4px 0 0; color: var(--gray); font-size: 13px; }
+  .hidden { display: none !important; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .section { margin-top: 26px; }
+  .section > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--gray); font-weight: 700; margin-bottom: 12px; }
+
+  /* ---------- KPI cards ---------- */
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .kpi { background: var(--card); border:1px solid var(--line); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); position: relative; overflow: hidden; }
+  .kpi::before { content:""; position:absolute; left:0; top:0; bottom:0; width:4px; background: var(--accent, var(--blue)); }
+  .kpi .v { font-size: 25px; font-weight: 800; color: var(--ink-2); letter-spacing: -.5px; }
+  .kpi .l { font-size: 11px; color: var(--gray); margin-top: 4px; font-weight: 600; line-height:1.3; }
+  @media (max-width: 980px){ .kpis { grid-template-columns: repeat(2,1fr);} }
+
+  /* ---------- Two-col ---------- */
+  .grid-2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 900px){ .grid-2 { grid-template-columns: 1fr; } }
+
+  /* ---------- Bar chart ---------- */
+  .chart-card { padding: 20px; }
+  .chart-card h4 { font-size: 15px; color: var(--ink-2); margin-bottom: 4px; }
+  .bars { display:flex; align-items:flex-end; gap: 34px; height: 200px; padding: 18px 10px 0; }
+  .bar-wrap { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; }
+  .bar { width: 100%; max-width: 90px; border-radius: 8px 8px 0 0; position: relative; transition: height .6s cubic-bezier(.2,.8,.2,1); }
+  .bar .count { position:absolute; top:-24px; left:0; right:0; text-align:center; font-weight:800; color: var(--ink-2); font-size: 16px; }
+  .bar-label { margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--gray-2); text-align:center; }
+  .legend { display:flex; gap:18px; margin-top:14px; flex-wrap:wrap; }
+  .legend span { display:flex; align-items:center; gap:6px; font-size:12px; color: var(--gray-2); font-weight:600; }
+  .dot { width:11px; height:11px; border-radius:3px; display:inline-block; }
+
+  /* ---------- Performance over time (line) ---------- */
+  .perf-card { padding: 20px; }
+  .metric-mini { display:grid; grid-template-columns: repeat(3,1fr); gap:10px; margin-top:14px; }
+  .mini { background:#f8fafb; border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .mini .k { font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--gray); font-weight:700; }
+  .mini .v { font-size:18px; font-weight:800; color:var(--ink-2); }
+  .mini .d { font-size:11px; font-weight:700; }
+  .up { color:#3f8a3f; } .down { color: var(--red); }
+
+  /* ---------- Model info ---------- */
+  .info-rows { padding: 18px 20px; }
+  .info-rows .row { display:flex; justify-content:space-between; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .info-rows .row:last-child { border-bottom: none; }
+  .info-rows .k { color: var(--gray); font-weight: 600; }
+  .info-rows .val { font-weight: 700; color: var(--ink-2); }
+  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:700; }
+  .pill.blue { background:#e3f1fb; color: var(--blue); }
+
+  /* ---------- Dataset toolbar ---------- */
+  .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px; align-items:center; }
+  .toolbar input, .toolbar select { font-family:'Montserrat'; font-size:13px; padding:9px 12px; border:1px solid var(--line); border-radius:8px; color: var(--ink-2); background:#fff; }
+  .toolbar input { flex:1; min-width:220px; }
+
+  /* ---------- Dataset table (expandable rows) ---------- */
+  .data-wrap { background:#fff; border:1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow:hidden; }
+  .data-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .data-table thead th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--gray); font-weight:700; padding:12px 16px; background:#f8fafb; border-bottom:1px solid var(--line); }
+  .master-row > td { padding:13px 16px; border-bottom:1px solid var(--line); color: var(--ink-2); cursor:pointer; }
+  .master-row:hover > td { background:#f8fbfe; }
+  .chev { display:inline-block; transition: transform .2s; color: var(--gray); font-size: 11px; margin-right:8px; }
+  .master-row.open .chev { transform: rotate(90deg); }
+  .origin-tag { font-size:10px; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap; }
+  .o-auto { background:#e7f4e7; color:#3f8a3f; }
+  .o-review { background:#fdf1d9; color:#9a6b00; }
+  .o-merge { background:#e3f1fb; color: var(--blue); }
+  .o-none { background:#f1eded; color: var(--gray-2); }
+  .score-cell b { font-weight:800; }
+
+  .detail-row > td { padding:0; background:#fbfdfe; border-bottom:1px solid var(--line); }
+  .detail-inner { padding: 6px 16px 16px 40px; }
+  table.records { width:100%; border-collapse: collapse; font-size: 12.5px; margin-top:8px; background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  table.records th { text-align:left; font-size:9.5px; text-transform:uppercase; letter-spacing:.05em; color: var(--gray); font-weight:700; padding: 9px 12px; background:#f4f7f9; border-bottom:1px solid var(--line); }
+  table.records td { padding: 10px 12px; border-bottom:1px solid var(--line); color: var(--ink-2); }
+  table.records tr.rec-row { cursor: pointer; }
+  table.records tr.rec-row:hover { background:#f3f9fe; }
+  table.records tr:last-child td { border-bottom:none; }
+  .feat-chips { display:flex; gap:5px; flex-wrap:wrap; }
+  .feat-chip { font-size:10px; font-weight:700; background:#eef2f5; color: var(--gray-2); padding:2px 7px; border-radius:5px; }
+  .feat-chip.pos { background:#e7f4e7; color:#3f8a3f; }
+  .explain-link { color: var(--blue-bright); font-weight:700; font-size:11px; text-decoration:none; white-space:nowrap; cursor:pointer; }
+  .explain-link:hover { text-decoration: underline; }
+  .status-tag { font-size:10px; font-weight:700; padding:3px 9px; border-radius:999px; }
+  .st-auto { background:#e7f4e7; color:#3f8a3f; }
+  .st-review { background:#fdf1d9; color:#9a6b00; }
+
+  .detail-actions { display:flex; align-items:center; gap:10px; margin-top:12px; }
+  .why { font-size:12px; color: var(--gray-2); flex:1; }
+  .btn { font-family:'Montserrat'; font-weight:700; font-size:12.5px; border:none; border-radius:8px; padding:8px 16px; cursor:pointer; transition:.15s; }
+  .btn-merge { background: var(--blue); color:#fff; } .btn-merge:hover { background: var(--blue-bright); }
+  .btn-ghost { background:#fff; color: var(--gray-2); border:1px solid var(--line); } .btn-ghost:hover { border-color: var(--gray); color: var(--ink-2); }
+  .btn-danger { background:#fff; color: var(--red); border:1px solid #f1c4c2; } .btn-danger:hover { background:#fdecec; }
+  .standalone-note { padding:10px 4px; font-size:12px; color: var(--gray); font-style: italic; }
+
+  /* ---------- Audit log ---------- */
+  .audit-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .audit-table th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--gray); font-weight:700; padding:10px 14px; background:#f8fafb; border-bottom:1px solid var(--line); }
+  .audit-table td { padding:10px 14px; border-bottom:1px solid var(--line); color:var(--ink-2); }
+  .audit-empty { padding:24px; text-align:center; color:var(--gray); font-style:italic; }
+
+  /* ---------- Model Explanation sub-page ---------- */
+  .shap-row { display:flex; align-items:center; gap:12px; margin-bottom:9px; font-size:12px; }
+  .shap-name { width: 150px; text-align:right; color: var(--gray-2); font-weight:600; flex-shrink:0; }
+  .shap-track { flex:1; position:relative; height:22px; background:#f4f6f8; border-radius:5px; }
+  .shap-mid { position:absolute; left:50%; top:-4px; bottom:-4px; width:1px; background:#d3dade; }
+  .shap-bar { position:absolute; top:3px; height:16px; border-radius:4px; }
+  .shap-bar.pos { background: var(--green); } .shap-bar.neg { background: var(--red); }
+  .shap-val { width:46px; font-weight:700; font-size:11px; }
+  .shap-val.pos { color:#3f8a3f; } .shap-val.neg { color: var(--red); }
+  .feature-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .feature-table th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--gray); padding:10px 14px; border-bottom:2px solid var(--line); }
+  .feature-table td { padding:11px 14px; border-bottom:1px solid var(--line); }
+  .res-exact { color:#3f8a3f; font-weight:700; } .res-high { color: var(--gold); font-weight:700; } .res-low { color: var(--red); font-weight:700; }
+  .wf-row { display:flex; align-items:center; gap:10px; margin:6px 0; font-size:12px; }
+  .wf-name { width:130px; text-align:right; color: var(--gray-2); font-weight:600; }
+  .wf-track { flex:1; height:18px; position:relative; }
+  .wf-seg { position:absolute; height:18px; border-radius:3px; }
+  .explain-meta { display:grid; grid-template-columns: repeat(3,1fr); gap:14px; }
+  .meta-card { padding:14px 16px; }
+  .meta-card .k { font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--gray); font-weight:700; }
+  .meta-card .v { font-size:16px; font-weight:800; color:var(--ink-2); margin-top:4px; }
+  @media(max-width:760px){ .explain-meta{ grid-template-columns:1fr 1fr; } .metric-mini{ grid-template-columns:1fr; } }
+  .back-link { display:inline-flex; align-items:center; gap:6px; color: var(--blue); font-weight:700; cursor:pointer; font-size:13px; margin-bottom:16px; }
+  .empty-state { text-align:center; padding:40px 20px; color: var(--gray); }
+
+  /* ---------- Modal ---------- */
+  .modal-backdrop { position:fixed; inset:0; background:rgba(20,35,48,.45); display:none; align-items:center; justify-content:center; z-index:100; padding:20px; }
+  .modal-backdrop.show { display:flex; }
+  .modal { background:#fff; border-radius:14px; max-width:460px; width:100%; box-shadow:0 20px 50px rgba(0,0,0,.25); overflow:hidden; }
+  .modal-head { padding:20px 24px 0; } .modal-head h3 { font-size:18px; color:var(--ink-2); }
+  .modal-body { padding:14px 24px 20px; font-size:13px; color: var(--gray-2); }
+  .modal-body ul { margin:12px 0 0; padding-left:18px; }
+  .modal-body li { margin:5px 0; color: var(--ink-2); font-weight:600; }
+  .modal-foot { display:flex; justify-content:flex-end; gap:10px; padding:16px 24px; background:#f8fafb; border-top:1px solid var(--line); }
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(80px); background: var(--ink-2); color:#fff; padding:13px 22px; border-radius:10px; font-weight:600; font-size:13px; box-shadow:0 8px 24px rgba(0,0,0,.25); transition:.35s; z-index:120; opacity:0; }
+  .toast.show { transform:translateX(-50%) translateY(0); opacity:1; }
+</style>
+</head>
+<body>
+
+<!-- ===================== TOP NAV ===================== -->
+<header class="topbar">
+  <span class="logo-mark">A</span>
+  <span class="logo"><span class="a1">Alliance</span><span class="a2">Chicago</span></span>
+  <span class="divider"></span>
+  <span class="app-title"><span class="sub">Entity Resolution</span>Entity Matching Dashboard</span>
+  <span class="demo-badge">DEMO · MOCK DATA</span>
+</header>
+
+<!-- ===================== TABS ===================== -->
+<nav class="tabs">
+  <button class="tab active" data-tab="dashboard">Dashboard</button>
+  <button class="tab" data-tab="dataset">Dataset</button>
+</nav>
+
+<!-- ===================== DASHBOARD TAB (KPIs & charts only) ===================== -->
+<main id="tab-dashboard" class="page">
+  <div class="page-head">
+    <div>
+      <h2>Dashboard</h2>
+      <p>High-level metrics, match-status breakdown, and model performance.</p>
+    </div>
+  </div>
+
+  <!-- KPIs -->
+  <div class="kpis">
+    <div class="kpi" style="--accent:var(--blue)"><div class="v" id="kpiLoaded">163,402</div><div class="l">Patient records loaded</div></div>
+    <div class="kpi" style="--accent:var(--cyan)"><div class="v" id="kpiClusters">4,118</div><div class="l">Duplicate clusters identified</div></div>
+    <div class="kpi" style="--accent:var(--green)"><div class="v" id="kpiMatched">91.4%</div><div class="l">Records matched</div></div>
+    <div class="kpi" style="--accent:var(--gold)"><div class="v" id="kpiReview">2,734</div><div class="l">Records needing review</div></div>
+    <div class="kpi" style="--accent:var(--red)"><div class="v" id="kpiInvalid">1,209</div><div class="l">Records classified invalid</div></div>
+    <div class="kpi" style="--accent:var(--blue-bright)"><div class="v" id="kpiMerged">0 / 0</div><div class="l">Manually merged / unmerged</div></div>
+    <div class="kpi" style="--accent:var(--teal)"><div class="v" id="kpiAuto">87.3%</div><div class="l">Auto-match rate</div></div>
+    <div class="kpi" style="--accent:var(--lime)"><div class="v">v2.4.1</div><div class="l">Active model version</div></div>
+  </div>
+
+  <div class="grid-2 section">
+    <!-- Match status chart -->
+    <div class="card chart-card">
+      <h4>Match status breakdown</h4>
+      <p class="muted" style="font-size:12px;margin:0 0 4px;">Patient counts by classification</p>
+      <div class="bars" id="statusBars">
+        <div class="bar-wrap"><div class="bar" style="height:78%;background:var(--status-auto)"><span class="count" id="barAuto">9,841</span></div><div class="bar-label">Auto-match</div></div>
+        <div class="bar-wrap"><div class="bar" style="height:30%;background:var(--status-review)"><span class="count" id="barReview">2,734</span></div><div class="bar-label">Needs review</div></div>
+        <div class="bar-wrap"><div class="bar" style="height:14%;background:var(--status-nomatch)"><span class="count" id="barNo">1,209</span></div><div class="bar-label">No match</div></div>
+      </div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--status-auto)"></i>Auto-match</span>
+        <span><i class="dot" style="background:var(--status-review)"></i>Needs review</span>
+        <span><i class="dot" style="background:var(--status-nomatch)"></i>No match</span>
+      </div>
+    </div>
+
+    <!-- Model reference info -->
+    <div class="card">
+      <div class="info-rows">
+        <div class="row"><span class="k">Model version</span><span class="val"><span class="pill blue">empi-rules v2.4.1</span></span></div>
+        <div class="row"><span class="k">Training run</span><span class="val">run-20260612-a</span></div>
+        <div class="row"><span class="k">Match threshold</span><span class="val">≥ 0.90</span></div>
+        <div class="row"><span class="k">Review band</span><span class="val">0.55 – 0.90</span></div>
+        <div class="row"><span class="k">No-match threshold</span><span class="val">&lt; 0.55</span></div>
+        <div class="row"><span class="k">Last refreshed</span><span class="val" id="lastRefreshed">2026-06-28 09:14</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model performance over time -->
+  <div class="card perf-card section">
+    <h4 style="font-size:15px;color:var(--ink-2);margin-bottom:4px;">Model performance over time</h4>
+    <p class="muted" style="font-size:12px;margin:0 0 8px;">Match quality across the last six monthly training runs</p>
+    <svg id="perfChart" viewBox="0 0 720 220" width="100%" height="220" preserveAspectRatio="none" style="overflow:visible"></svg>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--gold)"></i>Auto-match rate</span>
+      <span><i class="dot" style="background:var(--teal)"></i>Review rate</span>
+    </div>
+    <div class="metric-mini">
+      <div class="mini"><div class="k">Auto-match rate</div><div class="v">87.3%</div><div class="d up">▲ 2.1 pts vs last run</div></div>
+      <div class="mini"><div class="k">Review rate</div><div class="v">10.6%</div><div class="d down">▼ 1.4 pts vs last run</div></div>
+    </div>
+  </div>
+</main>
+
+<!-- ===================== DATASET TAB ===================== -->
+<main id="tab-dataset" class="page hidden">
+  <!-- Default: dataset table -->
+  <div id="datasetView">
+    <div class="page-head">
+      <div>
+        <h2>Matched Dataset</h2>
+        <p>Master patient records from entity resolution. Expand any row to review candidate matches and merge.</p>
+      </div>
+      <span class="muted" style="font-size:12px;">Last updated <b id="datasetUpdated">2026-06-28 09:14</b></span>
+    </div>
+
+    <div class="toolbar">
+      <input id="dsSearch" type="text" placeholder="Search by master ID, name, SSN, or birthdate…" />
+      <select id="dsStatus">
+        <option value="">All match status</option>
+        <option value="auto">Auto-matched</option>
+        <option value="review">Manually approved</option>
+        <option value="merge">Manually merged</option>
+        <option value="none">Unmatched</option>
+      </select>
+      <select id="dsMerge">
+        <option value="">All merge status</option>
+        <option value="merged">Merged</option>
+        <option value="unmerged">Not merged</option>
+      </select>
+    </div>
+
+    <div class="data-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th style="width:34px;"></th>
+            <th>Master Patient ID</th><th>Patient name</th><th>Masked SSN</th>
+            <th>Birthdate</th><th>Confidence</th><th>Origin</th><th>Last updated</th>
+          </tr>
+        </thead>
+        <tbody id="datasetBody"></tbody>
+      </table>
+    </div>
+    <p class="muted" style="font-size:11px;margin-top:12px;">Every record — clustered or standalone — is expandable. Historical match decisions are preserved for traceability.</p>
+
+    <!-- Audit log -->
+    <div class="section">
+      <h3>Merge audit log</h3>
+      <div class="data-wrap">
+        <table class="audit-table">
+          <thead><tr><th>User</th><th>Timestamp</th><th>Patient IDs merged</th><th>Prev → New status</th><th>Master ID</th></tr></thead>
+          <tbody id="auditBody"><tr><td colspan="5" class="audit-empty">No merge actions yet — merge a cluster to record an entry.</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model Explanation sub-page (within Dataset tab) -->
+  <div id="explanationView" class="hidden"></div>
+</main>
+
+<!-- ===================== MERGE CONFIRM MODAL ===================== -->
+<div class="modal-backdrop" id="mergeModal">
+  <div class="modal">
+    <div class="modal-head"><h3>Confirm merge</h3></div>
+    <div class="modal-body">
+      The following patient records will be combined into a single master patient record.
+      This action is recorded in the audit log.
+      <ul id="mergeList"></ul>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeMerge()">Cancel</button>
+      <button class="btn btn-merge" id="confirmMergeBtn">Confirm merge</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ====================== MOCK DATA ====================== */
+// Each master record may carry candidate sub-records (a cluster) or stand alone.
+let DATASET = [
+  {
+    mid:"M-100045", name:"Maria Gonzalez", ssn:"***-**-1234", dob:"1980-01-15",
+    score:0.97, origin:"review", merged:false, updated:"2026-06-28 09:14",
+    why:"SSN and birthdate matched exactly, last-name similarity was high, and phone-number overlap was detected.",
+    candidates:[
+      { pid:"P-880421", name:"Maria Gonzalez", ssn:"***-**-1234", dob:"1980-01-15", score:0.97, status:"auto",   feats:[["SSN exact",1],["DOB exact",1],["Phone overlap",1],["Last name 0.95",1]] },
+      { pid:"P-913088", name:"Maria Gonzales", ssn:"***-**-1234", dob:"1980-01-15", score:0.96, status:"review", feats:[["SSN exact",1],["DOB exact",1],["Last name 0.88",1]] },
+      { pid:"P-934771", name:"M. Gonzalez",    ssn:"***-**-1234", dob:"1980-01-15", score:0.91, status:"review", feats:[["SSN exact",1],["DOB exact",1],["First name 0.6",0]] }
+    ]
+  },
+  {
+    mid:"M-100048", name:"James Whitfield", ssn:"***-**-7788", dob:"1975-09-03",
+    score:0.88, origin:"review", merged:false, updated:"2026-06-27 15:40",
+    why:"Birthdate and ZIP matched exactly and last-name similarity was high, but SSN was missing on one record — placed in the review band.",
+    candidates:[
+      { pid:"P-771203", name:"James Whitfield", ssn:"***-**-7788", dob:"1975-09-03", score:0.88, status:"review", feats:[["DOB exact",1],["ZIP exact",1],["Last name 0.93",1]] },
+      { pid:"P-771940", name:"Jim Whitfield",   ssn:"(missing)",   dob:"1975-09-03", score:0.88, status:"review", feats:[["DOB exact",1],["ZIP exact",1],["SSN missing",0]] }
+    ]
+  },
+  {
+    mid:"M-100047", name:"Aisha Patel", ssn:"***-**-4502", dob:"1991-12-22",
+    score:0.95, origin:"review", merged:false, updated:"2026-06-27 16:02",
+    why:"SSN token match plus exact birthdate and email similarity; address differs (likely a move).",
+    candidates:[
+      { pid:"P-602115", name:"Aisha Patel",   ssn:"***-**-4502", dob:"1991-12-22", score:0.95, status:"auto",   feats:[["SSN exact",1],["DOB exact",1],["Email 0.9",1]] },
+      { pid:"P-655019", name:"Aisha R Patel", ssn:"***-**-4502", dob:"1991-12-22", score:0.94, status:"review", feats:[["SSN exact",1],["DOB exact",1],["Address 0.3",0]] }
+    ]
+  },
+  {
+    mid:"M-100046", name:"David Okoro", ssn:"***-**-2210", dob:"1968-04-30",
+    score:1.00, origin:"merge", merged:true, updated:"2026-06-28 08:51",
+    why:"Previously merged by reviewer — SSN, birthdate, and name all matched exactly.",
+    candidates:[
+      { pid:"P-440112", name:"David Okoro",  ssn:"***-**-2210", dob:"1968-04-30", score:1.0, status:"auto", feats:[["SSN exact",1],["DOB exact",1],["Last name 1.0",1]] },
+      { pid:"P-440990", name:"Dave Okoro",   ssn:"***-**-2210", dob:"1968-04-30", score:0.98, status:"auto", feats:[["SSN exact",1],["DOB exact",1],["First name 0.7",1]] }
+    ]
+  },
+  { mid:"M-100049", name:"Lena Kowalski", ssn:"***-**-9931", dob:"1959-07-11", score:null, origin:"none", merged:false, updated:"2026-06-27 11:18", why:"No candidate above the review threshold — standalone unmatched master record.", candidates:[] },
+  { mid:"M-100050", name:"Carlos Mendez", ssn:"***-**-3375", dob:"1988-02-09", score:0.93, origin:"auto", merged:false, updated:"2026-06-26 14:33", why:"Auto-matched: SSN and birthdate exact, phone overlap detected.", candidates:[
+      { pid:"P-510044", name:"Carlos Mendez",  ssn:"***-**-3375", dob:"1988-02-09", score:0.93, status:"auto", feats:[["SSN exact",1],["DOB exact",1],["Phone overlap",1]] },
+      { pid:"P-510781", name:"Carlos A Mendez",ssn:"***-**-3375", dob:"1988-02-09", score:0.92, status:"auto", feats:[["SSN exact",1],["DOB exact",1]] }
+    ] },
+  { mid:"M-100051", name:"Sofia Rossi", ssn:"***-**-6644", dob:"1996-10-25", score:null, origin:"none", merged:false, updated:"2026-06-26 10:07", why:"No candidate above the review threshold — standalone unmatched master record.", candidates:[] }
+];
+
+let AUDIT = [];
+let mergeCounter = 0, unmergeCounter = 0, splitCounter = 0;
+
+const ORIGIN_LABEL = { auto:["Auto-matched","o-auto"], review:["Manual review","o-review"], merge:["Manual merge","o-merge"], none:["No match","o-none"] };
+
+const SHAP_GLOBAL = [
+  ["SSN exact / token", 0.42],["Birthdate exact", 0.31],["Last name similarity", 0.18],
+  ["Phone overlap", 0.12],["ZIP code similarity", 0.08],["First name similarity", 0.06],
+  ["Email similarity", 0.05],["Address similarity", -0.09]
+];
+const FEATURE_COMPARE = [
+  ["SSN","***-**-1234","***-**-1234","Exact match","res-exact","+0.42"],
+  ["Birthdate","01/15/1980","01/15/1980","Exact match","res-exact","+0.31"],
+  ["Last name","Gonzalez","Gonzales","High similarity (0.95)","res-high","+0.18"],
+  ["Phone","(312) 555-0148","(312) 555-0148","Exact match","res-exact","+0.12"],
+  ["ZIP code","60654","60654","Exact match","res-exact","+0.08"],
+  ["Email","mgonzalez@…","m.gonzalez@…","Similarity 0.74","res-high","+0.05"],
+  ["Address","225 W Illinois St","118 N Aberdeen St","Low similarity (0.30)","res-low","-0.09"]
+];
+const PERF = { // last 6 runs — only metrics derivable without labels
+  auto:   [0.812,0.828,0.841,0.849,0.852,0.873],
+  review: [0.142,0.131,0.124,0.119,0.120,0.106]
+};
+
+/* ====================== TAB SWITCHING ====================== */
+function showTab(name){
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab===name));
+  document.getElementById('tab-dashboard').classList.toggle('hidden', name!=='dashboard');
+  document.getElementById('tab-dataset').classList.toggle('hidden', name!=='dataset');
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', ()=>{ closeExplanation(); showTab(t.dataset.tab); }));
+
+/* ====================== DATASET RENDER ====================== */
+let openRows = new Set();
+function renderDataset(){
+  const q = (document.getElementById('dsSearch').value||'').toLowerCase();
+  const st = document.getElementById('dsStatus').value;
+  const mg = document.getElementById('dsMerge').value;
+  const rows = DATASET.filter(r=>{
+    const matchQ = !q || [r.mid,r.name,r.ssn,r.dob].some(v=>(v||'').toLowerCase().includes(q));
+    const matchS = !st || r.origin===st;
+    const matchM = !mg || (mg==='merged'? r.merged : !r.merged);
+    return matchQ && matchS && matchM;
+  });
+  const body = document.getElementById('datasetBody');
+  if(!rows.length){ body.innerHTML = `<tr><td colspan="8" class="empty-state">No records match your search.</td></tr>`; return; }
+
+  body.innerHTML = rows.map(r=>{
+    const idx = DATASET.indexOf(r);
+    const [lbl,cls] = ORIGIN_LABEL[r.origin];
+    const open = openRows.has(r.mid);
+    const scoreTxt = r.score!=null ? `<b>${(r.score*100).toFixed(0)}%</b>` : '<span class="muted">—</span>';
+    let detail = '';
+    if(open){
+      detail = `<tr class="detail-row"><td colspan="8"><div class="detail-inner">`;
+      if(r.candidates.length){
+        detail += `<table class="records"><thead><tr>
+            <th>Patient ID</th><th>Name</th><th>SSN</th><th>Birthdate</th><th>Score</th><th>Status</th><th>Key features</th><th></th>
+          </tr></thead><tbody>
+          ${r.candidates.map((c,ci)=>`<tr class="rec-row" onclick="openExplanation(${idx},${ci})">
+            <td><b>${c.pid}</b></td><td>${c.name}</td><td>${c.ssn}</td><td>${c.dob}</td>
+            <td><b>${(c.score*100).toFixed(0)}%</b></td>
+            <td><span class="status-tag ${c.status==='auto'?'st-auto':'st-review'}">${c.status==='auto'?'Auto':'Review'}</span></td>
+            <td><div class="feat-chips">${c.feats.map(f=>`<span class="feat-chip ${f[1]?'pos':''}">${f[0]}</span>`).join('')}</div></td>
+            <td style="white-space:nowrap">
+              <span class="explain-link" onclick="event.stopPropagation();openExplanation(${idx},${ci})">Explain ›</span>
+              ${r.merged && r.candidates.length>1 ? `<span class="explain-link" style="color:var(--red);margin-left:12px" title="Split this record into its own master" onclick="event.stopPropagation();unmergeRecord(${idx},${ci})">Unmerge ✕</span>` : ''}
+            </td>
+          </tr>`).join('')}
+          </tbody></table>
+          <div class="detail-actions">
+            <span class="why"><b>Why flagged:</b> ${r.why}</span>
+            ${r.merged
+              ? `<button class="btn btn-danger" onclick="unmerge(${idx})">Unmerge all</button>`
+              : `<button class="btn btn-danger" onclick="removeSuggestion(${idx})">Remove</button>
+                 <button class="btn btn-merge" onclick="askMerge(${idx})">Merge cluster</button>`}
+          </div>`;
+      } else {
+        detail += `<div class="standalone-note">Standalone unmatched master record — no candidate matches above threshold. ${r.why}</div>`;
+      }
+      detail += `</div></td></tr>`;
+    }
+    return `<tr class="master-row ${open?'open':''}" onclick="toggleRow('${r.mid}')">
+        <td><span class="chev">▶</span></td>
+        <td><b>${r.mid}</b></td><td>${r.name}</td><td>${r.ssn}</td><td>${r.dob}</td>
+        <td class="score-cell">${scoreTxt}</td>
+        <td><span class="origin-tag ${cls}">${lbl}</span>${r.merged?' <span class="origin-tag o-merge">Merged</span>':''}</td>
+        <td class="muted">${r.updated}</td>
+      </tr>${detail}`;
+  }).join('');
+}
+function toggleRow(mid){ openRows.has(mid)?openRows.delete(mid):openRows.add(mid); renderDataset(); }
+['dsSearch'].forEach(id=>document.getElementById(id).addEventListener('input', renderDataset));
+['dsStatus','dsMerge'].forEach(id=>document.getElementById(id).addEventListener('change', renderDataset));
+
+/* ====================== MERGE / UNMERGE ====================== */
+let pendingMerge = null;
+function askMerge(idx){
+  pendingMerge = idx; const r = DATASET[idx];
+  document.getElementById('mergeList').innerHTML = r.candidates.map(c=>`<li>${c.pid} — ${c.name} (${c.dob})</li>`).join('');
+  document.getElementById('mergeModal').classList.add('show');
+}
+function closeMerge(){ document.getElementById('mergeModal').classList.remove('show'); pendingMerge=null; }
+document.getElementById('confirmMergeBtn').addEventListener('click', ()=>{
+  const r = DATASET[pendingMerge];
+  const prev = ORIGIN_LABEL[r.origin][0];
+  r.origin='merge'; r.merged=true; r.score=1.0; r.updated=nowStamp();
+  mergeCounter++;
+  AUDIT.unshift({ user:"reviewer.jclark", ts:nowStamp(), ids:r.candidates.map(c=>c.pid).join(', '), prev, next:"Merged", mid:r.mid });
+  closeMerge(); refreshAll();
+  toast(`Merged into ${r.mid} · audit entry recorded`);
+});
+function unmerge(idx){
+  const r = DATASET[idx]; const prev = "Merged";
+  r.merged=false; r.origin='review'; r.updated=nowStamp();
+  unmergeCounter++;
+  AUDIT.unshift({ user:"reviewer.jclark", ts:nowStamp(), ids:r.candidates.map(c=>c.pid).join(', '), prev, next:"Needs review", mid:r.mid });
+  refreshAll();
+  toast(`${r.mid} unmerged · records separated`);
+}
+function unmergeRecord(idx, ci){
+  const r = DATASET[idx]; const c = r.candidates[ci];
+  if(r.candidates.length<=1) return;
+  // split this record out into its own standalone master record
+  r.candidates.splice(ci,1);
+  splitCounter++;
+  const newMid = "M-2" + String(50+splitCounter).padStart(4,'0');
+  DATASET.push({
+    mid:newMid, name:c.name, ssn:c.ssn, dob:c.dob, score:null,
+    origin:'none', merged:false, updated:nowStamp(),
+    why:`Split out from ${r.mid} by reviewer — no longer part of that master record.`, candidates:[]
+  });
+  unmergeCounter++;
+  AUDIT.unshift({ user:"reviewer.jclark", ts:nowStamp(), ids:c.pid, prev:"Merged", next:"Unmerged → "+newMid, mid:newMid });
+  // if only one record remains, the master is no longer a merged cluster
+  if(r.candidates.length<=1){ r.merged=false; r.origin='review'; }
+  r.updated=nowStamp();
+  openRows.add(r.mid);
+  refreshAll();
+  toast(`${c.pid} split out of ${r.mid} into ${newMid}`);
+}
+function removeSuggestion(idx){
+  const r = DATASET[idx]; openRows.delete(r.mid);
+  r.candidates = [r.candidates[0]]; r.origin='none'; r.score=null; r.updated=nowStamp();
+  refreshAll();
+  toast(`Suggestion for ${r.mid} dismissed`);
+}
+
+/* ====================== KPI / CHART REFRESH ====================== */
+function refreshAll(){
+  renderDataset(); renderAudit();
+  document.getElementById('kpiMerged').textContent = `${mergeCounter} / ${unmergeCounter}`;
+  const reviewCount = DATASET.filter(r=>r.origin==='review').length;
+  // demo: nudge the review/auto KPIs & chart so reactivity is visible
+  const baseReview = 2734 - mergeCounter*1 + unmergeCounter*1;
+  document.getElementById('kpiReview').textContent = baseReview.toLocaleString();
+  document.getElementById('barReview').textContent = baseReview.toLocaleString();
+  const stamp = nowStamp();
+  document.getElementById('datasetUpdated').textContent = stamp;
+  document.getElementById('lastRefreshed').textContent = stamp;
+}
+function renderAudit(){
+  const b = document.getElementById('auditBody');
+  if(!AUDIT.length){ b.innerHTML = `<tr><td colspan="5" class="audit-empty">No merge actions yet — merge a cluster to record an entry.</td></tr>`; return; }
+  b.innerHTML = AUDIT.map(a=>`<tr>
+    <td>${a.user}</td><td class="muted">${a.ts}</td><td>${a.ids}</td>
+    <td>${a.prev} → <b>${a.next}</b></td><td><b>${a.mid}</b></td></tr>`).join('');
+}
+
+/* ====================== MODEL EXPLANATION SUB-PAGE ====================== */
+function shapRowsHTML(rows, max){
+  return rows.map(([name,val])=>{
+    const pos = val>=0; const w = Math.min(48, Math.abs(val)/max*48);
+    const left = pos ? 50 : (50 - w);
+    return `<div class="shap-row"><div class="shap-name">${name}</div>
+      <div class="shap-track"><div class="shap-mid"></div>
+        <div class="shap-bar ${pos?'pos':'neg'}" style="left:${left}%;width:${w}%"></div></div>
+      <div class="shap-val ${pos?'pos':'neg'}">${pos?'+':''}${val.toFixed(2)}</div></div>`;
+  }).join('');
+}
+function renderWaterfall(rows){
+  let cum = 0.05; const base = 0.05; const scale = 260;
+  let html = `<div class="wf-row"><div class="wf-name">Base rate</div><div class="wf-track"><div class="wf-seg" style="left:0;width:${base*scale}px;background:#b9c4cc"></div></div><div class="shap-val">${base.toFixed(2)}</div></div>`;
+  rows.forEach(([name,val])=>{
+    const start = cum; cum += val; const lo = Math.min(start,cum), w = Math.abs(val);
+    html += `<div class="wf-row"><div class="wf-name">${name}</div><div class="wf-track">
+      <div class="wf-seg" style="left:${lo*scale}px;width:${w*scale}px;background:${val>=0?'var(--green)':'var(--red)'}"></div>
+    </div><div class="shap-val ${val>=0?'pos':'neg'}">${val>=0?'+':''}${val.toFixed(2)}</div></div>`;
+  });
+  html += `<div class="wf-row"><div class="wf-name"><b>Final</b></div><div class="wf-track"><div class="wf-seg" style="left:0;width:${Math.min(cum,1)*scale}px;background:var(--blue)"></div></div><div class="shap-val"><b>${Math.min(cum,1).toFixed(2)}</b></div></div>`;
+  return html;
+}
+let returnRowMid = null;
+function openExplanation(idx, ci){
+  const r = DATASET[idx]; const c = r.candidates[ci]; returnRowMid = r.mid;
+  document.getElementById('datasetView').classList.add('hidden');
+  const v = document.getElementById('explanationView');
+  v.classList.remove('hidden');
+  const otherPid = r.candidates.find(x=>x.pid!==c.pid)?.pid || r.mid;
+  const shapMax = Math.max(...SHAP_GLOBAL.map(x=>Math.abs(x[1])));
+  const shapPairRows = FEATURE_COMPARE.map(x=>[x[0], parseFloat(x[5])]);
+  v.innerHTML = `
+    <span class="back-link" onclick="closeExplanation()">‹ Back to ${r.mid} in Dataset</span>
+    <div class="page-head"><div>
+      <h2>Match explanation — ${c.pid} vs ${otherPid}</h2>
+      <p>Why this pair was predicted a likely duplicate.</p>
+    </div></div>
+
+    <div class="explain-meta">
+      <div class="card meta-card"><div class="k">Match probability</div><div class="v">${(c.score*100).toFixed(1)}%</div></div>
+      <div class="card meta-card"><div class="k">Predicted class</div><div class="v">${c.score>=0.9?'Duplicate':'Review'}</div></div>
+      <div class="card meta-card"><div class="k">Threshold used</div><div class="v">≥ 0.90</div></div>
+      <div class="card meta-card"><div class="k">Model version</div><div class="v" style="font-size:13px">empi-rules v2.4.1</div></div>
+      <div class="card meta-card"><div class="k">Patients compared</div><div class="v" style="font-size:13px">${c.pid} · ${otherPid}</div></div>
+      <div class="card meta-card"><div class="k">Generated</div><div class="v" style="font-size:13px">2026-06-28 09:14</div></div>
+    </div>
+
+    <div class="card section" style="padding:20px;">
+      <h4 style="font-size:15px;color:var(--ink-2);margin-bottom:14px;">Feature comparison</h4>
+      <table class="feature-table">
+        <thead><tr><th>Feature</th><th>Patient A</th><th>Patient B</th><th>Result</th><th>Contribution</th></tr></thead>
+        <tbody>${FEATURE_COMPARE.map(x=>`<tr>
+          <td><b>${x[0]}</b></td><td>${x[1]}</td><td>${x[2]}</td>
+          <td class="${x[4]}">${x[3]}</td>
+          <td class="${x[5].startsWith('-')?'res-low':'res-exact'}"><b>${x[5]}</b></td></tr>`).join('')}</tbody>
+      </table>
+    </div>
+
+    <div class="grid-2 section">
+      <div class="card" style="padding:20px;">
+        <h4 style="font-size:15px;color:var(--ink-2);margin-bottom:6px;">Fellegi–Sunter contribution waterfall</h4>
+        <p class="muted" style="font-size:12px;margin:0 0 14px;">How each feature moved the score from the base rate to the final probability.</p>
+        <div>${renderWaterfall(shapPairRows)}</div>
+      </div>
+      <div class="card" style="padding:20px;">
+        <h4 style="font-size:15px;color:var(--ink-2);margin-bottom:6px;">Feature importance (SHAP)</h4>
+        <p class="muted" style="font-size:12px;margin:0 0 14px;">Which traits increased vs decreased the match probability.</p>
+        <div>${shapRowsHTML(SHAP_GLOBAL, shapMax)}</div>
+        <div class="legend"><span><i class="dot" style="background:var(--green)"></i>Increases</span><span><i class="dot" style="background:var(--red)"></i>Decreases</span></div>
+      </div>
+    </div>
+
+    <div class="card section" style="padding:20px;background:#f3f9fe;border-color:#cfe6f7;">
+      <h4 style="font-size:15px;color:var(--blue);margin-bottom:8px;">Plain-language summary</h4>
+      <p style="font-size:14px;color:var(--ink-2);margin:0;">${r.why}</p>
+    </div>`;
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function closeExplanation(){
+  const v = document.getElementById('explanationView');
+  if(v.classList.contains('hidden')) return;
+  v.classList.add('hidden');
+  document.getElementById('datasetView').classList.remove('hidden');
+  if(returnRowMid){ openRows.add(returnRowMid); renderDataset(); }
+}
+
+/* ====================== PERFORMANCE CHART ====================== */
+function drawPerf(){
+  const svg = document.getElementById('perfChart');
+  const W=720,H=220, padL=44,padR=12,padT=12,padB=28;
+  const xs = i => padL + i*( (W-padL-padR)/(PERF.auto.length-1) );
+  const ys = v => padT + (1-v)*(H-padT-padB);
+  const labels = ["Jan","Feb","Mar","Apr","May","Jun"];
+  let g = '';
+  // gridlines
+  [0.0,0.25,0.50,0.75,1.0].forEach(v=>{
+    g += `<line x1="${padL}" y1="${ys(v)}" x2="${W-padR}" y2="${ys(v)}" stroke="#eef1f4"/>`;
+    g += `<text x="${padL-8}" y="${ys(v)+4}" text-anchor="end" font-size="10" fill="#9aa3aa" font-family="Montserrat">${(v*100).toFixed(0)}%</text>`;
+  });
+  labels.forEach((l,i)=> g += `<text x="${xs(i)}" y="${H-8}" text-anchor="middle" font-size="10" fill="#9aa3aa" font-family="Montserrat">${l}</text>`);
+  const series = [["auto","var(--gold)"],["review","var(--teal)"]];
+  series.forEach(([key,col])=>{
+    const pts = PERF[key].map((v,i)=>`${xs(i)},${ys(v)}`).join(' ');
+    g += `<polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+    PERF[key].forEach((v,i)=> g += `<circle cx="${xs(i)}" cy="${ys(v)}" r="3" fill="#fff" stroke="${col}" stroke-width="2"/>`);
+  });
+  svg.innerHTML = g;
+}
+
+/* ====================== UTIL ====================== */
+function nowStamp(){ return "2026-06-28 09:" + String(14 + mergeCounter + unmergeCounter).padStart(2,'0'); }
+let toastTimer;
+function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove('show'),3200); }
+
+/* ====================== INIT ====================== */
+renderDataset();
+renderAudit();
+drawPerf();
+openRows.add("M-100045");
+renderDataset();
+</script>
+</body>
+</html>

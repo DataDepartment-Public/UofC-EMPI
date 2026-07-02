@@ -20,18 +20,27 @@ INPUTS:
         PATID and carrying the `*_clean` attribute columns plus `Phones_set`.
 
 PUBLIC API:
-    apply_rules(candidate_pairs, df_clean)      -> pd.DataFrame (confirmed matches)
+    apply_rules(candidate_pairs, df_clean)      -> pd.DataFrame (confirmed pairs)
     get_non_matches(candidate_pairs, matches)   -> pd.DataFrame (unconfirmed pairs)
     classify_non_matches(pairs, matches, clean) -> pd.DataFrame (+ reject/review)
-    assign_clusters(matches)                    -> dict[str, int] (PATID -> cluster)
     get_match_stats(matches, n_records)         -> dict         (audit report)
+
+    Connected-component clustering now lives in `src/models/clustering.py`
+    (stage 5 of the pipeline) — see `assign_clusters` / `build_cluster_assignments`
+    there. `get_match_stats` imports it for the cluster-size stats below.
 
 THREE-WAY DECISION:
     Each candidate pair lands in one of three buckets:
-      * match  — a rule confirmed it (`apply_rules`)               -> auto-merge
-      * reject — a confident non-match (>= 3 strong contradictions) -> dropped
-      * review — genuinely uncertain                               -> probabilistic
-    `classify_non_matches` assigns reject/review to the pairs no rule confirmed.
+      * match  — confirmed by an AUTO-MERGE-tier rule (`apply_rules`)  -> auto-merge
+      * reject — a confident non-match (>= 3 strong contradictions)    -> dropped
+      * review — confirmed only by a REVIEW-tier rule, OR unconfirmed
+                 with < 3 contradictions                              -> probabilistic
+    `apply_rules` returns every pair any rule confirmed (both tiers, with the
+    winning `match_rule`); the caller routes them by tier via `AUTO_MERGE_RULES` /
+    `REVIEW_RULES`. `classify_non_matches` assigns reject/review to the pairs no
+    rule confirmed. NAME_DOB_SEX and NAME_DOB_ADDRESS are REVIEW-tier (~65% / ~67%
+    silver precision) — they fire and keep provenance but never auto-merge on their
+    own. See docs/Deterministic-Rules-Guide.md.
 
 OUTPUT SCHEMA (matches DataFrame):
     PATID_A        str   — canonical first PATID (carried from blocking)
@@ -62,6 +71,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import settings
+from src.models.clustering import assign_clusters
 
 logger = logging.getLogger(__name__)
 
@@ -125,18 +135,30 @@ _CONTRADICTION_COLS = (COL_SSN, COL_FIRST_NM, COL_LAST_NM, COL_BIRTH_DT)
 
 
 # ── Rule definitions ──────────────────────────────────────────────────────────
+# A rule's tier decides what a confirmed pair *does*, not whether it fires:
+#   * "auto_merge" — the pair is auto-merged (the `match` decision).
+#   * "review"     — the pair is routed to the downstream probabilistic / clerical
+#                    review stage instead of being auto-merged.
+# Every rule still fires and records full provenance regardless of tier; only the
+# routing differs. See `AUTO_MERGE_RULES` / `REVIEW_RULES` below.
+TIER_AUTO_MERGE = "auto_merge"
+TIER_REVIEW = "review"
+
+
 @dataclass(frozen=True)
 class MatchRule:
     """A deterministic match rule.
 
     `fields` names the per-pair agreement predicates (keys of the agreement
     map built in `_build_agreement`) that must all be True for the rule to
-    fire. Confidence values are taken verbatim from the guide.
+    fire. Confidence values are taken verbatim from the guide. `tier` decides
+    whether a pair the rule confirms is auto-merged or routed to review.
     """
 
     name: str
     confidence: float
     fields: tuple[str, ...]
+    tier: str = TIER_AUTO_MERGE
 
 
 # Ordered by confidence (descending) — the order the winning rule is resolved in.
@@ -154,12 +176,65 @@ class MatchRule:
 # linked parents to children, siblings, and unrelated patients (see
 # docs/Deterministic-Rules-Guide.md "Evaluation"). Email is only trustworthy when
 # corroborated by name + DOB, which is exactly NAME_DOB_EMAIL.
+#
+# NAME_DOB_SEX and NAME_DOB_ADDRESS are tier "review", NOT auto-merge. Against the
+# silver labels they adjudicate at only ~65% / ~67% precision and carry essentially
+# all of the false merges: name + DOB + sex is not a unique identity (a common
+# name, shared birthday, and sex collide on real data), and a shared street address
+# links co-resident relatives who share a birthday. They still fire and keep their
+# provenance, but a pair whose *only* confirming rule is one of these is routed to
+# review rather than auto-merged. A pair that also fires an auto-merge rule still
+# auto-merges (the higher-confidence auto-merge rule wins). See the "Evaluation"
+# and "Three-way decision" sections of docs/Deterministic-Rules-Guide.md.
 RULES: tuple[MatchRule, ...] = (
     MatchRule("SSN_DOB", 1.000, ("ssn", "dob")),
     MatchRule("NAME_DOB_EMAIL", 0.990, ("first", "last", "dob", "email")),
     MatchRule("NAME_DOB_PHONE", 0.985, ("first", "last", "dob", "phone")),
-    MatchRule("NAME_DOB_SEX", 0.980, ("first", "last", "dob", "sex")),
-    MatchRule("NAME_DOB_ADDRESS", 0.970, ("first", "last", "dob", "address")),
+    MatchRule("NAME_DOB_SEX", 0.980, ("first", "last", "dob", "sex"), TIER_REVIEW),
+    MatchRule(
+        "NAME_DOB_ADDRESS", 0.970, ("first", "last", "dob", "address"), TIER_REVIEW
+    ),
+)
+
+# Rule-name sets by tier — the routing key the pipeline uses to split confirmed
+# pairs into auto-merge vs review. Derived from RULES so they never drift.
+AUTO_MERGE_RULES: frozenset[str] = frozenset(
+    r.name for r in RULES if r.tier == TIER_AUTO_MERGE
+)
+REVIEW_RULES: frozenset[str] = frozenset(
+    r.name for r in RULES if r.tier == TIER_REVIEW
+)
+
+
+@dataclass(frozen=True)
+class RejectRule:
+    """A deterministic *reject* rule — the third tier, symmetric with `MatchRule`.
+
+    Where a `MatchRule` fires on field *agreement*, a `RejectRule` fires on field
+    *disagreement*: an unconfirmed pair is a confident non-match when at least
+    `min_contradictions` of its strong-identifier `fields` strictly disagree (both
+    sides present and unequal — name typos count strictly here; fuzzy matching is
+    only ever used to *confirm* a pair). A pair that fires a reject rule is dropped
+    from the pipeline; one that does not routes to review.
+    """
+
+    name: str
+    min_contradictions: int
+    fields: tuple[str, ...]
+
+
+# The reject tier. Today there is exactly one rule — the calibrated
+# strong-identifier-conflict rule. Its threshold of 3 was calibrated on real run
+# `real_20260620` (false-reject rate ~10% at 2 contradictions, 0% at 3-4), so two
+# conflicts route to review and only three confidently reject. NOTE: a *single*
+# strong-ID conflict is deliberately NOT a reject rule — the Fellegi-Sunter
+# conflict-veto analysis showed true duplicates conflict on SSN/email/phone nearly
+# as often as false merges (churn + data-entry error), so a single-conflict veto
+# destroys more true matches than it saves. Only the multi-field threshold is safe.
+REJECT_RULES: tuple[RejectRule, ...] = (
+    RejectRule(
+        "STRONG_ID_CONFLICT", DEFAULT_REJECT_MIN_CONTRADICTIONS, _CONTRADICTION_COLS
+    ),
 )
 
 
@@ -378,15 +453,18 @@ def _suspicious_flag(frame: pd.DataFrame) -> pd.Series:
     return _disagree(COL_BIRTH_DT) | _disagree(COL_LAST_NM) | _disagree(COL_SSN)
 
 
-def _count_contradictions(frame: pd.DataFrame) -> pd.Series:
+def _count_contradictions(
+    frame: pd.DataFrame, fields: tuple[str, ...] = _CONTRADICTION_COLS
+) -> pd.Series:
     """Count strong identifiers that strictly disagree on a materialized pair.
 
     A field contributes 1 when both sides are present and unequal (exact
     comparison — name typos count here; fuzzy matching is only for confirming a
-    pair, never for rejecting one). Counted fields are `_CONTRADICTION_COLS`.
+    pair, never for rejecting one). Counted fields default to `_CONTRADICTION_COLS`
+    (the `STRONG_ID_CONFLICT` reject rule's fields).
     """
     total = pd.Series(0, index=frame.index, dtype="int64")
-    for col in _CONTRADICTION_COLS:
+    for col in fields:
         left, right = f"{col}_L", f"{col}_R"
         if left not in frame.columns or right not in frame.columns:
             continue
@@ -416,8 +494,10 @@ def apply_rules(
     -------
     pd.DataFrame
         One row per *confirmed* pair (at least one rule fired) with the output
-        schema documented at module level. Pairs that no rule confirmed are
-        dropped.
+        schema documented at module level — including REVIEW-tier confirmations
+        (their winning `match_rule` is in `REVIEW_RULES`). The caller splits
+        auto-merge from review by membership in `AUTO_MERGE_RULES`. Pairs that no
+        rule confirmed are dropped.
     """
     required = {"PATID_A", "PATID_B"}
     missing = required - set(candidate_pairs.columns)
@@ -562,10 +642,12 @@ def classify_non_matches(
         * `reject`  — confident non-match  -> dropped from the pipeline
         * `review`  — genuinely uncertain  -> downstream probabilistic stage
 
-    A pair is `reject` only when at least `min_contradictions` strong identifiers
-    strictly disagree (`_count_contradictions`); otherwise it is `review`. A
-    single disagreement is never enough to reject — when in doubt we keep the
-    pair for the probabilistic stage rather than discard a possible true match.
+    The reject decision is driven by the `STRONG_ID_CONFLICT` reject rule
+    (`REJECT_RULES[0]`): a pair is `reject` only when at least `min_contradictions`
+    of the rule's strong-identifier `fields` strictly disagree
+    (`_count_contradictions`); otherwise it is `review`. A single disagreement is
+    never enough to reject — when in doubt we keep the pair for the probabilistic
+    stage rather than discard a possible true match.
 
     Parameters
     ----------
@@ -575,30 +657,34 @@ def classify_non_matches(
         The cleaned dataset, keyed by `PATID`, used to materialize the
         identifier values the contradiction count compares.
     min_contradictions : int
-        Reject threshold (default `DEFAULT_REJECT_MIN_CONTRADICTIONS`).
+        Reject threshold, overriding the reject rule's own threshold (default
+        `DEFAULT_REJECT_MIN_CONTRADICTIONS`, which matches it).
 
     Returns
     -------
     pd.DataFrame
-        The `get_non_matches` frame plus two columns: `n_contradictions` (int)
-        and `decision` (`"reject"` / `"review"`).
+        The `get_non_matches` frame plus three columns: `n_contradictions` (int),
+        `decision` (`"reject"` / `"review"`), and `reject_rule` (the firing reject
+        rule's name on rejected rows, else NA).
     """
+    reject_rule = REJECT_RULES[0]
     non_matches = get_non_matches(candidate_pairs, matches)
     if non_matches.empty:
         non_matches = non_matches.copy()
         non_matches["n_contradictions"] = pd.Series(dtype="int64")
         non_matches["decision"] = pd.Series(dtype="object")
+        non_matches["reject_rule"] = pd.Series(dtype="object")
         return non_matches
 
     frame = _materialize_pairs(non_matches, df_clean)
-    n_contradictions = _count_contradictions(frame)
-    decision = np.where(
-        n_contradictions >= min_contradictions, "reject", "review"
-    )
+    n_contradictions = _count_contradictions(frame, reject_rule.fields)
+    is_reject = n_contradictions >= min_contradictions
+    decision = np.where(is_reject, "reject", "review")
 
     out = non_matches.copy()
     out["n_contradictions"] = n_contradictions.to_numpy()
     out["decision"] = decision
+    out["reject_rule"] = np.where(is_reject, reject_rule.name, pd.NA)
     n_reject = int((out["decision"] == "reject").sum())
     logger.info(
         "Three-way split of %d unconfirmed pairs: %d reject (>=%d "
@@ -611,57 +697,20 @@ def classify_non_matches(
     return out
 
 
-def assign_clusters(matches: pd.DataFrame) -> dict[str, int]:
-    """Group confirmed matches into connected-component clusters.
-
-    Treats every confirmed pair as an undirected edge and runs union-find to
-    assign each PATID a cluster id. PATIDs not appearing in `matches` are not
-    included (singletons). Cluster ids are deterministic: the smallest PATID in
-    a component (by sort order) seeds its id ordering.
-
-    Returns
-    -------
-    dict[str, int]
-        PATID -> integer cluster id (ids are contiguous starting at 0).
-    """
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        parent.setdefault(x, x)
-        root = x
-        while parent[root] != root:
-            root = parent[root]
-        while parent[x] != root:  # path compression
-            parent[x], x = root, parent[x]
-        return root
-
-    def union(a: str, b: str) -> None:
-        ra, rb = find(a), find(b)
-        if ra == rb:
-            return
-        # Keep the lexicographically smaller root for deterministic output.
-        lo, hi = (ra, rb) if ra < rb else (rb, ra)
-        parent[hi] = lo
-
-    for a, b in zip(matches["PATID_A"], matches["PATID_B"]):
-        union(a, b)
-
-    roots = sorted({find(p) for p in parent})
-    root_to_id = {root: i for i, root in enumerate(roots)}
-    return {patid: root_to_id[find(patid)] for patid in parent}
-
-
 def get_match_stats(
     matches: pd.DataFrame,
     n_records: int | None = None,
     decided: pd.DataFrame | None = None,
+    review_matches: pd.DataFrame | None = None,
 ) -> dict:
     """Compute the audit statistics described in the guide's Results Summary.
 
     Parameters
     ----------
     matches : pd.DataFrame
-        Output of `apply_rules`.
+        The AUTO-MERGE matches (`apply_rules` output filtered to
+        `AUTO_MERGE_RULES`). All distribution / coverage / cluster stats are
+        computed over this auto-merge set.
     n_records : int, optional
         Total patient count in the source dataset, used for the coverage rate.
         When omitted, coverage is computed against the number of matched
@@ -669,7 +718,12 @@ def get_match_stats(
     decided : pd.DataFrame, optional
         Output of `classify_non_matches`. When given, the result includes a
         `decision_distribution` with the three-way `match` / `review` / `reject`
-        counts.
+        counts. Review-tier rule confirmations (`review_matches`) are counted in
+        the `review` bucket, not `match`.
+    review_matches : pd.DataFrame, optional
+        The REVIEW-tier rule confirmations (`apply_rules` output filtered to
+        `REVIEW_RULES`). When given, adds a `review_match_distribution` (per-rule
+        counts) and rolls these pairs into the `review` decision count.
 
     Returns
     -------
@@ -680,12 +734,13 @@ def get_match_stats(
     if matches.empty:
         return {}
 
+    n_review_confirmed = 0 if review_matches is None else len(review_matches)
     decision_distribution = None
     if decided is not None:
         dvc = decided["decision"].value_counts() if not decided.empty else {}
         decision_distribution = {
             "match": len(matches),
-            "review": int(dvc.get("review", 0)),
+            "review": int(dvc.get("review", 0)) + n_review_confirmed,
             "reject": int(dvc.get("reject", 0)),
         }
 
@@ -733,6 +788,19 @@ def get_match_stats(
         **(
             {"decision_distribution": decision_distribution}
             if decision_distribution is not None
+            else {}
+        ),
+        **(
+            {
+                "review_match_distribution": dict(
+                    sorted(
+                        review_matches["match_rule"].value_counts().items(),
+                        key=lambda kv: kv[1],
+                        reverse=True,
+                    )
+                )
+            }
+            if review_matches is not None and not review_matches.empty
             else {}
         ),
     }

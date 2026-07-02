@@ -4,21 +4,26 @@ Runs the stages **in process**, passing DataFrames stage-to-stage rather than
 re-resolving "the latest file in the directory":
 
     raw  ──►  clean/transform  ──►  blocking  ──►  deterministic rules
-                                                      ├─► matches
+                                                      ├─► matches ──┐
                                                       └─► non-matches
+                                                                    ▼
+                                                            clustering (terminal)
+                                                              └─► cluster assignments
 
-Because one in-memory cleaned frame feeds both blocking and rules, the lineage
-mismatch the standalone CLIs are vulnerable to cannot occur here. Every boundary
-is validated against the contracts in `src/contracts.py`, and a single `run_id`
-ties all artifacts together via a `RunManifest` written to `data/runs/`.
+Because one in-memory cleaned frame feeds every stage, the lineage mismatch the
+standalone CLIs are vulnerable to cannot occur here. Every boundary is validated
+against the contracts in `src/contracts.py`, and a single `run_id` ties all
+artifacts together via a `RunManifest` written to `data/runs/`.
 
 USAGE:
     python -m src.pipeline                         # uses settings.raw_input
     python -m src.pipeline --input data/raw/MDM_Population.csv
     python -m src.pipeline --run-id 20260603T120000Z   # override the run id
 
-Stages 4 (probabilistic model) and 5 (clustering) are not built yet; the clear
-insertion point is marked below.
+Stage 4 (probabilistic model, `docs/Data-Contract.md`) is not built yet; today
+clustering runs directly over the deterministic auto-merge matches. Once a
+model stage lands, its edges should union into the same clustering input
+(see `src/models/clustering.py`).
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from src.contracts import (  # noqa: E402
     ArtifactRef,
     CandidatePairs,
     CleanedRecords,
+    ClusterAssignments,
     Matches,
     NonMatches,
     RunManifest,
@@ -54,10 +60,11 @@ from src.contracts import (  # noqa: E402
 )
 from src.preprocessing.clean import _load as _read_raw, write_cleaned  # noqa: E402
 from src.preprocessing.transformations import transform_dataframe  # noqa: E402
-from src.preprocessing.blocking import run_batch_blocking  # noqa: E402
+from src.preprocessing.stacked_blocking import run_stacked_blocking  # noqa: E402
+from src.models.clustering import assign_clusters, build_cluster_assignments  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
+    AUTO_MERGE_RULES,
     apply_rules,
-    assign_clusters,
     classify_non_matches,
     get_match_stats,
 )
@@ -131,46 +138,74 @@ def run_pipeline(
     validate(cleaned, CleanedRecords)
     n_valid = int(cleaned["valid_record"].sum())
     logger.info(
-        "[1/3] CLEAN — %d raw → %d cleaned rows (%d valid)",
+        "[1/4] CLEAN — %d raw → %d cleaned rows (%d valid)",
         len(raw_df), len(cleaned), n_valid,
     )
     cleaned_path = settings.processed_dir / f"{settings.cleaned_stem}_{run_id}.parquet"
     write_cleaned(cleaned, cleaned_path)
 
-    # ── Stage 2: block ────────────────────────────────────────────────────
-    candidate_pairs = run_batch_blocking(cleaned)
+    # ── Stage 2: block (stacked: 8-block ∪ q-gram → CNP/ARCS prune) ────────
+    candidate_pairs = run_stacked_blocking(cleaned)
     validate(candidate_pairs, CandidatePairs)
-    logger.info("[2/3] BLOCK — %d candidate pairs", len(candidate_pairs))
+    logger.info("[2/4] BLOCK — %d candidate pairs", len(candidate_pairs))
     pairs_path = settings.blocking_dir / f"candidate_pairs_{run_id}.parquet"
     candidate_pairs.to_parquet(pairs_path, index=False)
 
     # ── Stage 3: deterministic rules ──────────────────────────────────────
     assert_patid_coverage(candidate_pairs, cleaned)  # guaranteed in-process; guard anyway
-    matches = apply_rules(
+    confirmed = apply_rules(
         candidate_pairs, cleaned, ssn_fanout_threshold=settings.ssn_fanout_threshold
     )
+    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; the rest
+    # (NAME_DOB_SEX / NAME_DOB_ADDRESS) are confirmed but routed to review.
+    is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
+    matches = confirmed[is_auto].reset_index(drop=True)
+    review_confirmed = confirmed[~is_auto].reset_index(drop=True)
     if not matches.empty:
         clusters = assign_clusters(matches)
         matches = matches.copy()
         matches["cluster_id"] = matches["PATID_A"].map(clusters)
     validate(matches, Matches)
-    # Three-way split: review -> downstream; reject -> dropped (audited separately).
-    decided = classify_non_matches(candidate_pairs, matches, cleaned)
-    non_matches = (
-        decided[decided["decision"] == "review"][list(candidate_pairs.columns)]
-        .reset_index(drop=True)
-    )
+    # Three-way split. `confirmed` (both tiers) is removed from the contradiction
+    # split so review-tier pairs are never reject-scored; they join review below.
+    decided = classify_non_matches(candidate_pairs, confirmed, cleaned)
+    pair_cols = list(candidate_pairs.columns)
+    non_matches = pd.concat(
+        [
+            review_confirmed[pair_cols],
+            decided[decided["decision"] == "review"][pair_cols],
+        ]
+    ).reset_index(drop=True)
     rejects = decided[decided["decision"] == "reject"].reset_index(drop=True)
     validate(non_matches, NonMatches)
-    stats = get_match_stats(matches, n_records=len(cleaned), decided=decided)
+    stats = get_match_stats(
+        matches,
+        n_records=len(cleaned),
+        decided=decided,
+        review_matches=review_confirmed,
+    )
     logger.info(
-        "[3/3] RULES — %d matches, %d review, %d reject, %d clusters",
-        len(matches), len(non_matches), len(rejects), stats.get("n_clusters", 0),
+        "[3/4] RULES — %d auto-merge, %d review (%d rule-confirmed), %d reject, "
+        "%d clusters",
+        len(matches), len(non_matches), len(review_confirmed), len(rejects),
+        stats.get("n_clusters", 0),
     )
     matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
     non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
+    # Review-tier rule provenance (match_rule/confidence/rules_fired) does not
+    # survive the `non_matches_path` write above — `non_matches` is trimmed to
+    # the closed NonMatches/CandidatePairs schema. Keep the full
+    # `review_confirmed` columns in a companion artifact so a consumer (the API
+    # publish step) can show *why* a review-tier pair was flagged, not just
+    # that it was. Not part of the documented Data-Contract stage boundaries;
+    # no strict pandera contract, since nothing else in the pipeline depends
+    # on it.
+    review_evidence_path = (
+        settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
+    )
+    review_confirmed.to_parquet(review_evidence_path, index=False)
     rejects_path = settings.rejects_dir / f"rejects_{run_id}.parquet"
     rejects.to_parquet(rejects_path, index=False)
 
@@ -201,8 +236,19 @@ def run_pipeline(
     else:
         logger.info("[4/5] MODEL — skipped (no non-match pairs to score)")
 
-    # ── Stage 5 (clustering): add here, feeding deterministic Matches and
-    #    ProbabilisticMatches into a uniform Edges projection for clustering. ──
+    # ── Stage 5: cluster (terminal) — connected components over the deterministic
+    #    auto-merge edges. TODO: once the FS model is integrated into the pipeline,
+    #    union its auto_merge edges (matches_model_path) into `matches` here so the
+    #    clustering runs over both the deterministic and probabilistic edge sets. ──
+    cluster_assignments = build_cluster_assignments(matches, cleaned)
+    validate(cluster_assignments, ClusterAssignments)
+    n_total_clusters = int(cluster_assignments["cluster_id"].nunique())
+    logger.info(
+        "[5/5] CLUSTER — %d records → %d clusters (incl. singletons)",
+        len(cluster_assignments), n_total_clusters,
+    )
+    clusters_path = settings.clusters_dir / f"cluster_assignments_{run_id}.parquet"
+    cluster_assignments.to_parquet(clusters_path, index=False)
 
     # ── Manifest ──────────────────────────────────────────────────────────
     root = settings.project_root
@@ -216,6 +262,8 @@ def run_pipeline(
         matches=_artifact_ref(matches_path, matches, root),
         non_matches=_artifact_ref(non_matches_path, non_matches, root),
         rejects=_artifact_ref(rejects_path, rejects, root),
+        clusters=_artifact_ref(clusters_path, cluster_assignments, root),
+        review_evidence=_artifact_ref(review_evidence_path, review_confirmed, root),
         counts={
             "raw_rows": len(raw_df),
             "cleaned_rows": len(cleaned),
@@ -225,6 +273,7 @@ def run_pipeline(
             "non_matches": len(non_matches),
             "rejects": len(rejects),
             "clusters": int(stats.get("n_clusters", 0)),
+            "total_clusters": n_total_clusters,
         },
     )
     manifest_path = settings.runs_dir / f"run_{run_id}.json"

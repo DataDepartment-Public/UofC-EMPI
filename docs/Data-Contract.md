@@ -51,8 +51,9 @@ _Last updated: 2026-06-03._
            │     model-confirmed edges
            │              │
    ┌───────▼──────────────▼────────┐
-   │ 5. CLUSTERING                  │  src/models/clustering.py (stub)            [PROPOSED]
-   │   (union of all confirmed edges)│  — note: currently runs inside stage 3
+   │ 5. CLUSTERING                  │  src/models/clustering.py                   [IMPLEMENTED]
+   │   (deterministic auto-merge    │  — terminal stage; unions in model edges
+   │    edges only, until stage 4)  │    once stage 4 exists
    └──────────────┬─────────────────┘
    data/clusters/cluster_assignments_*.parquet
 ```
@@ -284,18 +285,28 @@ to a **review-queue artifact** rather than to automatic clustering.
 
 ---
 
-## Stage 5 — Clustering  `[PROPOSED — currently embedded in stage 3]`
+## Stage 5 — Clustering  `[IMPLEMENTED]`
 
-> **Current behavior:** connected components are computed *today* inside stage 3
-> (`deterministic_rules.assign_clusters`, called from the rules writer) and
-> stamped onto matches as `cluster_id` — using **deterministic edges only**.
-> Once stage 4 exists, clustering must run **once** over the union of
-> deterministic ∪ model edges, or an entity will be split across stages. The
-> target is to extract clustering into its own terminal stage.
+`src/models/clustering.py` is the terminal stage of `src/pipeline.py`, run once
+per pipeline invocation after stage 3. **Current behavior:** it clusters
+**deterministic auto-merge matches only** (`AUTO_MERGE_RULES`-tier pairs) —
+review-tier confirmations and non-matches are excluded, per the routing note
+above. Stage 3 still stamps a per-pair `cluster_id` onto `matches` (via
+`clustering.assign_clusters`, used internally by
+`deterministic_rules.get_match_stats` for audit stats), but the authoritative,
+singleton-inclusive assignment is `clustering.build_cluster_assignments`'s
+output, written to `data/clusters/`.
+Once stage 4 (probabilistic model) exists, its edges must union into
+`build_cluster_assignments`'s input, or an entity will be split across stages.
 
-- **Input:** the concatenation of all confirmed edges (`contracts.Edges`).
+- **Input today:** `matches` (deterministic auto-merge edges) + `cleaned`
+  (for the full valid-record population, so singletons get a cluster too).
+  Target once stage 4 lands: the concatenation of all confirmed edges
+  (`contracts.Edges`).
 - **Algorithm:** union-find / connected components over `(PATID_A, PATID_B)`.
-- **Output:** `contracts.ClusterAssignments` — one row per record incl. singletons.
+- **Output:** `contracts.ClusterAssignments` — one row per valid record incl.
+  singletons, written to `data/clusters/cluster_assignments_<run_id>.parquet`
+  and referenced from the `RunManifest`.
 
 | Column | Dtype | Notes |
 |---|---|---|
@@ -337,4 +348,8 @@ correlation clustering) belong in this stage.
   `pipeline.run_pipeline`.
 - **`Deterministic-Rules-Guide.md`** block table is stale (lists B5 as single
   phone, B8 as initials, a 3,000 cap); the block table above is authoritative.
-- **Clustering placement** — extract from stage 3 into stage 5 once modeling exists.
+- **Clustering placement** — DONE: extracted into `src/models/clustering.py` as
+  stage 5, run from `src/pipeline.py` over deterministic auto-merge edges. Still
+  open: union in model edges once stage 4 exists; merge-safety controls
+  (max cluster size, exclude suspicious/high-fanout edges from bridging) — see
+  `to-do.md` G7.

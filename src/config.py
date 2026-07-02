@@ -50,8 +50,29 @@ class Settings(BaseSettings):
     matches_model_dir: Path = _DATA / "matches_model"
     non_matches_dir: Path = _DATA / "non_matches"
     rejects_dir: Path = _DATA / "rejects"
+    clusters_dir: Path = _DATA / "clusters"
     runs_dir: Path = _DATA / "runs"
     log_dir: Path = _PROJECT_ROOT / "logs"
+
+    # ── API service (src/api/) ──────────────────────────────────────────────
+    db_path: Path = Field(
+        default=_DATA / "empi.db",
+        description="SQLite file holding the resolved output (entities, "
+        "membership, audit log) the API serves and reviewers edit.",
+    )
+    api_cors_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:3000"],
+        description="Allowed browser origins for the future Next.js front-end "
+        "(see docs/Application-Architecture.md).",
+    )
+    reviewer_header: str = Field(
+        default="X-Reviewer-Id",
+        description="Header the API trusts for reviewer identity on /audit/* "
+        "(set by a front-end BFF; never client-asserted in a real deploy).",
+    )
+    records_page_size: int = Field(
+        default=50, description="Default page size for GET /records."
+    )
 
     # ── Defaults ────────────────────────────────────────────────────────────
     raw_input: Path = _DATA / "raw" / "MDM_Population.csv"
@@ -61,6 +82,39 @@ class Settings(BaseSettings):
     governance_threshold: int = Field(
         default=500,
         description="Per-key record cap; blocks larger than this are capped.",
+    )
+
+    # ── Stacked blocker: q-gram pass (src/preprocessing/qgram_blocking.py) ────
+    # The 8-block scheme is unioned with a typo-tolerant char-n-gram cosine pass
+    # restricted to a coarse DOB block, then pruned by meta-blocking (below).
+    # Validated recommended config: fulldob block, char (2,4)-grams, cosine >=0.30.
+    qgram_block_kind: str = Field(
+        default="fulldob",
+        description="Coarse block the q-gram cosine is restricted to within "
+        "('fulldob' = exact birth date, or 'birthyear').",
+    )
+    qgram_threshold: float = Field(
+        default=0.30,
+        description="Minimum char-n-gram cosine similarity for a q-gram "
+        "candidate pair. Pending gold-label confirmation.",
+    )
+    qgram_ngram_min: int = Field(default=2, description="Min char n-gram size.")
+    qgram_ngram_max: int = Field(default=4, description="Max char n-gram size.")
+    qgram_min_df: int = Field(
+        default=2,
+        description="TfidfVectorizer min_df — drop n-grams rarer than this.",
+    )
+
+    # ── Stacked blocker: meta-blocking prune (src/preprocessing/meta_blocking.py) ─
+    cnp_top_k: int = Field(
+        default=10,
+        description="Cardinality Node Pruning: keep an edge if it is in the "
+        "top-k ARCS-weighted edges of either endpoint.",
+    )
+    cnp_qgram_only_weight: float = Field(
+        default=0.5,
+        description="ARCS weight assigned to q-gram-only edges (no 8-block "
+        "source) when meta-blocking ranks them.",
     )
 
     # ── Rules ───────────────────────────────────────────────────────────────
@@ -128,13 +182,16 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         """Create every output directory this run will write to."""
         for d in (
+            self.raw_dir,
             self.processed_dir,
             self.blocking_dir,
             self.matches_dir,
             self.matches_model_dir,
             self.non_matches_dir,
             self.rejects_dir,
+            self.clusters_dir,
             self.runs_dir,
+            self.db_path.parent,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

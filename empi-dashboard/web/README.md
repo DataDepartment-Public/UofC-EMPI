@@ -2,11 +2,11 @@
 
 Reviewer-facing UI for the eMPI entity-resolution pipeline: KPIs, a searchable
 dataset of resolved patient records, inline merge/unmerge, and a per-pair
-match explanation. See `docs/Dashboard-Guide.md` and `docs/Application-Architecture.md`
-at the repo root for the functional spec and system design.
+match explanation. See `../docs/Dashboard-Guide.md` and `../docs/Application-Architecture.md`
+for the functional spec and system design.
 
 Next.js App Router + a thin Backend-for-Frontend layer (`app/api/*`) that
-proxies to the FastAPI service in `src/api/` — the browser never calls
+proxies to the FastAPI service in `empi-service/src/api/` — the browser never calls
 FastAPI directly (see `lib/server-api.ts`).
 
 ## Running locally
@@ -14,11 +14,11 @@ FastAPI directly (see `lib/server-api.ts`).
 Requires the backend running first:
 
 ```bash
-# from the repo root
+# from empi-service/
 uvicorn src.api.main:app --port 8000
 ```
 
-Then, from `web/`:
+Then, from `empi-dashboard/web/`:
 
 ```bash
 npm install

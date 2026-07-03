@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { ApiError, RecordsFilters } from "@/lib/api-client";
 import { useMergeMutation, useRecords, useUnmergeMutation } from "@/lib/hooks";
+import { AuditLog } from "@/components/AuditLog";
 import { DatasetFilters } from "@/components/DatasetFilters";
 import { DatasetRow } from "@/components/DatasetRow";
 import { MergeModal } from "@/components/MergeModal";
@@ -147,6 +148,10 @@ function DatasetPageContent() {
           </div>
         </>
       )}
+
+      <div className="mt-8">
+        <AuditLog />
+      </div>
 
       <RawDataDrawer patid={rawPatid} onClose={() => setRawPatid(null)} />
 

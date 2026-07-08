@@ -1,9 +1,8 @@
 "use client";
 
-import { Suspense, use } from "react";
-import Link from "next/link";
-import { useSearchParams } from "next/navigation";
-import { compareRecords, plainLanguageSummary } from "@/lib/compare";
+import { Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { compareRecords } from "@/lib/compare";
 import { decodeExplainPayload } from "@/lib/explain";
 import { fullName } from "@/lib/format";
 import { FeatureComparisonTable } from "@/components/FeatureComparisonTable";
@@ -17,20 +16,15 @@ import { useDashboardSummary } from "@/lib/hooks";
  * run in production today. This page shows what's real: the rule that
  * fired (or didn't), its fixed confidence, and a genuine field-by-field
  * comparison — no fabricated probability or waterfall. */
-export default function ExplainPage({
-  params,
-}: {
-  params: Promise<{ mid: string }>;
-}) {
-  const { mid } = use(params);
+export default function ExplainPage() {
   return (
     <Suspense fallback={<p className="text-sm text-gray">Loading…</p>}>
-      <ExplainPageContent mid={mid} />
+      <ExplainPageContent />
     </Suspense>
   );
 }
 
-function ExplainPageContent({ mid }: { mid: string }) {
+function ExplainPageContent() {
   const searchParams = useSearchParams();
   const payload = decodeExplainPayload(searchParams.get("d"));
   const { data: summary } = useDashboardSummary();
@@ -38,7 +32,7 @@ function ExplainPageContent({ mid }: { mid: string }) {
   if (!payload) {
     return (
       <div>
-        <BackLink mid={mid} />
+        <BackLink />
         <p className="card mt-4 p-6 text-sm text-status-nomatch">
           This explanation link is missing its comparison data. Go back to the
           Dataset tab and click a match again.
@@ -53,7 +47,7 @@ function ExplainPageContent({ mid }: { mid: string }) {
 
   return (
     <div>
-      <BackLink mid={mid} />
+      <BackLink />
 
       <div className="mb-5 mt-3">
         <h2 className="text-[22px] font-extrabold text-ink-2">
@@ -94,13 +88,6 @@ function ExplainPageContent({ mid }: { mid: string }) {
           <p className="text-[13px] text-gray-2">{evidence}</p>
         </div>
       )}
-
-      <div className="card mt-5 border-[#cfe6f7] bg-[#f3f9fe] p-5">
-        <h4 className="mb-2 text-[15px] font-semibold text-brand-blue">
-          Plain-language summary
-        </h4>
-        <p className="text-[14px] text-ink-2">{plainLanguageSummary(rule, rows)}</p>
-      </div>
     </div>
   );
 }
@@ -126,13 +113,15 @@ function MetaCard({
   );
 }
 
-function BackLink({ mid }: { mid: string }) {
+function BackLink() {
+  const router = useRouter();
   return (
-    <Link
-      href={`/dataset?search=${encodeURIComponent(mid)}`}
+    <button
+      type="button"
+      onClick={() => router.back()}
       className="text-sm font-semibold text-brand-blue hover:underline"
     >
-      ‹ Back to {mid} in Dataset
-    </Link>
+      ‹ Back to Dataset
+    </button>
   );
 }

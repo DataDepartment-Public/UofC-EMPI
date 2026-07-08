@@ -85,6 +85,14 @@ export function useUnmergeMutation() {
   });
 }
 
+export function useUndoMutation() {
+  const refresh = useRefreshAll();
+  return useMutation({
+    mutationFn: (auditId: number) => api.undoAudit(auditId),
+    onSuccess: refresh,
+  });
+}
+
 export function useCreateRun() {
   const refresh = useRefreshAll();
   const qc = useQueryClient();

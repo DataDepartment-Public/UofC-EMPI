@@ -22,6 +22,7 @@ import {
   RunDetailSchema,
   RunSummary,
   RunSummarySchema,
+  UndoResponseSchema,
   UnmergeResponseSchema,
 } from "./schemas";
 
@@ -126,6 +127,11 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mid, patid }),
+    }),
+
+  undoAudit: (auditId: number) =>
+    call(UndoResponseSchema, `/api/audit/${auditId}/undo`, {
+      method: "POST",
     }),
 };
 

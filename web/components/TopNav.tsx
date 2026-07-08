@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
@@ -14,13 +15,14 @@ export function TopNav() {
     <div className="sticky top-0 z-50">
       <header className="flex h-16 items-center gap-4 border-b-[3px] border-brand-blue bg-white px-6 shadow-sm">
         <div className="flex items-center">
-          <span className="mr-2.5 flex h-[34px] w-[34px] items-center justify-center rounded-lg bg-gradient-to-br from-brand-blue to-brand-cyan text-lg font-black text-white">
-            A
-          </span>
-          <span className="text-[22px] font-extrabold tracking-tight">
-            <span className="text-brand-blue">Alliance</span>
-            <span className="text-brand-cyan">Chicago</span>
-          </span>
+          <Image
+            src="/alliance-logo.png"
+            alt="AllianceChicago"
+            width={800}
+            height={148}
+            priority
+            className="h-9 w-auto"
+          />
         </div>
         <div className="h-[30px] w-px bg-line" />
         <div className="text-[15px] font-semibold text-ink-2">

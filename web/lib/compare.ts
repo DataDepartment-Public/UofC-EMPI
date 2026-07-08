@@ -45,38 +45,3 @@ export function compareRecords(
     return { label, valueA: va_ ?? "(missing)", valueB: vb_ ?? "(missing)", result };
   });
 }
-
-/** The rule's required fields (label -> the ComparisonRow.label it maps to),
- * so the plain-language summary cites only what that specific rule actually
- * checked (src/models/deterministic_rules.py RULES). */
-const RULE_FIELDS: Record<string, string[]> = {
-  SSN_DOB: ["SSN (last 4)", "Birthdate"],
-  NAME_DOB_EMAIL: ["First name", "Last name", "Birthdate", "Email"],
-  NAME_DOB_PHONE: ["First name", "Last name", "Birthdate", "Phone"],
-  NAME_DOB_SEX: ["First name", "Last name", "Birthdate", "Sex"],
-  NAME_DOB_ADDRESS: ["First name", "Last name", "Birthdate", "Address"],
-};
-
-export function plainLanguageSummary(
-  rule: string | null,
-  rows: ComparisonRow[],
-): string {
-  if (!rule) {
-    return (
-      "This pair was surfaced by blocking as a potential duplicate, but no " +
-      "deterministic rule confirmed it — it needs clerical review before any " +
-      "merge decision is made."
-    );
-  }
-  const fields = RULE_FIELDS[rule];
-  if (!fields) {
-    return `This pair was confirmed a match by the ${rule} rule.`;
-  }
-  const byLabel = new Map(rows.map((r) => [r.label, r]));
-  const matched = fields.filter((f) => byLabel.get(f)?.result === "exact");
-  return (
-    `This pair was classified as a likely duplicate by the ${rule} rule, which ` +
-    `requires ${fields.join(", ").toLowerCase()} to agree. In this pair, ` +
-    `${matched.join(", ").toLowerCase() || "the required fields"} matched exactly.`
-  );
-}

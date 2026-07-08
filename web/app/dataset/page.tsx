@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, RecordsFilters } from "@/lib/api-client";
 import { useMergeMutation, useRecords, useUnmergeMutation } from "@/lib/hooks";
 import { AuditLog } from "@/components/AuditLog";
@@ -21,13 +21,53 @@ export default function DatasetPage() {
   );
 }
 
-function DatasetPageContent() {
-  const searchParams = useSearchParams();
-  const [filters, setFilters] = useState<RecordsFilters>({
-    page: 1,
+/** Filters live in the URL (not just component state) so that navigating
+ * away — e.g. to a patient's Model Explanation page — and back with the
+ * browser's own back button lands on the exact same search/filter/page the
+ * reviewer had, instead of a freshly reset Dataset tab. */
+function filtersFromSearchParams(searchParams: URLSearchParams): RecordsFilters {
+  return {
+    page: Number(searchParams.get("page")) || 1,
     page_size: PAGE_SIZE,
     search: searchParams.get("search") ?? undefined,
-  });
+    origin: searchParams.get("origin") ?? undefined,
+    is_merged: searchParams.has("is_merged")
+      ? searchParams.get("is_merged") === "true"
+      : undefined,
+    birth_date: searchParams.get("birth_date") ?? undefined,
+    ssn_last4: searchParams.get("ssn_last4") ?? undefined,
+  };
+}
+
+function filtersToSearch(filters: RecordsFilters): string {
+  const params = new URLSearchParams();
+  if (filters.search) params.set("search", filters.search);
+  if (filters.origin) params.set("origin", filters.origin);
+  if (filters.is_merged !== undefined) params.set("is_merged", String(filters.is_merged));
+  if (filters.birth_date) params.set("birth_date", filters.birth_date);
+  if (filters.ssn_last4) params.set("ssn_last4", filters.ssn_last4);
+  if (filters.page && filters.page !== 1) params.set("page", String(filters.page));
+  return params.toString();
+}
+
+function DatasetPageContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [filters, setFiltersState] = useState<RecordsFilters>(() =>
+    filtersFromSearchParams(searchParams),
+  );
+
+  const setFilters = (
+    next: RecordsFilters | ((prev: RecordsFilters) => RecordsFilters),
+  ) => {
+    setFiltersState((prev) => {
+      const resolved = typeof next === "function" ? next(prev) : next;
+      const qs = filtersToSearch(resolved);
+      router.replace(qs ? `/dataset?${qs}` : "/dataset", { scroll: false });
+      return resolved;
+    });
+  };
+
   const [rawPatid, setRawPatid] = useState<string | null>(null);
   const [pendingMerge, setPendingMerge] = useState<{
     mid: string;

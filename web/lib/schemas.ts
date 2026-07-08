@@ -163,6 +163,9 @@ export const AuditLogRowSchema = z.object({
   prev_state: z.string(),
   next_state: z.string(),
   run_id: z.string().nullable(),
+  prev_mid: z.string().nullable().optional(),
+  undo_of: z.number().nullable().optional(),
+  undone: z.boolean().optional().default(false),
 });
 export type AuditLogRow = z.infer<typeof AuditLogRowSchema>;
 
@@ -175,4 +178,11 @@ export const UnmergeResponseSchema = z.object({
   audit_id: z.number(),
   new_mid: z.string(),
   entity: EntitySchema,
+});
+
+export const UndoResponseSchema = z.object({
+  audit_id: z.number(),
+  reversed_action: z.enum(["merge", "unmerge"]),
+  entity: EntitySchema,
+  new_mids: z.array(z.string()),
 });

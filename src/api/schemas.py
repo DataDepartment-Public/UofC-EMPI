@@ -181,6 +181,16 @@ class AuditLogRow(BaseModel):
     prev_state: str
     next_state: str
     run_id: str | None
+    prev_mid: str | None = None
+    undo_of: int | None = None
+    undone: bool = False
+
+
+class UndoResponse(BaseModel):
+    audit_id: int
+    reversed_action: Literal["merge", "unmerge"]
+    entity: Entity
+    new_mids: list[str] = Field(default_factory=list)
 
 
 __all__ = [
@@ -204,4 +214,5 @@ __all__ = [
     "UnmergeRequest",
     "UnmergeResponse",
     "AuditLogRow",
+    "UndoResponse",
 ]

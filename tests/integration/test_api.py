@@ -334,6 +334,94 @@ class TestAudit:
         assert len(p2_entities) == 1
         assert len(p2_entities[0]["members"]) == 1  # still standalone
 
+    def test_undo_merge_restores_previous_state(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        merge_resp = client.post(
+            "/audit/merge",
+            json={"mid": matched_mid, "patids": ["P3"]},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        audit_id = merge_resp.json()["audit_id"]
+
+        resp = client.post(
+            f"/audit/{audit_id}/undo",
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["reversed_action"] == "merge"
+        assert [m["patid"] for m in body["entity"]["members"]] == ["P1", "P2"]
+
+        # P3 is standalone again, and the merge row now shows as undone.
+        p3_mid = body["new_mids"][0]
+        p3_entity = client.get(f"/clusters/{p3_mid}").json()
+        assert [m["patid"] for m in p3_entity["members"]] == ["P3"]
+
+        audit_rows = client.get("/audit").json()
+        original = next(r for r in audit_rows if r["id"] == audit_id)
+        assert original["undone"] is True
+
+    def test_undo_unmerge_restores_previous_state(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        unmerge_resp = client.post(
+            "/audit/unmerge",
+            json={"mid": matched_mid, "patid": "P2"},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        audit_id = unmerge_resp.json()["audit_id"]
+
+        resp = client.post(
+            f"/audit/{audit_id}/undo",
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["reversed_action"] == "unmerge"
+        assert {m["patid"] for m in body["entity"]["members"]} == {"P1", "P2"}
+        assert body["entity"]["mid"] == matched_mid
+
+        audit_rows = client.get("/audit").json()
+        original = next(r for r in audit_rows if r["id"] == audit_id)
+        assert original["undone"] is True
+
+    def test_undo_twice_conflicts(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        unmerge_resp = client.post(
+            "/audit/unmerge",
+            json={"mid": matched_mid, "patid": "P2"},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        audit_id = unmerge_resp.json()["audit_id"]
+
+        first = client.post(
+            f"/audit/{audit_id}/undo", headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert first.status_code == 200
+
+        second = client.post(
+            f"/audit/{audit_id}/undo", headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert second.status_code == 409
+
+    def test_undo_unknown_id_404s(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.post(
+            "/audit/999999/undo", headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 404
+
 
 class TestDashboard:
     def test_summary(self, client, test_settings):

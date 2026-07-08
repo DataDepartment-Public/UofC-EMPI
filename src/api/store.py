@@ -67,7 +67,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     mid          TEXT NOT NULL,
     prev_state   TEXT NOT NULL,
     next_state   TEXT NOT NULL,
-    run_id       TEXT
+    run_id       TEXT,
+    prev_mid     TEXT,
+    undo_of      INTEGER REFERENCES audit_log(id)
 );
 
 CREATE TABLE IF NOT EXISTS record_attrs (
@@ -116,9 +118,16 @@ CREATE TABLE IF NOT EXISTS entity_suggestion (
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Open one SQLite connection. Callers own its lifecycle (one per request
-    or per script run) — this module never pools connections."""
+    or per script run) — this module never pools connections.
+
+    `check_same_thread=False`: FastAPI's sync `Depends(get_db)` and the sync
+    route handler that consumes it are each dispatched to anyio's
+    threadpool independently, so under concurrent requests they sometimes
+    land on different worker threads for the same request — sqlite3's
+    default same-thread check then raises even though this connection is
+    still only ever used by one thread *at a time*, never concurrently."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -127,7 +136,19 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     """Create every table if it doesn't already exist. Idempotent."""
     conn.executescript(SCHEMA_SQL)
+    _ensure_audit_log_undo_columns(conn)
     conn.commit()
+
+
+def _ensure_audit_log_undo_columns(conn: sqlite3.Connection) -> None:
+    """`CREATE TABLE IF NOT EXISTS` above is a no-op against a pre-existing
+    `empi.db` from before undo support existed — patch the two new nullable
+    columns onto it directly so old databases keep working."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(audit_log)")}
+    if "prev_mid" not in cols:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN prev_mid TEXT")
+    if "undo_of" not in cols:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN undo_of INTEGER")
 
 
 # ── Locking (reconciliation) ────────────────────────────────────────────────
@@ -579,16 +600,27 @@ def insert_audit_log(
     prev_state: str,
     next_state: str,
     run_id: str | None,
+    prev_mid: str | None = None,
+    undo_of: int | None = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO audit_log
-            (ts_utc, user, action, patids, mid, prev_state, next_state, run_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
+             prev_mid, undo_of)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id),
+        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
+         prev_mid, undo_of),
     )
     return int(cur.lastrowid)
+
+
+def get_audit_log_row(conn: sqlite3.Connection, audit_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM audit_log WHERE id = ?", (audit_id,)
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def list_audit_log(
@@ -603,7 +635,20 @@ def list_audit_log(
         rows = conn.execute(
             "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
-    return [dict(r) for r in rows]
+    # `undone` isn't windowed by `limit`/`since` — a row undone long after it
+    # scrolled past that window should still report itself as undone.
+    undone_ids = {
+        r["undo_of"]
+        for r in conn.execute(
+            "SELECT undo_of FROM audit_log WHERE undo_of IS NOT NULL"
+        )
+    }
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["undone"] = d["id"] in undone_ids
+        result.append(d)
+    return result
 
 
 def member_count(conn: sqlite3.Connection, mid: str) -> int:
@@ -638,6 +683,7 @@ __all__ = [
     "get_entity",
     "list_entities",
     "insert_audit_log",
+    "get_audit_log_row",
     "list_audit_log",
     "member_count",
     "dashboard_summary",

@@ -29,6 +29,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # src/config.py -> project root is one parent up from src/.
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DATA = _PROJECT_ROOT / "data"
+_MODELS = _PROJECT_ROOT / "models"
 
 
 class Settings(BaseSettings):
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
     processed_dir: Path = _DATA / "processed"
     blocking_dir: Path = _DATA / "blocking"
     matches_dir: Path = _DATA / "matches"
+    matches_model_dir: Path = _DATA / "matches_model"
     non_matches_dir: Path = _DATA / "non_matches"
     rejects_dir: Path = _DATA / "rejects"
     clusters_dir: Path = _DATA / "clusters"
@@ -123,6 +125,45 @@ class Settings(BaseSettings):
         "least this many distinct patients (likely shared/fraudulent SSN).",
     )
 
+    # ── Stage 4: Fellegi-Sunter matcher (src/models/fs_matcher/) ─────────────
+    # The FS module is a candidate + feature generator for the downstream GBT.
+    # It loads a pre-trained model artifact (no per-run training) and scores the
+    # rules' `non_matches` pool. Its output does NOT feed clustering.
+    fs_model_dir: Path = Field(
+        default=_MODELS / "fs",
+        description="Directory of trained FS model artifacts (Splink JSON + "
+        "meta sidecars) and the 'active' pointer. Gitignored — populated by "
+        "`python -m src.models.fs_matcher.train` on the VM.",
+    )
+    fs_active_model: Path | None = Field(
+        default=None,
+        description="Explicit active FS model JSON to serve. When None, the "
+        "registry resolves the active pointer (or latest) in fs_model_dir.",
+    )
+    fs_output_dir: Path = Field(
+        default=_DATA / "FS_output",
+        description="Output dir for the GBT feature parquet — the pipeline's "
+        "per-run candidate set and the train CLI's labeled training set. Gitignored.",
+    )
+    fs_auto_merge_threshold: float = Field(
+        default=0.95,
+        description="Match-probability at/above which a scored pair is tiered "
+        "'auto_merge'. Informational only — the FS stage routes nothing; it "
+        "labels tiers for the GBT/audit.",
+    )
+    fs_review_floor: float = Field(
+        default=0.40,
+        description="Match-probability at/above which a pair is tiered "
+        "'human_review'. Doubles as the CANDIDATE CUTOFF: only pairs at/above "
+        "this land in the FSFeatures GBT parquet.",
+    )
+    fs_deploy_gate_margin: float = Field(
+        default=0.02,
+        description="A retrained FS model may only be promoted to 'active' if "
+        "its held-out precision/recall are within this margin of the current "
+        "active model's (guards against deploying a degraded retrain).",
+    )
+
     # ── Logging (see configure_logging below) ────────────────────────────────
     log_level: str = Field(
         default="INFO",
@@ -189,6 +230,9 @@ class Settings(BaseSettings):
             self.rejects_dir,
             self.clusters_dir,
             self.runs_dir,
+            self.matches_model_dir,
+            self.fs_model_dir,
+            self.fs_output_dir,
             self.db_path.parent,
         ):
             d.mkdir(parents=True, exist_ok=True)

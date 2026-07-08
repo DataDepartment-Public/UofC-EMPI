@@ -22,6 +22,8 @@ the matching model here in the same change.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import pandera.pandas as pa
@@ -178,7 +180,89 @@ class Matches(pa.DataFrameModel):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Stages 4–5 — PROPOSED target contracts (no stage emits these yet)
+# Stage 4 — Fellegi-Sunter probabilistic scoring (candidate/feature generator)
+# ═══════════════════════════════════════════════════════════════════════════════
+class ProbabilisticMatches(pa.DataFrameModel):
+    """Full audit record of the FS module's scoring of the `non_matches` pool.
+
+    Produced by `src/models/fs_matcher/` (`FSMatcher.to_probabilistic_matches`).
+    Written per run to `data/matches_model/matches_model_<run_id>.parquet` for
+    auditability/review — it is **not** unioned into clustering (clustering stays
+    on the deterministic auto-merge edges only). Carries every scored pair with
+    its tier, so it includes `no_match`-tier rows too.
+
+    `veto_reason` is **optional**: the enhanced_3-derived production matcher does
+    not apply a veto layer, so it omits the column entirely; a producer that does
+    emit vetoes keeps it as a nullable string. Both pass validation.
+    """
+
+    PATID_A: Series[str] = pa.Field(nullable=False, coerce=True)
+    PATID_B: Series[str] = pa.Field(nullable=False, coerce=True)
+    match_source: Series[str] = pa.Field(nullable=False, coerce=True, isin=["model"])
+    score: Series[float] = pa.Field(nullable=False, coerce=True, ge=0.0, le=1.0)
+    match_weight: Series[float] = pa.Field(nullable=False, coerce=True)
+    classification_tier: Series[str] = pa.Field(
+        nullable=False, coerce=True,
+        isin=["auto_merge", "human_review", "no_match"],
+    )
+    veto_reason: Optional[Series[str]] = pa.Field(nullable=True, coerce=True)
+    source_blocks: Series[str] = pa.Field(nullable=True, coerce=True)
+    n_blocks: Series[int] = pa.Field(nullable=True, coerce=True, ge=1)
+
+    class Config:
+        strict = True
+        coerce = True
+
+    @pa.dataframe_check
+    def _canonical_order(cls, df: pd.DataFrame) -> bool:  # noqa: N805
+        return bool((df[PATID_A] < df[PATID_B]).all())
+
+
+#: Required base columns of the FSFeatures GBT parquet (the per-field
+#: gamma_<field> / bf_<field> feature columns are dynamic — see
+#: validate_fs_features). `label` is present only on the training feature set.
+FS_FEATURES_REQUIRED_COLUMNS: tuple[str, ...] = (
+    PATID_A, PATID_B, "match_probability", "match_weight", "classification_tier",
+)
+
+
+class FSFeatures(pa.DataFrameModel):
+    """Per-pair feature parquet the FS module emits for the downstream GBT.
+
+    Produced by `FSMatcher.to_fs_features`. The pipeline writes the
+    candidate-filtered set (``match_probability >= review_floor``) per run to
+    `data/FS_output/fs_features_<run_id>.parquet`; the `fs-train` CLI writes a
+    labeled full set for GBT training. In addition to the base columns below,
+    the frame carries one `gamma_<field>` (level index) and one `bf_<field>`
+    (Bayes-factor bits) column per Splink comparison — validated by presence via
+    `validate_fs_features` since their exact names depend on each comparison's
+    output column. `strict=False` so those feature columns are allowed extras.
+
+    `label` (0/1) is present on the training set and absent (or null) when
+    scoring — hence Optional + nullable.
+    """
+
+    PATID_A: Series[str] = pa.Field(nullable=False, coerce=True)
+    PATID_B: Series[str] = pa.Field(nullable=False, coerce=True)
+    match_probability: Series[float] = pa.Field(nullable=False, coerce=True, ge=0.0, le=1.0)
+    match_weight: Series[float] = pa.Field(nullable=False, coerce=True)
+    classification_tier: Series[str] = pa.Field(
+        nullable=False, coerce=True,
+        isin=["auto_merge", "human_review", "no_match"],
+    )
+    label: Optional[Series[float]] = pa.Field(nullable=True, coerce=True, isin=[0.0, 1.0])
+
+    class Config:
+        strict = False  # gamma_<field> / bf_<field> feature columns are allowed extras
+        coerce = True
+
+    @pa.dataframe_check
+    def _canonical_order(cls, df: pd.DataFrame) -> bool:  # noqa: N805
+        return bool((df[PATID_A] < df[PATID_B]).all())
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Stage 5 — Clustering (deterministic-only) + PROPOSED Edges union target
 # ═══════════════════════════════════════════════════════════════════════════════
 class Edges(pa.DataFrameModel):
     """Uniform edge schema emitted by BOTH the rules and the model stages, so
@@ -233,6 +317,33 @@ def validate(
     return schema.validate(df, lazy=lazy)
 
 
+def validate_fs_features(df: pd.DataFrame, *, allow_empty: bool = True) -> pd.DataFrame:
+    """Validate the FSFeatures GBT parquet.
+
+    Beyond the pandera `FSFeatures` base-column check, this asserts the frame
+    carries at least one `gamma_<field>` and one `bf_<field>` feature column
+    (their exact names are Splink-comparison-dependent, so they can't be
+    enumerated in the strict schema). Returns the (coerced) frame.
+    """
+    if allow_empty and len(df) == 0:
+        return df
+    missing_base = [c for c in FS_FEATURES_REQUIRED_COLUMNS if c not in df.columns]
+    if missing_base:
+        raise ValueError(
+            f"FSFeatures is missing required base column(s) {missing_base}; "
+            f"have {sorted(df.columns)[:12]}..."
+        )
+    has_gamma = any(c.startswith("gamma_") for c in df.columns)
+    has_bf = any(c.startswith("bf_") for c in df.columns)
+    if not (has_gamma and has_bf):
+        raise ValueError(
+            "FSFeatures carries no per-field feature columns: expected at least "
+            "one 'gamma_<field>' and one 'bf_<field>' column (found "
+            f"gamma={has_gamma}, bf={has_bf}). These are the GBT's inputs."
+        )
+    return validate(df, FSFeatures, allow_empty=allow_empty)
+
+
 def assert_patid_coverage(
     pairs: pd.DataFrame, clean: pd.DataFrame, *, patid_col: str = PATID
 ) -> None:
@@ -282,6 +393,9 @@ class RunManifest(BaseModel):
     rejects: ArtifactRef | None = None
     clusters: ArtifactRef | None = None
     review_evidence: ArtifactRef | None = None
+    # Stage-4 FS artifacts (present only when an active FS model scored the run):
+    matches_model: ArtifactRef | None = None  # ProbabilisticMatches audit frame
+    fs_features: ArtifactRef | None = None     # FSFeatures GBT candidate parquet
     counts: dict[str, int] = Field(default_factory=dict)
 
 
@@ -291,11 +405,16 @@ __all__ = [
     "CleanedRecords",
     "ClusterAssignments",
     "Edges",
+    "FSFeatures",
     "Matches",
     "NonMatches",
+    "ProbabilisticMatches",
     "RunManifest",
     "RULE_NAMES",
+    "AUTO_MERGE_RULE_NAMES",
+    "FS_FEATURES_REQUIRED_COLUMNS",
     "CLEANED_REQUIRED_COLUMNS",
     "assert_patid_coverage",
     "validate",
+    "validate_fs_features",
 ]

@@ -9,3 +9,9 @@ Thumbs.db
 # Claude
 .claude/
 CLAUDE.md
+
+#data
+empi-service/data/
+
+
+

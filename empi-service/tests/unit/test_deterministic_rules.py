@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.contracts import Rejects, validate as validate_contract
 from src.models.deterministic_rules import (
     AUTO_MERGE_RULES,
     REJECT_RULES,
@@ -304,6 +305,21 @@ class TestClassifyNonMatches:
         (rule,) = REJECT_RULES
         assert rule.min_contradictions == 3
         assert len(rule.fields) == 4
+
+    def test_rejected_rows_validate_against_contracts_rejects(self):
+        # The real production rejects slice (decided[decision == "reject"], as
+        # both src.pipeline and run_rules.py build it) must pass the
+        # contracts.Rejects boundary validation added alongside pipeline.py's
+        # validate(rejects, Rejects) call.
+        out = self._classify([
+            {COL_PATID: "A", "FirstNM_clean": "JOHN", "LastNM_clean": "SMITH",
+             "BirthDT_clean": pd.Timestamp("1990-01-01"), "SSN_clean": "111111111"},
+            {COL_PATID: "B", "FirstNM_clean": "JANE", "LastNM_clean": "JONES",
+             "BirthDT_clean": pd.Timestamp("1985-02-02"), "SSN_clean": "222222222"},
+        ], ("A", "B"))
+        rejects = out[out["decision"] == "reject"].reset_index(drop=True)
+        assert not rejects.empty
+        validate_contract(rejects, Rejects, allow_empty=False)
 
 
 # ── Rule precedence ────────────────────────────────────────────────────────────

@@ -67,6 +67,9 @@ AUTO_MERGE_RULE_NAMES: tuple[str, ...] = (
     "SSN_DOB", "NAME_DOB_EMAIL", "NAME_DOB_PHONE",
 )
 
+#: Reject-rule names — keep in sync with deterministic_rules.REJECT_RULES.
+REJECT_RULE_NAMES: tuple[str, ...] = ("STRONG_ID_CONFLICT",)
+
 SEX_VALUES: tuple[str, ...] = ("MALE", "FEMALE", "OTHER")
 MATCH_SOURCES: tuple[str, ...] = ("deterministic", "model")
 
@@ -145,6 +148,24 @@ class CandidatePairs(pa.DataFrameModel):
 class NonMatches(CandidatePairs):
     """Candidate pairs no deterministic rule confirmed — identical schema to
     `CandidatePairs`, kept as a distinct boundary for clarity and provenance."""
+
+
+class Rejects(CandidatePairs):
+    """Unconfirmed pairs dropped for >=min_contradictions strong-identifier
+    conflicts (`deterministic_rules.classify_non_matches`). Terminal — nothing
+    downstream reads this back; kept for audit/compliance only.
+
+    `reject_rule` is non-nullable (unlike in the intermediate `decided` frame,
+    where it is null on `review` rows): every row that survives the
+    `decision == "reject"` filter already fired the reject rule, so it is
+    populated for 100% of rows in this artifact.
+    """
+
+    n_contradictions: Series[int] = pa.Field(nullable=False, coerce=True, ge=0)
+    decision: Series[str] = pa.Field(nullable=False, coerce=True, isin=["reject"])
+    reject_rule: Series[str] = pa.Field(
+        nullable=False, coerce=True, isin=list(REJECT_RULE_NAMES)
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -262,11 +283,15 @@ class FSFeatures(pa.DataFrameModel):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Stage 5 — Clustering (deterministic-only) + PROPOSED Edges union target
+# Stage 5 — Clustering (deterministic-only) + Edges (not on the current roadmap)
 # ═══════════════════════════════════════════════════════════════════════════════
 class Edges(pa.DataFrameModel):
-    """Uniform edge schema emitted by BOTH the rules and the model stages, so
-    clustering consumes one concatenated frame. PROPOSED — see Data-Contract.md.
+    """A uniform edge schema that would let clustering consume one concatenated
+    frame of deterministic + probabilistic edges. NOT ON THE CURRENT ROADMAP:
+    the team decided the FS matcher (`src/models/fs_matcher/`) is a candidate +
+    feature generator for a downstream GBT, not an edge source — clustering
+    stays on the deterministic auto-merge edges only (see Data-Contract.md).
+    No stage produces this schema; kept only as a historical placeholder.
     """
 
     PATID_A: Series[str] = pa.Field(nullable=False, coerce=True)
@@ -285,8 +310,10 @@ class Edges(pa.DataFrameModel):
 
 
 class ClusterAssignments(pa.DataFrameModel):
-    """Terminal clustering output: one row per record, including singletons.
-    PROPOSED — see Data-Contract.md."""
+    """Terminal clustering output: one row per valid record, including
+    singletons. Implemented and in production (`src/models/clustering.py`,
+    Stage 5 of `src/pipeline.py`) — clusters the deterministic auto-merge
+    edges only; see Data-Contract.md."""
 
     PATID: Series[str] = pa.Field(nullable=False, coerce=True, unique=True)
     cluster_id: Series[int] = pa.Field(nullable=False, coerce=True, ge=0)
@@ -409,9 +436,11 @@ __all__ = [
     "Matches",
     "NonMatches",
     "ProbabilisticMatches",
+    "Rejects",
     "RunManifest",
     "RULE_NAMES",
     "AUTO_MERGE_RULE_NAMES",
+    "REJECT_RULE_NAMES",
     "FS_FEATURES_REQUIRED_COLUMNS",
     "CLEANED_REQUIRED_COLUMNS",
     "assert_patid_coverage",

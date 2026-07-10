@@ -65,6 +65,7 @@ from src.contracts import (  # noqa: E402
     Matches,
     NonMatches,
     ProbabilisticMatches,
+    Rejects,
     RunManifest,
     assert_patid_coverage,
     validate,
@@ -193,6 +194,7 @@ def run_pipeline(
     ).reset_index(drop=True)
     rejects = decided[decided["decision"] == "reject"].reset_index(drop=True)
     validate(non_matches, NonMatches)
+    validate(rejects, Rejects)
     stats = get_match_stats(
         matches,
         n_records=len(cleaned),

@@ -39,6 +39,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from src.config import settings as default_settings, configure_logging  # noqa: E402
+from src.contracts import RunManifest  # noqa: E402
 from src.models.fs_matcher.matcher import (  # noqa: E402
     FSMatcher,
     MODEL_NAME,
@@ -61,8 +62,64 @@ CANDIDATE_PAIRS_GLOBS = ("candidate_pairs_v*_*.parquet", "candidate_pairs_*Z.par
 
 
 # ── Input resolution ─────────────────────────────────────────────────────────
+def _resolve_from_manifest(
+    settings, run_id: str | None = None,
+) -> tuple[Path, Path]:
+    """Resolve (cleaned, candidate_pairs) paths from a `RunManifest`.
+
+    This is the primary resolution path: `RunManifest` exists specifically to
+    replace fragile "latest version in the directory" resolution
+    (`contracts.RunManifest` docstring) by guaranteeing the `cleaned` and
+    `candidate_pairs` artifacts it names come from the SAME pipeline run. It is
+    also the only way to guarantee the orchestrator's STACKED blocker output is
+    used rather than the standalone `run_blocking.py` CLI's narrower,
+    algorithmically different 8-block-only pool — only `src.pipeline` ever
+    writes a manifest.
+
+    Raises `FileNotFoundError` if no manifest is available (an explicit
+    `run_id` that doesn't exist, or an empty `runs_dir`), or if a manifest's
+    referenced files no longer exist on disk.
+    """
+    runs_dir = Path(settings.runs_dir)
+    if run_id is not None:
+        manifest_path = runs_dir / f"run_{run_id}.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"No manifest for --run-id={run_id!r} at {manifest_path}."
+            )
+    else:
+        # run_id is a sortable UTC timestamp (YYYYMMDDTHHMMSSZ), so filename
+        # sort order is chronological order — same convention src.pipeline
+        # itself relies on (no separate version counter needed).
+        candidates = sorted(runs_dir.glob("run_*.json"))
+        if not candidates:
+            raise FileNotFoundError(f"No run manifests found in {runs_dir}.")
+        manifest_path = candidates[-1]
+
+    manifest = RunManifest.model_validate_json(manifest_path.read_text())
+    cleaned_path = settings.project_root / manifest.cleaned.path
+    pool_path = settings.project_root / manifest.candidate_pairs.path
+    for label, p in (("cleaned", cleaned_path), ("candidate_pairs", pool_path)):
+        if not p.exists():
+            raise FileNotFoundError(
+                f"Manifest {manifest_path.name} references {label}={p}, which no "
+                "longer exists on disk (likely cleaned up) — lineage broken. Pass "
+                "--cleaned-index/--candidate-pairs explicitly, or a different --run-id."
+            )
+    logger.info(
+        "Resolved inputs from manifest %s (run_id=%s)", manifest_path.name, manifest.run_id
+    )
+    return cleaned_path, pool_path
+
+
 def _resolve_latest(dir_: Path, globs: tuple[str, ...]) -> Path:
-    """Latest versioned file, else newest by mtime, across the given globs."""
+    """Latest versioned file, else newest by mtime, across the given globs.
+
+    Fallback only — used when no `RunManifest` is available (see
+    `_resolve_from_manifest`). Offers no same-run lineage guarantee: if both
+    the versioned-CLI and orchestrator naming conventions have files present,
+    a stale versioned file can win over a fresher orchestrator run.
+    """
     if dir_.is_dir():
         try:
             return latest_versioned(dir_, globs[0])
@@ -211,9 +268,16 @@ def parse_args() -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--cleaned-index", type=Path, default=None,
-                   help=f"Cleaned records parquet. Default: latest in {s.processed_dir}.")
+                   help="Cleaned records parquet. Default: resolved from the latest "
+                        f"RunManifest in {s.runs_dir} (falls back to latest-in-{s.processed_dir} "
+                        "if no manifest exists).")
     p.add_argument("--candidate-pairs", type=Path, default=None,
-                   help=f"Full candidate-pairs parquet. Default: latest in {s.blocking_dir}.")
+                   help="Full candidate-pairs parquet. Default: resolved from the latest "
+                        f"RunManifest in {s.runs_dir} (falls back to latest-in-{s.blocking_dir} "
+                        "if no manifest exists).")
+    p.add_argument("--run-id", default=None,
+                   help="Resolve --cleaned-index/--candidate-pairs from this specific run's "
+                        "manifest (data/runs/run_<run-id>.json) instead of the latest run.")
     p.add_argument("--silver-labels", type=Path, default=default_silver,
                    help=f"Silver-labels CSV (PATID_A, PATID_B, silver_label). Default: {default_silver}.")
     p.add_argument("--label-col", default="silver_label",
@@ -259,8 +323,36 @@ def main() -> None:
     settings.ensure_dirs()
 
     # ── Resolve inputs ────────────────────────────────────────────────────────
-    cleaned_path = args.cleaned_index or _resolve_latest(settings.processed_dir, CLEANED_GLOBS)
-    pool_path = args.candidate_pairs or _resolve_latest(settings.blocking_dir, CANDIDATE_PAIRS_GLOBS)
+    # Primary path: same-run lineage from the latest (or --run-id-pinned)
+    # RunManifest — guarantees the stacked blocker's output, never
+    # run_blocking.py's narrower 8-block-only pool. Falls back to
+    # directory-latest resolution (no lineage guarantee) only if no manifest
+    # exists yet; an explicit --run-id that isn't found is a hard error.
+    manifest_cleaned_path: Path | None = None
+    manifest_pool_path: Path | None = None
+    try:
+        manifest_cleaned_path, manifest_pool_path = _resolve_from_manifest(
+            settings, run_id=args.run_id,
+        )
+    except FileNotFoundError:
+        if args.run_id is not None:
+            raise
+        logger.warning(
+            "No RunManifest found in %s; falling back to directory-latest resolution "
+            "for any input not explicitly overridden. This does NOT guarantee same-run "
+            "lineage or that the stacked blocker (not the narrower 8-block-only "
+            "run_blocking.py CLI) produced the resolved candidate pairs.",
+            settings.runs_dir,
+        )
+
+    cleaned_path = (
+        args.cleaned_index or manifest_cleaned_path
+        or _resolve_latest(settings.processed_dir, CLEANED_GLOBS)
+    )
+    pool_path = (
+        args.candidate_pairs or manifest_pool_path
+        or _resolve_latest(settings.blocking_dir, CANDIDATE_PAIRS_GLOBS)
+    )
     if not args.silver_labels.exists():
         raise FileNotFoundError(
             f"Silver labels not found: {args.silver_labels}. VM-only (gitignored PHI)."

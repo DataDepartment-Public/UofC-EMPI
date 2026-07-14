@@ -237,6 +237,11 @@ REJECT_RULES: tuple[RejectRule, ...] = (
     ),
 )
 
+#: Reject-rule names, derived from REJECT_RULES so it never drifts. Mirrors
+#: contracts.REJECT_RULE_NAMES (kept manually in sync there, same convention as
+#: contracts.AUTO_MERGE_RULE_NAMES).
+REJECT_RULE_NAMES: frozenset[str] = frozenset(r.name for r in REJECT_RULES)
+
 
 # ── Phone-set parsing (kept in sync with src/preprocessing/blocking._parse_phone_set)
 def _parse_phone_set(value) -> frozenset[str]:

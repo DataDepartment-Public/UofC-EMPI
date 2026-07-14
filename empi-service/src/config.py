@@ -74,6 +74,19 @@ class Settings(BaseSettings):
     records_page_size: int = Field(
         default=50, description="Default page size for GET /records."
     )
+    index_backend: str = Field(
+        default="sqlite",
+        description="Storage backend for incremental scoring (POST "
+        "/records/score, src/api/incremental.py): 'sqlite' (empi.db, the "
+        "live service) or 'parquet' (local_index_dir, no DB required — see "
+        "src/api/local_score.py). Swap point: src/api/index_backend.py.",
+    )
+    local_index_dir: Path = Field(
+        default=_DATA / "local_index",
+        description="Parquet files for the 'parquet' index_backend "
+        "(block_key/cleaned_attrs/entity/entity_member/review_candidate/"
+        "entity_suggestion) — local-mode incremental scoring, no empi.db.",
+    )
 
     # ── Defaults ────────────────────────────────────────────────────────────
     raw_input: Path = _DATA / "raw" / "MDM_Population.csv"
@@ -234,6 +247,7 @@ class Settings(BaseSettings):
             self.fs_model_dir,
             self.fs_output_dir,
             self.db_path.parent,
+            self.local_index_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
 

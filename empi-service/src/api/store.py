@@ -35,7 +35,15 @@ it again.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
+
+#: Re-exported so existing `store.hash_block_key` / `store.HASHED_BLOCKS` call
+#: sites (`publish.py`, tests) keep working — these are pure/data, not tied
+#: to SQLite, which is why `src/api/incremental.py` imports them from
+#: `blocking.py` (the block-key semantics module) directly instead of this
+#: (SQLite-specific) module.
+from src.preprocessing.blocking import HASHED_BLOCKS, hash_block_key  # noqa: F401
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS entity (
@@ -100,6 +108,8 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     source_blocks TEXT,
     run_id       TEXT NOT NULL,
     created_utc  TEXT NOT NULL,
+    fs_match_probability   REAL,
+    fs_classification_tier TEXT,
     UNIQUE(patid_a, patid_b, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_review_candidate_a ON review_candidate(patid_a);
@@ -110,6 +120,47 @@ CREATE TABLE IF NOT EXISTS entity_suggestion (
     run_id         TEXT NOT NULL,
     suggested_mid  TEXT NOT NULL,
     created_utc    TEXT NOT NULL
+);
+
+-- Persisted blocking posting list — `block_id/key_value -> [patid, ...]`, the
+-- on-disk equivalent of `blocking.BlockingIndex`. Rebuilt wholesale by every
+-- full pipeline publish (`publish.py`) from the freshly cleaned population,
+-- and incrementally appended to by `src/api/incremental.py` so a single new
+-- record's own keys become discoverable by the next incremental call without
+-- waiting for a full run. This is what lets incremental scoring look up
+-- candidates with an indexed SQL query instead of rebuilding an in-memory
+-- BlockingIndex over the whole population per request. B1 (SSN) and B6
+-- (email) key values are stored as a SHA-256 hash, not plaintext — the only
+-- operation ever performed on this column is equality, and both are direct
+-- identifiers where hashing costs nothing functionally.
+CREATE TABLE IF NOT EXISTS block_key (
+    block_id   TEXT NOT NULL,
+    key_value  TEXT NOT NULL,
+    patid      TEXT NOT NULL,
+    PRIMARY KEY (block_id, key_value, patid)
+);
+CREATE INDEX IF NOT EXISTS idx_block_key_lookup ON block_key(block_id, key_value);
+CREATE INDEX IF NOT EXISTS idx_block_key_patid ON block_key(patid);
+
+-- SQL-queryable mirror of the `CleanedRecords` contract (src/contracts.py),
+-- one row per valid PATID. Parquet stays the immutable per-run record; this
+-- table exists so incremental scoring can pull the handful of candidate
+-- rows deterministic-rule evaluation needs via a point lookup instead of
+-- reading a ~163k-row Parquet file per request. Rebuilt wholesale on every
+-- publish alongside `block_key`, from the same `cleaned` frame.
+CREATE TABLE IF NOT EXISTS cleaned_attrs (
+    patid        TEXT PRIMARY KEY,
+    first_nm     TEXT,
+    last_nm      TEXT,
+    birth_dt     TEXT,
+    ssn          TEXT,
+    ssn_last4    TEXT,
+    email        TEXT,
+    zip_base     TEXT,
+    address1     TEXT,
+    sex          TEXT,
+    phones_json  TEXT,
+    run_id       TEXT NOT NULL
 );
 """
 
@@ -124,10 +175,35 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+#: Columns added to a table after its original release — `CREATE TABLE IF NOT
+#: EXISTS` never alters a table that already exists, so a pre-existing local
+#: `empi.db` needs these added in place rather than requiring a wipe/rebuild
+#: (a full pipeline run + publish over ~163k records is expensive to redo).
+_COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
+    "review_candidate": {
+        "fs_match_probability": "REAL",
+        "fs_classification_tier": "TEXT",
+    },
+}
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    for table, columns in _COLUMN_MIGRATIONS.items():
+        existing = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        for name, coltype in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype}")
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """Create every table if it doesn't already exist. Idempotent."""
     conn.executescript(SCHEMA_SQL)
+    _ensure_columns(conn)
     conn.commit()
+
+
 
 
 # ── Locking (reconciliation) ────────────────────────────────────────────────
@@ -325,6 +401,31 @@ def replace_review_candidates_for_run(
     conn.execute("DELETE FROM review_candidate WHERE run_id = ?", (run_id,))
     if rows:
         conn.executemany(_REVIEW_CANDIDATE_INSERT_SQL, rows)
+
+
+_REVIEW_CANDIDATE_INSERT_FULL_SQL = """
+    INSERT INTO review_candidate
+        (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
+         run_id, created_utc, fs_match_probability, fs_classification_tier)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
+        match_rule=excluded.match_rule, confidence=excluded.confidence,
+        evidence=excluded.evidence, source_blocks=excluded.source_blocks,
+        created_utc=excluded.created_utc,
+        fs_match_probability=excluded.fs_match_probability,
+        fs_classification_tier=excluded.fs_classification_tier
+"""
+
+
+def insert_review_candidates(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    """Append-only review-candidate insert carrying the FS score columns —
+    used by incremental scoring (`src/api/incremental.py`), which always
+    mints a fresh `run_id` per call, so there is nothing to delete first
+    (unlike the batch path's `replace_review_candidates_for_run`). `rows` are
+    `(patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
+    run_id, created_utc, fs_match_probability, fs_classification_tier)`."""
+    if rows:
+        conn.executemany(_REVIEW_CANDIDATE_INSERT_FULL_SQL, rows)
 
 
 def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[dict]:
@@ -613,6 +714,151 @@ def member_count(conn: sqlite3.Connection, mid: str) -> int:
     return int(row["n"])
 
 
+# ── Persisted blocking index (`block_key`) ──────────────────────────────────
+
+def replace_block_keys(conn: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> None:
+    """Full rebuild of `block_key` — delete-then-bulk-insert, called once per
+    full pipeline publish from the freshly cleaned population. `rows` are
+    `(block_id, key_value, patid)`; B1/B6 values must already be hashed via
+    `hash_block_key`."""
+    conn.execute("DELETE FROM block_key")
+    if rows:
+        conn.executemany(
+            "INSERT INTO block_key (block_id, key_value, patid) VALUES (?, ?, ?)",
+            rows,
+        )
+
+
+def add_block_keys(conn: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> None:
+    """Incremental append — a newly-scored record's own keys become
+    discoverable by future incremental calls without waiting for the next
+    full-run rebuild. `INSERT OR IGNORE` since the same key can legitimately
+    already exist for another patid."""
+    if rows:
+        conn.executemany(
+            "INSERT OR IGNORE INTO block_key (block_id, key_value, patid) "
+            "VALUES (?, ?, ?)",
+            rows,
+        )
+
+
+def lookup_block_candidates(
+    conn: sqlite3.Connection,
+    keys: dict[str, str | None],
+    phones: Iterable[str],
+    threshold: int,
+) -> dict[str, set[str]]:
+    """`existing_patid -> {block_id, ...}` for every persisted block key a
+    record's own keys/phones match — the SQL-backed equivalent of
+    `blocking.run_inference_blocking`, without loading a `BlockingIndex` into
+    memory. `keys` maps block id (B1/B3/B4/B6/B7/B8/B9) to that block's
+    computed key value or None (B1/B6 must already be hashed); `phones` are
+    the record's own parsed phone numbers for B5. A key whose posting list
+    exceeds `threshold` is capped, mirroring the batch blocker's governance
+    cap.
+    """
+    candidates: dict[str, set[str]] = {}
+
+    def _add(block_id: str, patid: str) -> None:
+        candidates.setdefault(patid, set()).add(block_id)
+
+    for block_id, key_value in keys.items():
+        if not key_value:
+            continue
+        for row in conn.execute(
+            "SELECT patid FROM block_key WHERE block_id = ? AND key_value = ? "
+            "LIMIT ?",
+            (block_id, key_value, threshold),
+        ):
+            _add(block_id, row["patid"])
+
+    for phone in phones:
+        if not phone:
+            continue
+        for row in conn.execute(
+            "SELECT patid FROM block_key WHERE block_id = 'B5' AND key_value = ? "
+            "LIMIT ?",
+            (phone, threshold),
+        ):
+            _add("B5", row["patid"])
+
+    return candidates
+
+
+# ── Persisted cleaned-attribute mirror (`cleaned_attrs`) ────────────────────
+_CLEANED_ATTRS_COLUMNS = (
+    "patid", "first_nm", "last_nm", "birth_dt", "ssn", "ssn_last4", "email",
+    "zip_base", "address1", "sex", "phones_json", "run_id",
+)
+_CLEANED_ATTRS_UPSERT_SQL = f"""
+    INSERT INTO cleaned_attrs ({", ".join(_CLEANED_ATTRS_COLUMNS)})
+    VALUES ({", ".join("?" for _ in _CLEANED_ATTRS_COLUMNS)})
+    ON CONFLICT(patid) DO UPDATE SET
+        first_nm=excluded.first_nm, last_nm=excluded.last_nm,
+        birth_dt=excluded.birth_dt, ssn=excluded.ssn, ssn_last4=excluded.ssn_last4,
+        email=excluded.email, zip_base=excluded.zip_base, address1=excluded.address1,
+        sex=excluded.sex, phones_json=excluded.phones_json, run_id=excluded.run_id
+"""
+
+
+def replace_cleaned_attrs(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    """Full rebuild of `cleaned_attrs` — delete-then-bulk-insert; see
+    `replace_block_keys`. `rows` are ordered per `_CLEANED_ATTRS_COLUMNS`."""
+    conn.execute("DELETE FROM cleaned_attrs")
+    if rows:
+        conn.executemany(
+            f"INSERT INTO cleaned_attrs ({', '.join(_CLEANED_ATTRS_COLUMNS)}) "
+            f"VALUES ({', '.join('?' for _ in _CLEANED_ATTRS_COLUMNS)})",
+            rows,
+        )
+
+
+def upsert_cleaned_attrs(conn: sqlite3.Connection, row: tuple) -> None:
+    """Incremental single-row upsert — see `add_block_keys`. `row` is ordered
+    per `_CLEANED_ATTRS_COLUMNS`."""
+    conn.execute(_CLEANED_ATTRS_UPSERT_SQL, row)
+
+
+def get_cleaned_attrs(conn: sqlite3.Connection, patids: list[str]) -> list[dict]:
+    """`cleaned_attrs` rows for the given PATIDs. Column names match
+    `_CLEANED_ATTRS_COLUMNS`, not the pipeline's `*_clean` contract names —
+    callers building a `pd.DataFrame` for `deterministic_rules.apply_rules`
+    must rename (see `src/api/incremental.py`)."""
+    if not patids:
+        return []
+    placeholders = ", ".join("?" for _ in patids)
+    rows = conn.execute(
+        f"SELECT * FROM cleaned_attrs WHERE patid IN ({placeholders})", patids
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Entity bridging (incremental auto-merge across pre-existing entities) ───
+def reassign_entity_members(
+    conn: sqlite3.Connection, from_mids: list[str], to_mid: str, updated_utc: str
+) -> None:
+    """Absorb every member of `from_mids` into `to_mid` and delete the
+    now-empty `from_mids` entity rows.
+
+    Used when an incrementally-scored record auto-matches existing members of
+    more than one entity — those entities must be unified, the same operation
+    full-batch clustering's union-find performs implicitly via
+    `assign_clusters`. `to_mid` is assumed to already exist and not be in
+    `from_mids`; callers choose it (by convention the lexicographically
+    smallest of the touched mids, matching `publish.py`'s own tie-break).
+    """
+    from_mids = [m for m in from_mids if m != to_mid]
+    if not from_mids:
+        return
+    placeholders = ", ".join("?" for _ in from_mids)
+    conn.execute(
+        f"UPDATE entity_member SET mid = ?, updated_utc = ? "
+        f"WHERE mid IN ({placeholders})",
+        (to_mid, updated_utc, *from_mids),
+    )
+    conn.execute(f"DELETE FROM entity WHERE mid IN ({placeholders})", from_mids)
+
+
 __all__ = [
     "SCHEMA_SQL",
     "get_connection",
@@ -632,6 +878,7 @@ __all__ = [
     "upsert_suggestion",
     "upsert_suggestions_bulk",
     "replace_review_candidates_for_run",
+    "insert_review_candidates",
     "review_candidates_for_patid",
     "patids_with_review_candidates",
     "all_entity_member_mids",
@@ -641,4 +888,13 @@ __all__ = [
     "list_audit_log",
     "member_count",
     "dashboard_summary",
+    "hash_block_key",
+    "HASHED_BLOCKS",
+    "replace_block_keys",
+    "add_block_keys",
+    "lookup_block_candidates",
+    "replace_cleaned_attrs",
+    "upsert_cleaned_attrs",
+    "get_cleaned_attrs",
+    "reassign_entity_members",
 ]

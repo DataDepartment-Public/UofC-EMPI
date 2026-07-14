@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 RunStatus = Literal["queued", "running", "succeeded", "failed"]
 
@@ -171,6 +171,68 @@ class DashboardSummary(BaseModel):
     history: list[dict]
 
 
+class IncomingRecord(BaseModel):
+    """Raw input for one record in `POST /records/score` — the pipeline's raw
+    CSV column names (`src.preprocessing.transformations.RENAME_TO_RAW` +
+    `PATID`), not the cleaned `*_clean` names. `extra="allow"` tolerates
+    passthrough columns (e.g. `CountryNM`) the cleaner doesn't require."""
+
+    model_config = ConfigDict(extra="allow")
+
+    PATID: str
+    FirstNM: str | None = None
+    LastNM: str | None = None
+    MiddleNM: str | None = None
+    SuffixNM: str | None = None
+    BirthDT: str | None = None
+    SSN: str | None = None
+    AddressLine1: str | None = None
+    AddressLine2: str | None = None
+    CityNM: str | None = None
+    ZipCD: str | None = None
+    StateCD: str | None = None
+    PrimaryPhoneNBR: str | None = None
+    Phone01NBR: str | None = None
+    Phone02NBR: str | None = None
+    Phone03NBR: str | None = None
+    Email: str | None = None
+    SexAtBirthDSC: str | None = None
+
+
+class ScoreRequest(BaseModel):
+    """`POST /records/score` body — one record or a batch."""
+
+    records: list[IncomingRecord] = Field(min_length=1)
+
+
+class ScoreCreateResponse(BaseModel):
+    run_id: str
+    status: RunStatus
+
+
+ScoreTier = Literal["auto_merge", "review", "no_match", "invalid"]
+
+
+class RecordScoreOutcome(BaseModel):
+    """One submitted record's result — see `src/api/incremental.py`."""
+
+    patid: str
+    tier: ScoreTier
+    mid: str | None = None
+    match_rule: str | None = None
+    confidence: float | None = None
+    matched_patids: list[str] = Field(default_factory=list)
+    fs_match_probability: float | None = None
+    fs_classification_tier: str | None = None
+
+
+class ScoreResult(BaseModel):
+    run_id: str
+    status: RunStatus
+    outcomes: list[RecordScoreOutcome] = Field(default_factory=list)
+    error: str | None = None
+
+
 class AuditLogRow(BaseModel):
     id: int
     ts_utc: str
@@ -204,4 +266,10 @@ __all__ = [
     "UnmergeRequest",
     "UnmergeResponse",
     "AuditLogRow",
+    "IncomingRecord",
+    "ScoreRequest",
+    "ScoreCreateResponse",
+    "ScoreTier",
+    "RecordScoreOutcome",
+    "ScoreResult",
 ]

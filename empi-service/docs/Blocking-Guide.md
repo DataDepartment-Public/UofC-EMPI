@@ -163,6 +163,14 @@ To prevent runaway blocks and false-positive clusters:
 - `build_blocking_index(df_clean)` + `run_inference_blocking(record, index)` →
   block a single incoming record against a pre-built 8-block index (online /
   inference; the q-gram leg is batch-only).
+- `compute_new_record_keys(record)` → the 7 scalar block keys (+ parsed phone
+  set) for one record, factored out of `run_inference_blocking` so it's also
+  the single source of truth for `POST /records/score`'s SQL-backed lookup
+  (`store.lookup_block_candidates` against the persisted `block_key` table —
+  see `docs/API-Design.md` §2/§3 and `src/api/incremental.py`). That table is
+  the on-disk equivalent of `BlockingIndex`, rebuilt by every full publish and
+  incrementally appended to between publishes, so incremental scoring never
+  rebuilds an in-memory index from the whole population.
 - `get_blocking_stats(candidate_pairs)` → per-block counts and pair distribution.
 
 ## Evaluation
@@ -209,10 +217,9 @@ By default the evaluation builds **R** over the *valid-record* population only
 (`valid_record != False`) — the same records production blocking sees — so the
 recall denominator never counts pairs blocking was filtered from emitting. Pass
 `--include-invalid` for the diagnostic all-records view. Measuring over all records
-re-introduces the validity-filter artifact diagnosed in
-[Blocking-Recall-RCA.md](../Blocking-Recall-RCA.md): ~745 of the apparent "misses"
+re-introduces the validity-filter artifact: ~745 of the apparent "misses"
 are pairs where one record was dropped as invalid before blocking, which deflates
-the headline number.
+the headline number (see the root-cause breakdown just below).
 
 #### Running it
 
@@ -245,8 +252,7 @@ Loose method on the full 163,364-record dataset (158,724 valid), 8-block scheme:
 
 Measured apples-to-apples over the valid population (the default), recall is
 **99.5%**. The 745-pair difference is the validity-filter artifact (one record
-dropped as invalid before blocking), not a blocking defect — see
-[Blocking-Recall-RCA.md](../Blocking-Recall-RCA.md).
+dropped as invalid before blocking), not a blocking defect.
 
 The remaining **212** valid-population misses are the one genuine blocking-scheme
 gap: pairs that share a first name + exact DOB but whose **last name differs by a

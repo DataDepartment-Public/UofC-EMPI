@@ -6,14 +6,12 @@ KPIs, lets authorized users review/merge/unmatch patient records, and explains
 individual model decisions.
 
 > **Scope:** UI/UX and behavioral requirements only. The matching logic itself is
-> covered by [Blocking-Guide.md](Blocking-Guide.md) and
-> [Deterministic-Rules-Guide.md](Deterministic-Rules-Guide.md).
+> covered by [Blocking-Guide.md](../../empi-service/docs/Blocking-Guide.md) and
+> [Deterministic-Rules-Guide.md](../../empi-service/docs/Deterministic-Rules-Guide.md)
+> (backend docs, `empi-service/docs/`).
 >
 > **Branding:** colors, typography, and logo per
 > [Alliance-Chicago-Branding.md](Alliance-Chicago-Branding.md).
->
-> **Demo:** an interactive mock implementation lives at
-> [demo/dashboard-demo.html](../demo/dashboard-demo.html).
 
 ## Information architecture
 
@@ -157,6 +155,6 @@ row in the Dataset tab.
 ## Open items (REVIEW)
 
 - **FR-10** — confirm the auto-match-rate denominator (total candidate matches vs. total records).
-- **FR-14 / FR-15** — performance trend is limited to **auto-match rate** and **review rate** (both derivable from classification counts alone). Precision/recall are excluded because no ground-truth labels exist to compute them; revisit if gold labels become available. See [Deterministic-Rules-Guide.md](Deterministic-Rules-Guide.md).
+- **FR-14 / FR-15** — performance trend is limited to **auto-match rate** and **review rate** (both derivable from classification counts alone). Precision/recall are excluded because no ground-truth labels exist to compute them; revisit if gold labels become available. See [Deterministic-Rules-Guide.md](../../empi-service/docs/Deterministic-Rules-Guide.md).
 - **FR-30 / FR-31** — confirm audit-log retention, immutability guarantees, and access policy.
-- **FR-34** — confirm feasibility of the Fellegi–Sunter waterfall graph (probabilistic/Splink model still in research).
+- **FR-34** — the Fellegi-Sunter/Splink matcher is built and in production (Stage 4, `empi-service/docs/FS-Matcher-Production-Guide.md`), but deliberately runs as an audit-only candidate/feature generator for a future GBT, not as a scored decision on any reviewed pair — so the waterfall graph and match probability this FR describes have no real data to show yet. The Model Explanation page (`dataset/[mid]/explain/`) reflects this today: it shows the real per-pair deterministic-rule feature comparison, not a fabricated FS probability.

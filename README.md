@@ -4,9 +4,7 @@ Capstone project for **AllianceChicago**: group records from the `MDM_Population
 dataset that belong to the same patient across source systems, and give reviewers
 a dashboard to inspect and correct the matches.
 
-This repo combines the two halves of the application that used to live on
-separate branches (`develop` for the backend, `dashboard-main` for the frontend)
-into one place:
+This repo combines the two halves of the application into one place:
 
 ```
 empi-service/     Python backend — pipeline + FastAPI service
@@ -22,7 +20,7 @@ empi-dashboard/    Next.js frontend — reviewer dashboard
 └───────────────▲──────────────────────────────────────────────────────┘
                 │ HTTPS (JSON)
 ┌───────────────┴──────────────────────────────────────────────────────┐
-│  empi-dashboard/web  —  Next.js frontend + BFF                        │
+│  empi-dashboard  —  Next.js frontend + BFF                            │
 │    • SSR/CSR React app          • Route Handlers (app/api/*) proxy    │
 │    • reviewer identity/session    to FastAPI, inject X-Reviewer-Id    │
 └───────────────▲──────────────────────────────────────────────────────┘
@@ -33,7 +31,8 @@ empi-dashboard/    Next.js frontend — reviewer dashboard
 │    • /records  • /audit (merge/unmerge, system of record)             │
 │         │                                  │                          │
 │         ▼ batch artifacts                  ▼ resolved output          │
-│   data/*.parquet + RunManifest        SQLite  empi.db                 │
+│   data/*.parquet + RunManifest    SQLite empi.db  OR  local Parquet   │
+│                                    (EMPI_INDEX_BACKEND, pluggable)    │
 └──────────────────────────────────────────────────────────────────────┘
                 │
                 ▼
@@ -58,9 +57,12 @@ wraps it.
 - `data/`, `models/`, `logs/` — pipeline inputs/outputs and run artifacts
   (mostly gitignored; structure kept via `.gitkeep`).
 - `notebooks/` — exploratory analysis.
-- `docs/` — pipeline- and API-facing documentation (`Data-Cleaning-Guide.md`,
-  `Blocking-Guide.md`, `Deterministic-Rules-Guide.md`, `Data-Contract.md`,
-  `API-Design.md`, `Application-Architecture.md`).
+- `docs/` — pipeline- and API-facing documentation: `Data-Contract.md` (schema
+  of every artifact at every stage, including the resolved-output index),
+  `Data-Cleaning-Guide.md`, `Blocking-Guide.md` (+ the frozen
+  `Blocking-Research-Embedding-Graph.md` research writeup behind it),
+  `Deterministic-Rules-Guide.md`, `FS-Matcher-Production-Guide.md`,
+  `API-Design.md`, `Application-Architecture.md`.
 - `tests/` — unit/integration/regression tests.
 
 Run locally: see [`empi-service/README.md`](empi-service/README.md).
@@ -69,17 +71,15 @@ Run locally: see [`empi-service/README.md`](empi-service/README.md).
 
 The reviewer-facing frontend and its supporting docs.
 
-- `web/` — the Next.js app (App Router). `app/` holds pages and the
-  Backend-for-Frontend route handlers under `app/api/*` that proxy to
-  `empi-service`'s FastAPI; `components/` and `lib/` hold the UI and typed
-  API client/schemas.
-- `demo/dashboard-demo.html` — a static, interactive mock of the UI used
-  during design.
+- `src/` — the Next.js app (App Router, Next's `src/` directory convention).
+  `src/app/` holds pages and the Backend-for-Frontend route handlers under
+  `src/app/api/*` that proxy to `empi-service`'s FastAPI; `src/components/`
+  and `src/lib/` hold the UI and typed API client/schemas.
 - `docs/` — dashboard-facing documentation (`Dashboard-Guide.md`,
   `Alliance-Chicago-Branding.md`, plus copies of `API-Design.md` and
   `Application-Architecture.md` shared with the backend docs).
 
-Run locally: see [`empi-dashboard/web/README.md`](empi-dashboard/web/README.md).
+Run locally: see [`empi-dashboard/README.md`](empi-dashboard/README.md).
 
 ## Running the whole app locally
 
@@ -89,7 +89,7 @@ cd empi-service
 uvicorn src.api.main:app --reload --port 8000
 
 # Terminal 2 — frontend
-cd empi-dashboard/web
+cd empi-dashboard
 npm install
 npm run dev
 ```

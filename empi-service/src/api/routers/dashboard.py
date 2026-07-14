@@ -2,15 +2,17 @@
 (FR-4..FR-17 in the Dashboard FR doc / docs/Dashboard-Guide.md §2).
 
 Combines two sources, matching how the doc frames the two storage tiers:
-  * `empi.db` (via `store.dashboard_summary`) — live, reviewer-action-aware
-    counts (matched/needs-review/no-match/manual-merge), recomputed on every
-    call so FR-40's real-time refresh is just "call this again".
-  * the latest `RunManifest` on disk — pipeline-level numbers `empi.db` never
-    had in the first place (raw/invalid record counts, candidate pairs) plus
-    the run history for the FR-14/15 trend chart. Per docs/Dashboard-Guide.md's
-    own "Open items" note, that trend is auto-match-rate / review-rate only —
-    no precision/recall, since there are no ground-truth labels to compute
-    them against.
+  * the resolved-output index (via `backend.dashboard_summary` — SQLite or
+    the local Parquet index, see docs/Data-Contract.md Stage 6) — live,
+    reviewer-action-aware counts (matched/needs-review/no-match/manual-merge),
+    recomputed on every call so FR-40's real-time refresh is just "call this
+    again".
+  * the latest `RunManifest` on disk — pipeline-level numbers the resolved
+    index never had in the first place (raw/invalid record counts, candidate
+    pairs) plus the run history for the FR-14/15 trend chart. Per
+    docs/Dashboard-Guide.md's own "Open items" note, that trend is
+    auto-match-rate / review-rate only — no precision/recall, since there
+    are no ground-truth labels to compute them against.
 """
 
 from __future__ import annotations
@@ -19,8 +21,8 @@ import json
 
 from fastapi import APIRouter, Depends
 
-from src.api import store
-from src.api.deps import get_db, get_settings
+from src.api.deps import get_backend, get_settings
+from src.api.index_backend import IndexBackend
 from src.api.schemas import DashboardSummary, MatchStatusCounts
 from src.config import Settings
 from src.contracts import RunManifest
@@ -49,9 +51,10 @@ def _all_manifests(settings: Settings) -> list[RunManifest]:
 
 @router.get("/summary", response_model=DashboardSummary)
 def dashboard_summary(
-    conn=Depends(get_db), settings: Settings = Depends(get_settings)
+    backend: IndexBackend = Depends(get_backend),
+    settings: Settings = Depends(get_settings),
 ) -> DashboardSummary:
-    live = store.dashboard_summary(conn)
+    live = backend.dashboard_summary()
     manifests = _all_manifests(settings)
     latest = manifests[-1] if manifests else None
     latest_counts = latest.counts if latest else {}

@@ -23,6 +23,8 @@ PUBLIC API:
     run_batch_blocking(df_clean)          -> pd.DataFrame
     run_inference_blocking(new_record,
                            blocking_index) -> pd.DataFrame
+    compute_new_record_keys(new_record)   -> dict[str, object]
+    hash_block_key(value)                 -> str
     get_blocking_stats(candidate_pairs)   -> dict
  
 OUTPUT SCHEMA (candidate pairs DataFrame):
@@ -49,12 +51,13 @@ HIPAA NOTE:
 from __future__ import annotations
 
 import ast
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
- 
+
 import jellyfish
 import pandas as pd
 import numpy as np
@@ -529,6 +532,105 @@ def run_batch_blocking(df_clean: pd.DataFrame) -> pd.DataFrame:
 
 #---Inference blocking----------------
 
+#: The 7 scalar-key blocks, in the order `compute_new_record_keys` computes
+#: them — B5 (phone) is multi-valued and handled separately by both callers.
+_SCALAR_BLOCK_IDS: tuple[str, ...] = ("B1", "B3", "B4", "B6", "B7", "B8", "B9")
+
+#: Block ids whose key values are direct identifiers (full SSN, email) rather
+#: than an already-lossy derived signal (phonetic code, zip, birth year, name
+#: prefix) — see `hash_block_key`. Consumed by `src/api/store.py`'s and
+#: `src/api/parquet_backend.py`'s persisted block-key indexes; pure data, not
+#: tied to either storage backend.
+HASHED_BLOCKS: frozenset[str] = frozenset({"B1", "B6"})
+
+
+def hash_block_key(value: str) -> str:
+    """SHA-256 hex digest for a direct-identifier block key (SSN, email).
+
+    Equality is the only operation ever performed on a persisted block key
+    value, so hashing the two identifier-valued blocks (B1/SSN, B6/email)
+    costs nothing functionally while keeping the persisted index from
+    doubling as a second plaintext copy of those fields.
+    """
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def compute_new_record_keys(new_record: dict | pd.Series) -> dict[str, object]:
+    """
+    Compute the 7 scalar blocking keys (B1/B3/B4/B6/B7/B8/B9) plus the parsed
+    phone set (B5) for a single new/incoming record.
+
+    Single source of truth for "what is this record's key for block X",
+    shared by `run_inference_blocking` (in-memory `BlockingIndex` lookup) and
+    the SQL-backed incremental lookup (`src/api/store.lookup_block_candidates`,
+    used by `src/api/incremental.py`) — so the two paths can never define a
+    block's key differently.
+
+    Parameters
+    ----------
+    new_record : dict or pd.Series
+        A single cleaned record. Must contain the same fields as df_clean.
+
+    Returns
+    -------
+    dict[str, object]
+        `{"B1": ..., "B3": ..., "B4": ..., "B6": ..., "B7": ..., "B8": ...,
+        "B9": ..., "phones": set[str]}`. A scalar key is `None` when the
+        record's fields can't produce it (missing/null inputs); `"phones"` is
+        always a (possibly empty) set.
+    """
+    if isinstance(new_record, dict):
+        new_record = pd.Series(new_record)
+
+    sep = "|"
+
+    ssn = new_record.get(COL_SSN)
+    k_b1 = ssn if pd.notna(ssn) and ssn else None
+
+    dob = pd.to_datetime(new_record.get(COL_BIRTH_DT), errors="coerce")
+    dob_str = dob.strftime("%Y-%m-%d") if not pd.isna(dob) else None
+    dm_ln = _dm_primary(new_record.get(COL_LAST_NM, ""))
+    k_b3 = dm_ln + sep + dob_str if dm_ln and dob_str else None
+
+    birth_year = dob.year if not pd.isna(dob) else None
+    last_nm = new_record.get(COL_LAST_NM)
+    first_nm = new_record.get(COL_FIRST_NM)
+    fn_pre3 = str(first_nm)[:3] if pd.notna(first_nm) else None
+    k_b4 = (
+        str(last_nm) + sep + str(birth_year) + sep + fn_pre3
+        if pd.notna(last_nm) and birth_year and fn_pre3 else None
+    )
+
+    email = new_record.get(COL_EMAIL)
+    k_b6 = email if pd.notna(email) and email else None
+
+    zip_cd = new_record.get(COL_ZIP)
+    k_b7 = (
+        dm_ln + sep + str(zip_cd) + sep + str(birth_year)
+        if dm_ln and pd.notna(zip_cd) and birth_year else None
+    )
+
+    sx_fn = _soundex(str(first_nm)) if pd.notna(first_nm) else None
+    sx_ln = _soundex(str(last_nm)) if pd.notna(last_nm) else None
+    k_b8 = (
+        sx_fn + sep + sx_ln + sep + str(birth_year)
+        if sx_fn and sx_ln and birth_year else None
+    )
+
+    ssn_last4 = new_record.get(COL_SSN_LAST4)
+    k_b9 = (
+        str(last_nm) + sep + str(first_nm) + sep + str(ssn_last4)
+        if pd.notna(last_nm) and pd.notna(first_nm) and pd.notna(ssn_last4)
+        else None
+    )
+
+    return {
+        "B1": k_b1, "B3": k_b3, "B4": k_b4, "B6": k_b6,
+        "B7": k_b7, "B8": k_b8, "B9": k_b9,
+        "phones": _parse_phone_set(new_record.get(COL_PHONES, "")),
+    }
+
+
 def run_inference_blocking(
     new_record: dict | pd.Series,
     blocking_index: BlockingIndex,
@@ -536,12 +638,12 @@ def run_inference_blocking(
     """
     Find all candidate pairs involving a single new record against the
     pre-built blocking index of existing records.
- 
+
     Use this at inference time when a new PATID arrives and needs to be
     matched against the existing 163k patient index. The BlockingIndex
     is built once via build_blocking_index() and reused for every new
     record without rebuilding.
- 
+
     Parameters
     ----------
     new_record : dict or pd.Series
@@ -549,7 +651,7 @@ def run_inference_blocking(
         PATID field must be present and unique.
     blocking_index : BlockingIndex
         Pre-built index from build_blocking_index().
- 
+
     Returns
     -------
     pd.DataFrame
@@ -561,14 +663,13 @@ def run_inference_blocking(
     """
     if isinstance(new_record, dict):
         new_record = pd.Series(new_record)
- 
+
     new_patid = new_record.get(COL_PATID)
     if not new_patid:
         raise ValueError("new_record must contain a non-null PATID field.")
- 
-    sep = "|"
+
     pair_blocks: dict = {}
- 
+
     def _add_pair(existing_patid: str, block_id: str) -> None:
         """Add (new_patid, existing_patid) pair to pair_blocks."""
         # Always canonical: new record as PATID_A
@@ -577,68 +678,25 @@ def run_inference_blocking(
             pair_blocks[pair] = []
         if block_id not in pair_blocks[pair]:
             pair_blocks[pair].append(block_id)
- 
-    # ── Compute blocking keys for new record ──────────────────────────────
- 
-    # B1 — SSN
-    ssn = new_record.get(COL_SSN)
-    if pd.notna(ssn) and ssn:
-        for existing_patid in blocking_index.b1_index.get(ssn, []):
-            _add_pair(existing_patid, "B1")
- 
-    # B3 — DM(LastNM) + Full DOB
-    dob = pd.to_datetime(new_record.get(COL_BIRTH_DT), errors="coerce")
-    dob_str = dob.strftime("%Y-%m-%d") if not pd.isna(dob) else None
-    dm_ln = _dm_primary(new_record.get(COL_LAST_NM, ""))
-    if dm_ln and dob_str:
-        k_b3 = dm_ln + sep + dob_str
-        for existing_patid in blocking_index.b3_index.get(k_b3, []):
-            _add_pair(existing_patid, "B3")
- 
-    # B4 — LastNM + BirthYear + FN-Prefix3
-    birth_year = dob.year if not pd.isna(dob) else None
-    last_nm = new_record.get(COL_LAST_NM)
-    first_nm = new_record.get(COL_FIRST_NM)
-    fn_pre3 = str(first_nm)[:3] if pd.notna(first_nm) else None
-    if pd.notna(last_nm) and birth_year and fn_pre3:
-        k_b4 = str(last_nm) + sep + str(birth_year) + sep + fn_pre3
-        for existing_patid in blocking_index.b4_index.get(k_b4, []):
-            _add_pair(existing_patid, "B4")
- 
-    # B5 — Phone Set Intersection
-    new_phones = _parse_phone_set(new_record.get(COL_PHONES, ""))
-    for phone in new_phones:
+
+    keys = compute_new_record_keys(new_record)
+    index_by_block = {
+        "B1": blocking_index.b1_index, "B3": blocking_index.b3_index,
+        "B4": blocking_index.b4_index, "B6": blocking_index.b6_index,
+        "B7": blocking_index.b7_index, "B8": blocking_index.b8_index,
+        "B9": blocking_index.b9_index,
+    }
+    for block_id in _SCALAR_BLOCK_IDS:
+        key_value = keys[block_id]
+        if not key_value:
+            continue
+        for existing_patid in index_by_block[block_id].get(key_value, []):
+            _add_pair(existing_patid, block_id)
+
+    for phone in keys["phones"]:
         for existing_patid in blocking_index.b5_phone_index.get(phone, set()):
             _add_pair(existing_patid, "B5")
- 
-    # B6 — Email Exact
-    email = new_record.get(COL_EMAIL)
-    if pd.notna(email) and email:
-        for existing_patid in blocking_index.b6_index.get(email, []):
-            _add_pair(existing_patid, "B6")
- 
-    # B7 — DM(LastNM) + ZIP + BirthYear
-    zip_cd = new_record.get(COL_ZIP)
-    if dm_ln and pd.notna(zip_cd) and birth_year:
-        k_b7 = dm_ln + sep + str(zip_cd) + sep + str(birth_year)
-        for existing_patid in blocking_index.b7_index.get(k_b7, []):
-            _add_pair(existing_patid, "B7")
- 
-    # B8 — Soundex(FN) + Soundex(LN) + BirthYear
-    sx_fn = _soundex(str(first_nm)) if pd.notna(first_nm) else None
-    sx_ln = _soundex(str(last_nm)) if pd.notna(last_nm) else None
-    if sx_fn and sx_ln and birth_year:
-        k_b8 = sx_fn + sep + sx_ln + sep + str(birth_year)
-        for existing_patid in blocking_index.b8_index.get(k_b8, []):
-            _add_pair(existing_patid, "B8")
- 
-    # B9 — LastNM + FirstNM + SSN Last-4
-    ssn_last4 = new_record.get(COL_SSN_LAST4)
-    if pd.notna(last_nm) and pd.notna(first_nm) and pd.notna(ssn_last4):
-        k_b9 = str(last_nm) + sep + str(first_nm) + sep + str(ssn_last4)
-        for existing_patid in blocking_index.b9_index.get(k_b9, []):
-            _add_pair(existing_patid, "B9")
- 
+
     result = _pair_blocks_to_dataframe(pair_blocks)
     logger.info(
         "Inference blocking for PATID %s: %d candidate pairs found",

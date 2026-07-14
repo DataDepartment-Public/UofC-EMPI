@@ -12,11 +12,14 @@ a fast fake in the tests that don't need a real pipeline run (the pipeline
 itself is already covered by tests/unit + tests/integration for it).
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api import jobs, store
+from src.api import jobs
+from src.api.index_backend import build_index_backend
 from src.api.main import app
 from src.config import Settings, settings as real_settings
 from src.contracts import ArtifactRef, RunManifest
@@ -36,6 +39,19 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(real_settings, "db_path", tmp_path / "empi.db")
     real_settings.ensure_dirs()
     return real_settings
+
+
+@pytest.fixture
+def parquet_test_settings(test_settings, monkeypatch):
+    """Same temp layout as `test_settings`, but `EMPI_INDEX_BACKEND=parquet`
+    — proves `records.py`/`dashboard.py` work identically against
+    `ParquetIndexBackend` via `get_backend`, not just SQLite."""
+    monkeypatch.setattr(test_settings, "index_backend", "parquet")
+    monkeypatch.setattr(
+        test_settings, "local_index_dir", test_settings.project_root / "data" / "local_index"
+    )
+    test_settings.ensure_dirs()
+    return test_settings
 
 
 @pytest.fixture
@@ -67,6 +83,7 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
         "ZipCD_clean_base": ["60601", "60601", None, None, None],
         "AddressLine1_clean": [None, None, None, None, None],
         "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE", "FEMALE", "FEMALE"],
+        "Phones_set": [set(), set(), set(), set(), set()],
         "FirstNM_raw": ["JANE", "JANE", "JOHN", "AMY", "AMY"],
         "SSN_raw": ["123-45-6789", "123456789", None, None, None],
         "valid_record": [True, True, True, True, True],
@@ -125,12 +142,11 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
     )
     (settings.runs_dir / f"run_{run_id}.json").write_text(manifest.model_dump_json())
 
-    conn = store.get_connection(settings.db_path)
+    backend = build_index_backend(settings)
     try:
-        store.init_db(conn)
-        publish.publish_run(conn, run_id, settings)
+        publish.publish_run(backend, run_id, settings)
     finally:
-        conn.close()
+        backend.close()
 
 
 class TestHealth:
@@ -241,6 +257,66 @@ class TestRecords:
         assert resp.status_code == 404
 
 
+def _incoming(patid, first, last, birth, sex=None):
+    return {
+        "PATID": patid, "FirstNM": first, "LastNM": last, "BirthDT": birth,
+        "SexAtBirthDSC": sex,
+    }
+
+
+class TestRecordsScore:
+    """POST /records/score end-to-end: the HTTP layer around
+    `src/api/incremental.py` (already unit-tested in isolation in
+    `tests/unit/test_incremental.py`) — background job, polling, and that the
+    outcome is visible through the normal read routes."""
+
+    def test_review_tier_match_visible_through_normal_routes(
+        self, client, test_settings, monkeypatch
+    ):
+        _publish_fixture_run(test_settings, "r1")
+        # No active FS model for this test — isolate from whatever real
+        # artifact happens to be committed under models/fs/.
+        monkeypatch.setattr(
+            test_settings, "fs_model_dir", test_settings.project_root / "no_fs_model"
+        )
+
+        # Same name/DOB/sex as P4/P5 (NAME_DOB_SEX, review-tier) — no
+        # SSN/email/phone corroboration, so this must not auto-merge.
+        resp = client.post(
+            "/records/score",
+            json={"records": [_incoming("P6", "Amy", "Lee", "1975-03-03", "FEMALE")]},
+        )
+        assert resp.status_code == 202
+        run_id = resp.json()["run_id"]
+        assert resp.json()["status"] == "queued"
+
+        # TestClient runs BackgroundTasks synchronously before returning, so
+        # the job is already done by the time we poll.
+        result = client.get(f"/records/score/{run_id}")
+        assert result.status_code == 200
+        body = result.json()
+        assert body["status"] == "succeeded"
+        assert len(body["outcomes"]) == 1
+        outcome = body["outcomes"][0]
+        assert outcome["patid"] == "P6"
+        assert outcome["tier"] == "review"
+        mid = outcome["mid"]
+
+        entity = client.get(f"/clusters/{mid}").json()
+        assert entity["origin"] == "review"
+        assert entity["is_merged"] is False
+        assert any(m["patid"] == "P6" for m in entity["members"])
+        assert len(entity["review_candidates"]) >= 1
+
+    def test_unknown_score_run_id_404s(self, client, test_settings):
+        resp = client.get("/records/score/does-not-exist")
+        assert resp.status_code == 404
+
+    def test_requires_at_least_one_record(self, client, test_settings):
+        resp = client.post("/records/score", json={"records": []})
+        assert resp.status_code == 422
+
+
 class TestAudit:
     def test_merge_requires_reviewer_header(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
@@ -319,12 +395,13 @@ class TestAudit:
             headers={"X-Reviewer-Id": "reviewer.jclark"},
         )
 
-        conn = store.get_connection(test_settings.db_path)
+        from src.api import publish
+
+        backend = build_index_backend(test_settings)
         try:
-            from src.api import publish
-            publish.publish_run(conn, "r1", test_settings)
+            publish.publish_run(backend, "r1", test_settings)
         finally:
-            conn.close()
+            backend.close()
 
         resp = client.get("/records", params={"search": "Jane"})
         p2_entities = [
@@ -372,3 +449,202 @@ class TestDashboard:
         body = resp.json()
         assert body["total_records"] == 0
         assert body["last_run_id"] is None
+
+
+class TestRecordsAndDashboardAgainstParquetBackend:
+    """`GET /records`, `GET /clusters/{mid}`, `GET /records/{patid}/raw`, and
+    `GET /dashboard/summary` run against `ParquetIndexBackend`
+    (`EMPI_INDEX_BACKEND=parquet`) — the same fixture run as
+    `TestRecords`/`TestDashboard`'s SQLite coverage, proving `records.py`/
+    `dashboard.py` are backend-agnostic via `get_backend`, not hardcoded to
+    SQLite. Audit parity (`/audit/merge`, `/audit/unmerge`) is covered
+    separately in `TestAuditAgainstParquetBackend` below."""
+
+    def test_list_records(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        resp = client.get("/records")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 4
+        mids = {item["mid"] for item in body["items"]}
+        assert len(mids) == 4
+
+    def test_review_status_entity_has_candidates(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        resp = client.get("/records", params={"origin": "review"})
+        body = resp.json()
+        assert body["total"] == 2
+        entity = body["items"][0]
+        assert len(entity["review_candidates"]) == 1
+        assert entity["review_candidates"][0]["match_rule"] == "NAME_DOB_SEX"
+
+    def test_get_raw_record(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        resp = client.get("/records/P1/raw")
+        assert resp.status_code == 200
+        assert resp.json()["fields"]["FirstNM_raw"] == "JANE"
+
+    def test_search_filters(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        resp = client.get("/records", params={"search": "Smith"})
+        assert resp.json()["total"] == 1
+
+    def test_get_cluster(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        mid = client.get("/records", params={"is_merged": "true"}).json()["items"][0]["mid"]
+        resp = client.get(f"/clusters/{mid}")
+        assert resp.status_code == 200
+        assert len(resp.json()["members"]) == 2
+
+    def test_dashboard_summary(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        resp = client.get("/dashboard/summary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total_records"] == 5
+        assert body["duplicate_clusters"] == 1
+        assert body["matched_records"] == 2
+        assert body["needs_review_records"] == 2
+        assert body["status_counts"]["auto_match"] == 2
+        assert body["status_counts"]["needs_review"] == 2
+        assert body["status_counts"]["no_match"] == 1
+        # No audit_log table in local mode yet — always 0 until Phase 3.
+        assert body["manual_merge_actions"] == 0
+
+    def test_incremental_score_visible_through_records(
+        self, client, parquet_test_settings, monkeypatch
+    ):
+        """The two write paths this operationalization work targets — batch
+        publish and incremental scoring — land in the same Parquet index and
+        are both visible through the same read routes."""
+        _publish_fixture_run(parquet_test_settings, "r1")
+        monkeypatch.setattr(
+            parquet_test_settings, "fs_model_dir",
+            parquet_test_settings.project_root / "no_fs_model",
+        )
+        resp = client.post(
+            "/records/score",
+            json={"records": [_incoming("P6", "Amy", "Lee", "1975-03-03", "FEMALE")]},
+        )
+        run_id = resp.json()["run_id"]
+        result = client.get(f"/records/score/{run_id}").json()
+        assert result["status"] == "succeeded"
+        mid = result["outcomes"][0]["mid"]
+
+        entity = client.get(f"/clusters/{mid}").json()
+        assert any(m["patid"] == "P6" for m in entity["members"])
+
+
+class TestAuditAgainstParquetBackend:
+    """`POST /audit/merge`, `POST /audit/unmerge`, `GET /audit` against
+    `ParquetIndexBackend` — mirrors `TestAudit`'s SQLite coverage, proving
+    `audit.py` is backend-agnostic via `get_backend`."""
+
+    def test_merge_then_audit_feed(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        resp = client.post(
+            "/audit/merge",
+            json={"mid": matched_mid, "patids": ["P3"]},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert {m["patid"] for m in body["entity"]["members"]} == {"P1", "P2", "P3"}
+
+        audit_resp = client.get("/audit")
+        assert audit_resp.status_code == 200
+        assert audit_resp.json()[0]["action"] == "merge"
+
+        # Now reflected in the dashboard summary too.
+        summary = client.get("/dashboard/summary").json()
+        assert summary["manual_merge_actions"] == 1
+
+    def test_unmerge_creates_new_entity(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        resp = client.post(
+            "/audit/unmerge",
+            json={"mid": matched_mid, "patid": "P2"},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["new_mid"] != matched_mid
+        assert [m["patid"] for m in body["entity"]["members"]] == ["P2"]
+
+        old = client.get(f"/clusters/{matched_mid}").json()
+        assert [m["patid"] for m in old["members"]] == ["P1"]
+        assert old["is_merged"] is False
+
+    def test_unmerge_is_sticky_across_republish(self, client, parquet_test_settings):
+        """The reconciliation contract end-to-end on the Parquet backend: an
+        unmerged PATID must not be silently re-merged by a later publish of
+        the same run."""
+        _publish_fixture_run(parquet_test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        client.post(
+            "/audit/unmerge",
+            json={"mid": matched_mid, "patid": "P2"},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+
+        from src.api import publish
+
+        backend = build_index_backend(parquet_test_settings)
+        try:
+            publish.publish_run(backend, "r1", parquet_test_settings)
+        finally:
+            backend.close()
+
+        resp = client.get("/records", params={"search": "Jane"})
+        p2_entities = [
+            item for item in resp.json()["items"]
+            for m in item["members"] if m["patid"] == "P2"
+        ]
+        assert len(p2_entities) == 1
+        assert len(p2_entities[0]["members"]) == 1  # still standalone
+
+
+class TestParquetBackendConcurrency:
+    """Real overlapping requests against the Parquet backend, dispatched from
+    multiple threads through the actual ASGI app (not just a direct call to
+    `get_backend`) — `deps._PARQUET_BACKEND_LOCK` must prevent a crash/corrupt
+    read even under genuine concurrent load. `test_api_deps.py` covers the
+    lock's acquire/release mechanics in isolation; this is the end-to-end
+    proof it's wired into the real request path."""
+
+    def test_concurrent_merges_do_not_corrupt_state(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        items = client.get("/records").json()["items"]
+        review_mids = [item["mid"] for item in items if item["origin"] == "review"]
+        assert len(review_mids) == 2  # P4, P5 — each its own singleton
+
+        def _merge(mid: str) -> int:
+            resp = client.post(
+                "/audit/merge",
+                json={"mid": review_mids[0], "patids": [
+                    m["patid"] for e in items if e["mid"] == mid for m in e["members"]
+                ]},
+                headers={"X-Reviewer-Id": f"reviewer.{mid}"},
+            )
+            return resp.status_code
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            statuses = list(pool.map(_merge, review_mids * 4))
+
+        assert all(s == 200 for s in statuses)
+        # Every merge targeted review_mids[0] — it must end up with both
+        # PATIDs as members exactly once each, never duplicated or dropped.
+        final = client.get(f"/clusters/{review_mids[0]}").json()
+        assert {m["patid"] for m in final["members"]} == {"P4", "P5"}
+        assert len(final["members"]) == 2

@@ -11,8 +11,6 @@ is preserved as a form value, not a JSON body. Exactly one of `file` /
 from __future__ import annotations
 
 import json
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile
@@ -24,11 +22,6 @@ from src.config import Settings
 from src.contracts import RunManifest
 
 router = APIRouter(tags=["runs"])
-
-
-def _new_run_id() -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stamp}-{uuid.uuid4().hex[:6]}"
 
 
 @router.post("/runs", response_model=RunCreateResponse, status_code=202)
@@ -45,7 +38,7 @@ def create_run(
         )
 
     settings.ensure_dirs()
-    run_id = _new_run_id()
+    run_id = jobs.new_run_id()
 
     if file is not None:
         suffix = Path(file.filename or "upload.csv").suffix or ".csv"

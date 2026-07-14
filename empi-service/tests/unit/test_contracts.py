@@ -21,6 +21,7 @@ from src.contracts import (
     CleanedRecords,
     Matches,
     NonMatches,
+    Rejects,
     assert_patid_coverage,
     validate,
 )
@@ -140,6 +141,49 @@ class TestMatches:
 
     def test_empty_frame_is_skipped(self):
         out = validate(pd.DataFrame(), Matches)  # allow_empty default True
+        assert out.empty
+
+
+def _rejects(**override) -> pd.DataFrame:
+    base = {
+        "PATID_A": ["A"],
+        "PATID_B": ["B"],
+        "source_blocks": ["B1"],
+        "n_blocks": [1],
+        "n_contradictions": [3],
+        "decision": ["reject"],
+        "reject_rule": ["STRONG_ID_CONFLICT"],
+    }
+    base.update(override)
+    return pd.DataFrame(base)
+
+
+class TestRejects:
+    def test_valid_frame_passes(self):
+        validate(_rejects(), Rejects, allow_empty=False)
+
+    def test_rejects_non_reject_decision(self):
+        with pytest.raises(_SCHEMA_ERR):
+            validate(_rejects(decision=["review"]), Rejects)
+
+    def test_rejects_unknown_reject_rule(self):
+        with pytest.raises(_SCHEMA_ERR):
+            validate(_rejects(reject_rule=["NOT_A_REJECT_RULE"]), Rejects)
+
+    def test_rejects_null_reject_rule(self):
+        with pytest.raises(_SCHEMA_ERR):
+            validate(_rejects(reject_rule=[None]), Rejects)
+
+    def test_rejects_negative_contradictions(self):
+        with pytest.raises(_SCHEMA_ERR):
+            validate(_rejects(n_contradictions=[-1]), Rejects)
+
+    def test_rejects_non_canonical_order(self):
+        with pytest.raises(_SCHEMA_ERR):
+            validate(_rejects(PATID_A=["B"], PATID_B=["A"]), Rejects)
+
+    def test_empty_frame_is_skipped(self):
+        out = validate(pd.DataFrame(), Rejects)  # allow_empty default True
         assert out.empty
 
 

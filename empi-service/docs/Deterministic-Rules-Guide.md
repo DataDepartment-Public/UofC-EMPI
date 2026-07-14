@@ -484,7 +484,7 @@ stratum to adjudicate first. Numbers to be filled in once the labeling exists.
 Two deterministic-rule failure modes were diagnosed on the real data and fixed **upstream**, because no confidence tuning can repair a bad input value:
 
 ### Placeholder SSNs
-A single placeholder SSN (`333333330`) had once chained **22 unrelated patients** into one 33-record SSN cluster at confidence 1.000. These values are structurally valid (they pass area/group/serial checks and `python-stdnum`), so they must be caught by entropy. `src/data/transformations.clean_ssn` now nulls any SSN that has ≤2 distinct digits, has one digit filling ≥7 of 9 positions, or is a full ascending/descending digit run (e.g. `012345678`), in addition to `python-stdnum` structural validation. Effect: max cluster size dropped 33 → 9 (now 7 after the rule demotion), SSN fan-out 25 → 6, and the SSN rule's precision rose from ~88% to ~100%.
+A single placeholder SSN (`333333330`) had once chained **22 unrelated patients** into one 33-record SSN cluster at confidence 1.000. These values are structurally valid (they pass area/group/serial checks and `python-stdnum`), so they must be caught by entropy. `src/preprocessing/transformations.clean_ssn` now nulls any SSN that has ≤2 distinct digits, has one digit filling ≥7 of 9 positions, or is a full ascending/descending digit run (e.g. `012345678`), in addition to `python-stdnum` structural validation. Effect: max cluster size dropped 33 → 9 (now 7 after the rule demotion), SSN fan-out 25 → 6, and the SSN rule's precision rose from ~88% to ~100%.
 
 ### SSN risk and the corroboration / fan-out controls
 SSN matches now carry **two** layers of protection:

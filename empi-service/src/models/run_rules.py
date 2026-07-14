@@ -65,6 +65,7 @@ from src.contracts import (  # noqa: E402
     CleanedRecords,
     Matches,
     NonMatches,
+    Rejects,
     assert_patid_coverage,
     validate,
 )
@@ -247,7 +248,8 @@ def main(
     matches.to_parquet(output_path, index=False)
     logger.info("Matches saved to %s (%d rows)", output_path, len(matches))
 
-    rejects = decided[decided["decision"] == "reject"]
+    rejects = decided[decided["decision"] == "reject"].reset_index(drop=True)
+    validate(rejects, Rejects)  # contract: rejects output
     pair_cols = list(candidate_pairs.columns)
 
     # Review output = review-tier rule confirmations + unconfirmed-but-uncertain.
@@ -270,7 +272,7 @@ def main(
     settings.rejects_dir.mkdir(parents=True, exist_ok=True)
     rj_version = _next_version(settings.rejects_dir, stem="rejects")
     reject_path = settings.rejects_dir / f"rejects_{rj_version}_{date_tag}.parquet"
-    rejects.reset_index(drop=True).to_parquet(reject_path, index=False)
+    rejects.to_parquet(reject_path, index=False)
     logger.info(
         "Rejected (confident non-match) pairs saved to %s (%d rows); not routed "
         "downstream.",

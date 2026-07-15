@@ -1,36 +1,42 @@
 """GET /records, GET /clusters/{mid}, GET /records/{patid}/raw —
 docs/API-Design.md §3 "Clusters / records" + the Dashboard FR doc's FR-22/24.
 
-Read straight from `empi.db` (`entity` ⨝ `entity_member` ⨝ `record_attrs` ⨝
-`review_candidate`) — no Parquet I/O per request except the raw-data route,
-which reads the one JSON blob `publish.py` denormalized per PATID.
+Reads go through `IndexBackend` (`entity` ⨝ `entity_member` ⨝ `record_attrs`
+⨝ `review_candidate`) — see docs/Data-Contract.md Stage 6 — so these routes
+work identically whether `settings.index_backend` is SQLite or the local
+Parquet index.
 """
 
 from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
-from src.api import store
-from src.api.deps import get_db, get_settings
+from src.api import jobs
+from src.api.deps import get_backend, get_settings
+from src.api.index_backend import IndexBackend
 from src.api.schemas import (
     CandidatePatient,
     Entity,
     EntityMember,
     RawRecord,
+    RecordScoreOutcome,
     RecordsPage,
     ReviewCandidate,
+    ScoreCreateResponse,
+    ScoreRequest,
+    ScoreResult,
 )
 from src.config import Settings
 
 router = APIRouter(tags=["records"])
 
 
-def _to_entity(conn, entity_row: dict, member_rows: list[dict]) -> Entity:
+def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict]) -> Entity:
     review_candidates: dict[tuple, ReviewCandidate] = {}
     for m in member_rows:
-        for rc in store.review_candidates_for_patid(conn, m["patid"]):
+        for rc in backend.review_candidates_for_patid(m["patid"]):
             key = (rc["patid_a"], rc["patid_b"])
             review_candidates[key] = ReviewCandidate(
                 patid_a=rc["patid_a"], patid_b=rc["patid_b"],
@@ -94,39 +100,77 @@ def list_records(
     updated_before: str | None = None,
     page: int = 1,
     page_size: int | None = None,
-    conn=Depends(get_db),
+    backend: IndexBackend = Depends(get_backend),
     settings: Settings = Depends(get_settings),
 ) -> RecordsPage:
     page_size = page_size or settings.records_page_size
-    rows, total = store.list_entities(
-        conn, search=search, origin=origin, is_merged=is_merged,
+    rows, total = backend.list_entities(
+        search=search, origin=origin, is_merged=is_merged,
         birth_date=birth_date, ssn_last4=ssn_last4,
         updated_after=updated_after, updated_before=updated_before,
         page=page, page_size=page_size,
     )
     items = []
     for row in rows:
-        detail = store.get_entity(conn, row["mid"])
-        items.append(_to_entity(conn, detail["entity"], detail["members"]))
+        detail = backend.get_entity(row["mid"])
+        items.append(_to_entity(backend, detail["entity"], detail["members"]))
     return RecordsPage(total=total, page=page, page_size=page_size, items=items)
 
 
 @router.get("/clusters/{mid}", response_model=Entity)
-def get_cluster(mid: str, conn=Depends(get_db)) -> Entity:
-    detail = store.get_entity(conn, mid)
+def get_cluster(mid: str, backend: IndexBackend = Depends(get_backend)) -> Entity:
+    detail = backend.get_entity(mid)
     if detail is None:
         raise HTTPException(status_code=404, detail=f"Unknown mid: {mid}")
-    return _to_entity(conn, detail["entity"], detail["members"])
+    return _to_entity(backend, detail["entity"], detail["members"])
 
 
 @router.get("/records/{patid}/raw", response_model=RawRecord)
-def get_raw_record(patid: str, conn=Depends(get_db)) -> RawRecord:
-    raw_json = store.get_record_raw(conn, patid)
+def get_raw_record(patid: str, backend: IndexBackend = Depends(get_backend)) -> RawRecord:
+    raw_json = backend.get_record_raw(patid)
     if raw_json is None:
         raise HTTPException(
             status_code=404, detail=f"No raw data published for PATID: {patid}"
         )
     return RawRecord(patid=patid, fields=json.loads(raw_json))
+
+
+@router.post("/records/score", response_model=ScoreCreateResponse, status_code=202)
+def score_records(
+    body: ScoreRequest,
+    background_tasks: BackgroundTasks,
+    settings: Settings = Depends(get_settings),
+) -> ScoreCreateResponse:
+    """Score one or a batch of new records against the existing population
+    without re-running the full pipeline — see `docs/API-Design.md` and
+    `src/api/incremental.py`. Always a background job (same 202 + poll
+    pattern as `POST /runs`), regardless of batch size."""
+    settings.ensure_dirs()
+    run_id = jobs.new_run_id()
+    jobs.mark_score_queued(run_id)
+    background_tasks.add_task(
+        jobs.score_records_job,
+        run_id,
+        [r.model_dump() for r in body.records],
+        settings,
+    )
+    return ScoreCreateResponse(run_id=run_id, status="queued")
+
+
+@router.get("/records/score/{run_id}", response_model=ScoreResult)
+def get_score_result(run_id: str) -> ScoreResult:
+    status = jobs.get_score_status(run_id)
+    if status is None:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown score run_id: {run_id}"
+        )
+    outcomes = jobs.get_score_result(run_id) or []
+    return ScoreResult(
+        run_id=run_id,
+        status=status["status"],
+        outcomes=[RecordScoreOutcome(**o) for o in outcomes],
+        error=status.get("error"),
+    )
 
 
 __all__ = ["router"]

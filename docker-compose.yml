@@ -1,0 +1,37 @@
+# Local/dev orchestration for both halves of the app — `docker compose up`.
+# Not a deployment manifest (no target platform assumed, per the Dockerfiles'
+# own docstrings); just the practical way to run both services together and
+# confirm they talk to each other before deploying anywhere.
+services:
+  empi-service:
+    build:
+      context: ./empi-service
+    ports:
+      - "8000:8000"
+    volumes:
+      # data/empi.db and data/local_index/ are the durable state — without
+      # this volume every `docker compose up` starts from an empty resolved
+      # output. models/ holds the trained FS matcher artifact (if any).
+      - empi-data:/app/data
+      - empi-models:/app/models
+      - empi-logs:/app/logs
+    restart: unless-stopped
+
+  empi-dashboard:
+    build:
+      context: ./empi-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      # Service-name resolution on the compose network — see
+      # empi-dashboard/src/lib/server-api.ts.
+      EMPI_API_URL: http://empi-service:8000
+    depends_on:
+      empi-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  empi-data:
+  empi-models:
+  empi-logs:

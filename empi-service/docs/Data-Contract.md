@@ -1,24 +1,30 @@
 # Data Contract — eMPI Pipeline
 
-Single source of truth for the **data that moves between pipeline stages**: the
-schema, dtype, nullability, file location, and serialization of every artifact
-handed from one stage to the next. Where `Data-Cleaning-Guide.md` governs *how
-fields are cleaned* and `Deterministic-Rules-Guide.md` governs *which pairs
-match*, this document governs *the shape of the data at each boundary* so any
-stage can be developed, tested, or replaced against a stable interface.
+Single source of truth for the **data that moves between pipeline stages**
+(stages 1-5) **and the resolved-output store the API layer maintains
+downstream of them** (stage 6): the schema, dtype, nullability, file
+location, and serialization of every artifact handed from one stage to the
+next. Where `Data-Cleaning-Guide.md` governs *how fields are cleaned* and
+`Deterministic-Rules-Guide.md` governs *which pairs match*, this document
+governs *the shape of the data at each boundary* so any stage can be
+developed, tested, or replaced against a stable interface.
 
 The authority for each contract is the code, cited inline as `file:symbol`. If
 code and this document disagree, the code wins and this document is the bug —
 update it in the same change.
 
-**Executable counterpart:** `src/contracts.py` implements these as pandera
-`DataFrameModel`s (the bulk frames) and pydantic models (the `Settings` in
-`src/config.py` and the `RunManifest`). The orchestrator `src/pipeline.py` and
-the stage entry points validate every boundary against them. This document is
-the human-readable spec; `contracts.py` is the enforcement — keep them
-mirrored.
+**Executable counterpart:** `src/contracts.py` implements stages 1-5 as
+pandera `DataFrameModel`s (the bulk frames) and pydantic models (the
+`Settings` in `src/config.py` and the `RunManifest`). The orchestrator
+`src/pipeline.py` and the stage entry points validate every boundary against
+them. Stage 6 (resolved-output storage) has no pandera contract — it is
+row-oriented, not a bulk frame — and is instead enforced by
+`src/api/store.py`'s `CREATE TABLE` DDL (SQLite) and
+`src/api/parquet_backend.py`'s `_SCHEMAS` (Parquet), which this document's
+Stage 6 section mirrors. This document is the human-readable spec; the code
+is the enforcement — keep them mirrored.
 
-_Last updated: 2026-07-10._
+_Last updated: 2026-07-14._
 
 ---
 
@@ -60,6 +66,12 @@ _Last updated: 2026-07-10._
    │    edges only)                   │    Stage 4 output (team decision)
    └──────────────┬───────────────────┘
    data/clusters/cluster_assignments_*.parquet
+                  │
+   ┌──────────────▼───────────────┐
+   │ 6. RESOLVED-OUTPUT INDEX       │  src/api/publish.py, incremental.py,      [IMPLEMENTED]
+   │    (mutable; API layer)       │  publish_local.py, local_score.py
+   └───────────────────────────────┘
+   data/empi.db  (or  data/local_index/*.parquet)
 ```
 
 **Entry point.** The canonical way to run all five stages is the orchestrator
@@ -77,7 +89,8 @@ orchestrator never reads it, and neither does the API. `run_blocking.py` in
 particular produces a **structurally different, narrower** candidate pool than
 the orchestrator (see Stage 2) — never substitute one for the other.
 
-All five stages are implemented and in production.
+All six stages are implemented and in production, on both of stage 6's
+backends (SQLite and Parquet local mode — see its own section).
 
 ---
 
@@ -413,6 +426,239 @@ see the design decision above. Don't build against it.
 
 ---
 
+## Stage 6 — Resolved-output index (API layer)  `[IMPLEMENTED]`
+
+Unlike stages 1-5 (each an immutable, `run_id`-stamped Parquet file), this is a
+**mutable resolved store**: a batch publish or an incremental score upserts
+prior state rather than writing a new artifact each time. It is what the
+FastAPI service and the `empi-dashboard/` Next.js app actually read and write
+— nothing downstream of stage 5 talks to `data/clusters/*.parquet` directly.
+
+- **Producers:**
+  `src/api/publish.py::publish_run` — one `RunManifest`'s `clusters` /
+  `matches` / `non_matches` / `cleaned` (+ `review_evidence` if present) →
+  resolved entities. Batch-only, run once per full pipeline run.
+  `src/api/incremental.py::score_records` — one or a few new records scored
+  against the *existing* resolved population, no full pipeline re-run. Used
+  by `POST /records/score` and the local CLI (`src/api/local_score.py`).
+- **Consumers:** `src/api/routers/*` (records, dashboard, audit, runs) and
+  `empi-dashboard/`.
+- **Two interchangeable backends**, both fully implementing
+  `src/api/index_backend.py::IndexBackend` (every table below, both the
+  batch-publish and incremental-score paths, and the reviewer audit log):
+  - **SQLite** (`src/api/store.py`, `data/empi.db`) — the live,
+    multi-request service. Default (`EMPI_INDEX_BACKEND=sqlite`).
+  - **Parquet local mode** (`src/api/parquet_backend.py::ParquetIndexBackend`,
+    `data/local_index/*.parquet`) — no DB required; a fully self-contained
+    local dev/CI/batch/incremental/dashboard deployment with zero SQLite
+    dependency. `EMPI_INDEX_BACKEND=parquet`. Batch publish:
+    `python -m src.pipeline` then `python -m src.api.publish_local --run-id
+    <id>`. Incremental: `python -m src.api.local_score --input record.json`,
+    or the same FastAPI service with `EMPI_INDEX_BACKEND=parquet` set.
+    One process-local lock (`src/api/deps.py::_PARQUET_BACKEND_LOCK`)
+    serializes requests against this backend — it was designed for one-shot
+    CLI use (load once, commit once, exit), so a live FastAPI app driving
+    concurrent requests against it needs that serialization; SQLite's own
+    engine already handles concurrent writers without one.
+- **Reconciliation invariant ("sticky unmerge"):** a PATID that has ever
+  appeared in `audit_log.patids` is **reviewer-locked** — no later batch
+  publish may repoint its `mid`. Its would-be new grouping is written to
+  `entity_suggestion` instead, visible but not auto-applied. Only another
+  explicit `/audit/*` action can move a locked PATID again.
+- **Boolean columns are stored as `int64` (0/1), not `bool`** — the one
+  dtype convention stage 6 deliberately breaks from stages 1-5 (where
+  `valid_record`/`is_suspicious`/`high_fanout_ssn` are native `bool`), to
+  keep every column trivially portable between SQLite's dynamic typing and
+  Parquet's columnar typing without a cast at the boundary.
+
+### 6a — Entities & membership
+
+`entity` — one row per resolved entity (singleton or merged cluster).
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `mid` | string | no (key) | `M-{6-digit sequence}` — minted by `next_mid()` (one at a time) or `max_mid_sequence() + 1` (bulk publish loop). |
+| `run_id` | string | no | Run (or incremental-score job id) that last touched this entity. |
+| `origin` | string ∈ {`deterministic`, `review`, `merge`, `none`} | no | How the entity was formed. |
+| `is_merged` | int64 (0/1) | no | `1` iff `>1` unlocked member. |
+| `confidence` | float64 | yes | Highest-confidence deterministic pair founding the entity. |
+| `match_rule` | string | yes | Rule name for that founding pair; `None` for singletons. |
+| `evidence` | string | yes | `rules_fired` (or a manual-merge note) for the founding pair. |
+| `updated_utc` | string (ISO-8601) | no | |
+
+Backends: SQLite `entity` table — IMPLEMENTED. Parquet `entity.parquet` —
+IMPLEMENTED, both incremental upsert and bulk write from a batch publish
+(`ParquetIndexBackend.upsert_entities_bulk`).
+
+`entity_member` — one row per PATID, resolving it to exactly one `mid`.
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `patid` | string | no (key) | An entity's members are every row sharing its `mid`. |
+| `mid` | string | no | References `entity.mid`. |
+| `is_primary` | int64 (0/1) | no | The lexicographically smallest PATID in the entity, by convention. |
+| `added_by` | string | no | `"pipeline"` or a reviewer id. |
+| `updated_utc` | string (ISO-8601) | no | |
+
+Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED (same split as
+`entity`: incremental upsert and bulk `upsert_entity_members_bulk`).
+
+### 6b — Review & reconciliation
+
+`review_candidate` — an unresolved pair the pipeline routed to human review
+(review-tier rule-confirmed, or uncertain-but-not-rejected).
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `id` | int64 | no (key, SQLite only — `AUTOINCREMENT`) | Parquet dedups on the 3-column key below instead of a surrogate id. |
+| `patid_a`, `patid_b` | string | no | Canonical pair, `patid_a < patid_b` (same ordering as `contracts.CandidatePairs`). |
+| `match_rule` | string | yes | Set only for the review-tier rule-confirmed subset (`NAME_DOB_SEX` / `NAME_DOB_ADDRESS`); `None` for uncertain pairs. |
+| `confidence` | float64 | yes | |
+| `evidence` | string | yes | `rules_fired`, when `match_rule` is set. |
+| `source_blocks` | string | yes | Pipe-delimited block IDs, passthrough from stage 2. |
+| `run_id` | string | no | |
+| `created_utc` | string (ISO-8601) | no | |
+| `fs_match_probability` | float64 | yes | Stage 4 (FS matcher) score, when scored. |
+| `fs_classification_tier` | string | yes | Stage 4's tier label. |
+
+Key / replace semantics: a **batch publish replaces wholesale per `run_id`**
+(`replace_review_candidates_for_run` — a pair no longer in the latest run's
+`non_matches` disappears rather than lingering as a stale suggestion);
+**incremental scoring appends**, deduped on `(patid_a, patid_b, run_id)`.
+
+Backends: SQLite — IMPLEMENTED (both semantics). Parquet — IMPLEMENTED
+(both semantics: incremental append via `insert_review_candidates`, batch
+replace-per-run via `replace_review_candidates_for_run`).
+
+`entity_suggestion` — a reviewer-locked PATID's would-be new grouping,
+recorded but not applied (see the sticky-unmerge invariant above).
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `patid` | string | no (key) | |
+| `run_id` | string | no | |
+| `suggested_mid` | string | no | Synthetic id (`SUGGESTED-{run_id}-{cluster_id}`) — never a real `entity.mid`. |
+| `created_utc` | string (ISO-8601) | no | |
+
+Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED (incremental upsert
+and bulk write from a batch publish, `upsert_suggestions_bulk`).
+
+### 6c — Persisted lookup indexes (incremental-scoring support)
+
+`block_key` — on-disk mirror of `blocking.BlockingIndex`'s posting lists, so
+a single incoming record's candidates are an indexed point lookup instead of
+an in-memory rebuild over the whole population.
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `block_id` | string ∈ {B1,B3,B4,B5,B6,B7,B8,B9} | no (key, composite) | Same block definitions as stage 2. |
+| `key_value` | string | no (key, composite) | B1 (SSN) / B6 (email) values are SHA-256-hashed (`store.hash_block_key`) before storage — direct identifiers, equality-only use. |
+| `patid` | string | no (key, composite) | |
+
+Backends: SQLite — IMPLEMENTED (full rebuild via `replace_block_keys` on
+every batch publish; incremental append via `add_block_keys`). Parquet —
+IMPLEMENTED (same split — full rebuild on batch publish, incremental append
+between).
+
+`cleaned_attrs` — a query-by-patid mirror of the stage 1 `CleanedRecords`
+contract, one row per valid PATID, so incremental rule evaluation doesn't
+re-read the full ~163k-row stage 1 Parquet per request.
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `patid` | string | no (key) | |
+| `first_nm`, `last_nm` | string | yes | |
+| `birth_dt` | string (`YYYY-MM-DD`) | yes | Pre-formatted — unlike stage 1's native `datetime64[ns]`. |
+| `ssn`, `ssn_last4` | string | yes | |
+| `email` | string | yes | |
+| `zip_base` | string | yes | |
+| `address1` | string | yes | |
+| `sex` | string | yes | |
+| `phones_json` | string | yes | `json.dumps(sorted(phone_set))` — stage 1's `Phones_set` re-serialized as JSON text (this table is a point-lookup cache, not written via `write_cleaned`, so it doesn't get the native `list<string>` Parquet column stage 1 uses). |
+| `run_id` | string | no | |
+
+Backends: SQLite — IMPLEMENTED (full rebuild via `replace_cleaned_attrs`;
+incremental upsert via `upsert_cleaned_attrs`). Parquet — IMPLEMENTED (same
+split).
+
+### 6d — Display denormalization (dashboard read side)
+
+`record_attrs` — display fields for `GET /records` / `GET /clusters/{mid}`,
+denormalized from stage 1's `cleaned` at publish time so the dashboard never
+does a per-request read of the full cleaned Parquet.
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `patid` | string | no (key) | |
+| `first_name`, `last_name`, `birth_date`, `ssn_last4`, `email`, `zip_code`, `address1`, `sex`, `phone` | string | yes | `birth_date` pre-formatted `YYYY-MM-DD`; `phone` is `PrimaryPhoneNBR_clean`. |
+| `run_id` | string | no | |
+
+Backends: SQLite — IMPLEMENTED (`store.upsert_record_attrs_bulk`). Parquet —
+IMPLEMENTED (`ParquetIndexBackend.upsert_record_attrs_bulk`). Upsert
+semantics by `patid` on both (a batch publish replaces existing rows for the
+patids it touches — values can legitimately change run to run for the same
+patid — via a batched filter-then-concat, not a per-row loop).
+
+`record_raw` — the "View Raw Data" drawer's un-scrubbed source fields, one
+JSON blob per PATID.
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `patid` | string | no (key) | |
+| `raw_json` | string | no | `json.dumps` of `publish.RAW_COLUMNS` (every `*_raw` passthrough field from stage 1). |
+| `run_id` | string | no | |
+
+Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED
+(`ParquetIndexBackend.upsert_record_raw_bulk`), same upsert-by-`patid`
+semantics as `record_attrs`.
+
+### 6e — Reviewer audit log
+
+`audit_log` — append-only record of every manual `/audit/merge` or
+`/audit/unmerge` action. Also the source of truth for which PATIDs are
+reviewer-**locked** (see the sticky-unmerge invariant above).
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `id` | int64 | no (key) | SQLite: native `AUTOINCREMENT`. Parquet: scan existing max `id` + 1 (no autoincrement primitive) — same convention as `mid` minting. |
+| `ts_utc` | string (ISO-8601) | no | |
+| `user` | string | no | Reviewer id from the trusted `X-Reviewer-Id` header. |
+| `action` | string ∈ {`merge`, `unmerge`, `split`} | no | `split` is reserved — not yet emitted by any route. |
+| `patids` | string | no | Comma-joined. |
+| `mid` | string | no | |
+| `prev_state`, `next_state` | string | no | Human-readable state labels (e.g. `"Merged"`, `"Needs review"`). |
+| `run_id` | string | yes | |
+
+Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED
+(`ParquetIndexBackend.insert_audit_log`/`list_audit_log`).
+`ParquetIndexBackend.locked_patids()` reads this table for real (`patids`
+column, split on `,`, unioned across rows) — no longer the empty-set stub
+local mode started with.
+
+### Status summary
+
+| Table | SQLite | Parquet local mode |
+|---|---|---|
+| `entity` | IMPLEMENTED | IMPLEMENTED |
+| `entity_member` | IMPLEMENTED | IMPLEMENTED |
+| `review_candidate` | IMPLEMENTED | IMPLEMENTED |
+| `entity_suggestion` | IMPLEMENTED | IMPLEMENTED |
+| `block_key` | IMPLEMENTED | IMPLEMENTED |
+| `cleaned_attrs` | IMPLEMENTED | IMPLEMENTED |
+| `record_attrs` | IMPLEMENTED | IMPLEMENTED |
+| `record_raw` | IMPLEMENTED | IMPLEMENTED |
+| `audit_log` | IMPLEMENTED | IMPLEMENTED |
+
+All nine tables are fully implemented on both backends as of 2026-07-14 —
+the `to-do.md` operationalization plan (Phases 1-3: bulk-publish support,
+dashboard read-side parity, and `audit_log`/reviewer-lock parity) is done.
+The two backends now cover the same functional surface: batch pipeline runs,
+incremental single/few-record scoring, the full dashboard read side, and
+reviewer merge/unmerge — see the Parquet-local-mode commands in this stage's
+intro bullets above.
+
+---
+
 ## The `RunManifest`
 
 Written by `src/pipeline.py` to `data/runs/run_<run_id>.json` (pydantic model,
@@ -455,6 +701,7 @@ whether that's by design.
 | `data/runs/` | `src/pipeline.py` (`RunManifest`) | `src/api/publish.py`, `fs_matcher/train.py` (input resolution), `scripts/build_eval_workbook.py` | Active |
 | `data/silver_labels/` | *(external, VM-only)* | `fs_matcher/train.py` | VM-only PHI input, gitignored |
 | `data/empi.db` | `src/api/publish.py` | `src/api/store.py` + routers | Active — serves the review dashboard |
+| `data/local_index/` | `src/api/publish.py` / `publish_local.py` (batch), `src/api/incremental.py` / `local_score.py` (incremental) | `src/api/parquet_backend.py`-backed routes (records/dashboard/audit), `src/api/local_score.py` | Active — full parity with `data/empi.db` (Stage 6) |
 | `models/fs/` *(not under `data/`)* | `fs_matcher/train.py` | Stage 4 (`registry.resolve_active_model`) | See `docs/FS-Matcher-Production-Guide.md` for the full model-store layout |
 
 ---
@@ -469,6 +716,9 @@ whether that's by design.
    `rejects`, validated against `contracts.Rejects` in both `pipeline.py` and
    `run_rules.py`.
 4. **No PHI in logs** — aggregate counts only.
+5. **Sticky unmerge** (stage 6 only) — a PATID that has ever appeared in
+   `audit_log.patids` is never repointed to a different `mid` by a later
+   batch publish; only another explicit `/audit/*` action can move it.
 
 **Resolved by the contracts layer:**
 

@@ -19,6 +19,8 @@ import pandas as pd
 import pytest
 
 from src.api import publish, store
+from src.api.index_backend import SqlIndexBackend
+from src.api.parquet_backend import ParquetIndexBackend
 from src.config import Settings
 from src.contracts import ArtifactRef, RunManifest
 
@@ -31,6 +33,11 @@ def conn():
     store.init_db(c)
     yield c
     c.close()
+
+
+@pytest.fixture
+def backend(conn):
+    return SqlIndexBackend(conn)
 
 
 @pytest.fixture
@@ -61,6 +68,7 @@ def _write_run(settings: Settings, run_id: str):
         "ZipCD_clean_base": ["60601", "60601", None, None, None],
         "AddressLine1_clean": [None, None, None, None, None],
         "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE", "FEMALE", "FEMALE"],
+        "Phones_set": [set(), set(), set(), set(), set()],
         "FirstNM_raw": ["JANE", "JANE", "JOHN", "AMY", "AMY"],
         "SSN_raw": ["123-45-6789", "123456789", None, None, None],
         "valid_record": [True, True, True, True, True],
@@ -118,9 +126,9 @@ def _write_run(settings: Settings, run_id: str):
 
 
 class TestPublishRun:
-    def test_fresh_publish_creates_entities(self, conn, fixture_settings):
+    def test_fresh_publish_creates_entities(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
-        counts = publish.publish_run(conn, "r1", fixture_settings)
+        counts = publish.publish_run(backend, "r1", fixture_settings)
 
         assert counts["clusters_seen"] == 4
         assert counts["entities_upserted"] == 4
@@ -141,9 +149,9 @@ class TestPublishRun:
         assert singleton_entity["entity"]["is_merged"] == 0
         assert singleton_entity["entity"]["origin"] == "none"
 
-    def test_review_candidate_upgrades_origin(self, conn, fixture_settings):
+    def test_review_candidate_upgrades_origin(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
-        publish.publish_run(conn, "r1", fixture_settings)
+        publish.publish_run(backend, "r1", fixture_settings)
 
         p4_mid = store.get_entity_mid_for_patid(conn, "P4")
         p4_entity = store.get_entity(conn, p4_mid)
@@ -154,9 +162,9 @@ class TestPublishRun:
         assert candidates[0]["match_rule"] == "NAME_DOB_SEX"
         assert candidates[0]["confidence"] == 0.98
 
-    def test_record_attrs_denormalized(self, conn, fixture_settings):
+    def test_record_attrs_denormalized(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
-        publish.publish_run(conn, "r1", fixture_settings)
+        publish.publish_run(backend, "r1", fixture_settings)
         row = conn.execute(
             "SELECT * FROM record_attrs WHERE patid='P1'"
         ).fetchone()
@@ -164,19 +172,19 @@ class TestPublishRun:
         assert row["ssn_last4"] == "6789"
         assert row["birth_date"] == "1990-01-01"
 
-    def test_raw_fields_denormalized(self, conn, fixture_settings):
+    def test_raw_fields_denormalized(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
-        publish.publish_run(conn, "r1", fixture_settings)
+        publish.publish_run(backend, "r1", fixture_settings)
         raw_json = store.get_record_raw(conn, "P1")
         assert raw_json is not None
         assert "JANE" in raw_json
 
-    def test_republish_is_idempotent(self, conn, fixture_settings):
+    def test_republish_is_idempotent(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
-        publish.publish_run(conn, "r1", fixture_settings)
+        publish.publish_run(backend, "r1", fixture_settings)
         mid_before = store.get_entity_mid_for_patid(conn, "P1")
 
-        publish.publish_run(conn, "r1", fixture_settings)
+        publish.publish_run(backend, "r1", fixture_settings)
         mid_after = store.get_entity_mid_for_patid(conn, "P1")
 
         assert mid_before == mid_after
@@ -187,9 +195,9 @@ class TestPublishRun:
         ).fetchone()["n"]
         assert n_candidates == 1  # replaced, not duplicated
 
-    def test_reviewer_locked_patid_not_repointed(self, conn, fixture_settings):
+    def test_reviewer_locked_patid_not_repointed(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
-        publish.publish_run(conn, "r1", fixture_settings)
+        publish.publish_run(backend, "r1", fixture_settings)
 
         # Reviewer splits P2 out into its own entity (simulating POST /audit/unmerge).
         store.upsert_entity(conn, "M-999999", "r1", "none", False, None, "t0")
@@ -201,7 +209,7 @@ class TestPublishRun:
         )
         conn.commit()
 
-        counts = publish.publish_run(conn, "r1", fixture_settings)
+        counts = publish.publish_run(backend, "r1", fixture_settings)
 
         # P2 stays put in its reviewer-created entity — never repointed back to P1's.
         assert store.get_entity_mid_for_patid(conn, "P2") == "M-999999"
@@ -213,6 +221,99 @@ class TestPublishRun:
         assert suggestion is not None
         assert suggestion["run_id"] == "r1"
 
-    def test_missing_manifest_raises(self, conn, fixture_settings):
+    def test_missing_manifest_raises(self, conn, backend, fixture_settings):
         with pytest.raises(FileNotFoundError):
-            publish.publish_run(conn, "does-not-exist", fixture_settings)
+            publish.publish_run(backend, "does-not-exist", fixture_settings)
+
+
+@pytest.fixture
+def parquet_backend(tmp_path):
+    b = ParquetIndexBackend(tmp_path / "local_index")
+    yield b
+    b.close()
+
+
+class TestPublishAgainstParquetBackend:
+    """`publish_run` run entirely against `ParquetIndexBackend` — same
+    fixture (`_write_run`) as `TestPublishRun`'s SQLite coverage, proving
+    `publish.py` really is backend-agnostic (see `src/api/index_backend.py`).
+    Locked-PATID/sticky-unmerge scenarios aren't covered here yet: Parquet
+    local mode has no `audit_log` table until the audit-parity phase lands
+    (`ParquetIndexBackend.locked_patids()` is hardcoded empty today)."""
+
+    def test_same_counts_as_sqlite_backend(self, backend, parquet_backend, fixture_settings):
+        _write_run(fixture_settings, "r1")
+        sql_counts = publish.publish_run(backend, "r1", fixture_settings)
+        parquet_counts = publish.publish_run(parquet_backend, "r1", fixture_settings)
+        assert sql_counts == parquet_counts
+
+    def test_fresh_publish_creates_entities(self, parquet_backend, fixture_settings):
+        _write_run(fixture_settings, "r1")
+        counts = publish.publish_run(parquet_backend, "r1", fixture_settings)
+
+        assert counts["clusters_seen"] == 4
+        assert counts["entities_upserted"] == 4
+        assert counts["members_upserted"] == 5
+        assert counts["locked_skipped"] == 0
+        assert counts["review_candidates"] == 1
+
+        matched = parquet_backend.get_entity_mid_for_patid("P1")
+        assert matched == parquet_backend.get_entity_mid_for_patid("P2")
+        singleton_mid = parquet_backend.get_entity_mid_for_patid("P3")
+        assert singleton_mid != matched
+
+        matched_entity = parquet_backend.get_entity(matched)
+        assert matched_entity["entity"]["is_merged"] == 1
+        assert matched_entity["entity"]["confidence"] == 1.0
+        assert matched_entity["entity"]["match_rule"] == "SSN_DOB"
+        singleton_entity = parquet_backend.get_entity(singleton_mid)
+        assert singleton_entity["entity"]["is_merged"] == 0
+        assert singleton_entity["entity"]["origin"] == "none"
+
+    def test_review_candidate_upgrades_origin(self, parquet_backend, fixture_settings):
+        _write_run(fixture_settings, "r1")
+        publish.publish_run(parquet_backend, "r1", fixture_settings)
+
+        p4_mid = parquet_backend.get_entity_mid_for_patid("P4")
+        p4_entity = parquet_backend.get_entity(p4_mid)
+        assert p4_entity["entity"]["origin"] == "review"
+
+        rc = parquet_backend._tables["review_candidate"]
+        candidates = rc[(rc["patid_a"] == "P4") | (rc["patid_b"] == "P4")]
+        assert len(candidates) == 1
+        assert candidates.iloc[0]["match_rule"] == "NAME_DOB_SEX"
+        assert candidates.iloc[0]["confidence"] == 0.98
+        # Batch publish never FS-scores a run — only incremental scoring does.
+        assert pd.isna(candidates.iloc[0]["fs_match_probability"])
+
+    def test_record_attrs_denormalized(self, parquet_backend, fixture_settings):
+        _write_run(fixture_settings, "r1")
+        publish.publish_run(parquet_backend, "r1", fixture_settings)
+        row = parquet_backend._tables["record_attrs"]
+        row = row[row["patid"] == "P1"].iloc[0]
+        assert row["first_name"] == "Jane"
+        assert row["ssn_last4"] == "6789"
+        assert row["birth_date"] == "1990-01-01"
+
+    def test_raw_fields_denormalized(self, parquet_backend, fixture_settings):
+        _write_run(fixture_settings, "r1")
+        publish.publish_run(parquet_backend, "r1", fixture_settings)
+        row = parquet_backend._tables["record_raw"]
+        raw_json = row[row["patid"] == "P1"].iloc[0]["raw_json"]
+        assert "JANE" in raw_json
+
+    def test_republish_is_idempotent(self, parquet_backend, fixture_settings):
+        _write_run(fixture_settings, "r1")
+        publish.publish_run(parquet_backend, "r1", fixture_settings)
+        mid_before = parquet_backend.get_entity_mid_for_patid("P1")
+
+        publish.publish_run(parquet_backend, "r1", fixture_settings)
+        mid_after = parquet_backend.get_entity_mid_for_patid("P1")
+
+        assert mid_before == mid_after
+        assert len(parquet_backend._tables["entity"]) == 4
+        assert len(parquet_backend._tables["review_candidate"]) == 1  # replaced, not duplicated
+
+    def test_missing_manifest_raises(self, parquet_backend, fixture_settings):
+        with pytest.raises(FileNotFoundError):
+            publish.publish_run(parquet_backend, "does-not-exist", fixture_settings)

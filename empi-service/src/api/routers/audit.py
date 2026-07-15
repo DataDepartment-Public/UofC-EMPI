@@ -1,8 +1,9 @@
 """POST /audit/merge, POST /audit/unmerge, GET /audit — docs/API-Design.md §3.
 
-Each write is one SQLite transaction: mutate `entity`/`entity_member`, then
-insert the `audit_log` row — both land or neither does (`store.py` functions
-run inside a single `BEGIN`/`COMMIT` here).
+Each write is one `backend` transaction (SQLite or Parquet local mode — see
+docs/Data-Contract.md Stage 6): mutate `entity`/`entity_member`, then insert
+the `audit_log` row — both land or neither does (`backend.begin()`/
+`commit()`/`rollback()` here, exactly like `src/api/incremental.py`).
 """
 
 from __future__ import annotations
@@ -11,8 +12,8 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from src.api import store
-from src.api.deps import get_db, get_reviewer_id
+from src.api.deps import get_backend, get_reviewer_id
+from src.api.index_backend import IndexBackend
 from src.api.routers.records import _to_entity
 from src.api.schemas import (
     AuditLogRow,
@@ -29,65 +30,65 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _single_member_origin(conn, patid: str) -> str:
+def _single_member_origin(backend: IndexBackend, patid: str) -> str:
     """What a lone leftover record's origin should be — 'review' if it still
     has an unresolved review-queue candidate, else 'none'. A singleton can
     never be 'deterministic'/'merge' (those require >=2 members)."""
-    return "review" if store.review_candidates_for_patid(conn, patid) else "none"
+    return "review" if backend.review_candidates_for_patid(patid) else "none"
 
 
 @router.post("/merge", response_model=MergeResponse)
 def merge(
     body: MergeRequest,
-    conn=Depends(get_db),
+    backend: IndexBackend = Depends(get_backend),
     reviewer_id: str = Depends(get_reviewer_id),
 ) -> MergeResponse:
-    target = store.get_entity(conn, body.mid)
+    target = backend.get_entity(body.mid)
     if target is None:
         raise HTTPException(status_code=404, detail=f"Unknown mid: {body.mid}")
 
     now = _now()
     prev_state = "Merged" if target["entity"]["is_merged"] else "Needs review"
 
-    conn.execute("BEGIN")
+    backend.begin()
     try:
         for patid in body.patids:
-            store.upsert_entity_member(
-                conn, patid, body.mid,
+            backend.upsert_entity_member(
+                patid, body.mid,
                 is_primary=False, added_by=reviewer_id, updated_utc=now,
             )
-        store.upsert_entity(
-            conn, body.mid, target["entity"]["run_id"], "merge",
+        backend.upsert_entity(
+            body.mid, target["entity"]["run_id"], "merge",
             is_merged=True, confidence=target["entity"]["confidence"],
             updated_utc=now,
             match_rule=target["entity"].get("match_rule"),
             evidence=f"Manually merged by {reviewer_id}",
         )
-        audit_id = store.insert_audit_log(
-            conn,
+        audit_id = backend.insert_audit_log(
             ts_utc=now, user=reviewer_id, action="merge",
             patids=",".join(body.patids), mid=body.mid,
             prev_state=prev_state, next_state="Merged",
             run_id=target["entity"]["run_id"],
         )
-        conn.commit()
+        backend.commit()
     except Exception:
-        conn.rollback()
+        backend.rollback()
         raise
 
-    detail = store.get_entity(conn, body.mid)
+    detail = backend.get_entity(body.mid)
     return MergeResponse(
-        audit_id=audit_id, entity=_to_entity(conn, detail["entity"], detail["members"])
+        audit_id=audit_id,
+        entity=_to_entity(backend, detail["entity"], detail["members"]),
     )
 
 
 @router.post("/unmerge", response_model=UnmergeResponse)
 def unmerge(
     body: UnmergeRequest,
-    conn=Depends(get_db),
+    backend: IndexBackend = Depends(get_backend),
     reviewer_id: str = Depends(get_reviewer_id),
 ) -> UnmergeResponse:
-    current_mid = store.get_entity_mid_for_patid(conn, body.patid)
+    current_mid = backend.get_entity_mid_for_patid(body.patid)
     if current_mid != body.mid:
         raise HTTPException(
             status_code=404,
@@ -95,59 +96,60 @@ def unmerge(
         )
 
     now = _now()
-    source = store.get_entity(conn, body.mid)
-    new_mid = store.next_mid(conn)
+    source = backend.get_entity(body.mid)
+    new_mid = backend.next_mid()
 
-    conn.execute("BEGIN")
+    backend.begin()
     try:
-        store.upsert_entity(
-            conn, new_mid, source["entity"]["run_id"],
-            _single_member_origin(conn, body.patid),
+        backend.upsert_entity(
+            new_mid, source["entity"]["run_id"],
+            _single_member_origin(backend, body.patid),
             is_merged=False, confidence=None, updated_utc=now,
         )
-        store.upsert_entity_member(
-            conn, body.patid, new_mid,
+        backend.upsert_entity_member(
+            body.patid, new_mid,
             is_primary=True, added_by=reviewer_id, updated_utc=now,
         )
 
         remaining_patids = [
-            m["patid"] for m in store.get_entity(conn, body.mid)["members"]
+            m["patid"] for m in backend.get_entity(body.mid)["members"]
             if m["patid"] != body.patid
         ]
         if len(remaining_patids) <= 1:
             leftover_origin = (
-                _single_member_origin(conn, remaining_patids[0])
+                _single_member_origin(backend, remaining_patids[0])
                 if remaining_patids else source["entity"]["origin"]
             )
-            store.upsert_entity(
-                conn, body.mid, source["entity"]["run_id"], leftover_origin,
+            backend.upsert_entity(
+                body.mid, source["entity"]["run_id"], leftover_origin,
                 is_merged=False, confidence=None, updated_utc=now,
             )
 
-        audit_id = store.insert_audit_log(
-            conn,
+        audit_id = backend.insert_audit_log(
             ts_utc=now, user=reviewer_id, action="unmerge",
             patids=body.patid, mid=new_mid,
             prev_state="Merged", next_state="Unmerged",
             run_id=source["entity"]["run_id"],
         )
-        conn.commit()
+        backend.commit()
     except Exception:
-        conn.rollback()
+        backend.rollback()
         raise
 
-    detail = store.get_entity(conn, new_mid)
+    detail = backend.get_entity(new_mid)
     return UnmergeResponse(
         audit_id=audit_id, new_mid=new_mid,
-        entity=_to_entity(conn, detail["entity"], detail["members"]),
+        entity=_to_entity(backend, detail["entity"], detail["members"]),
     )
 
 
 @router.get("", response_model=list[AuditLogRow])
 def list_audit(
-    limit: int = 100, since: str | None = None, conn=Depends(get_db)
+    limit: int = 100,
+    since: str | None = None,
+    backend: IndexBackend = Depends(get_backend),
 ) -> list[AuditLogRow]:
-    rows = store.list_audit_log(conn, limit=limit, since=since)
+    rows = backend.list_audit_log(limit=limit, since=since)
     return [AuditLogRow(**row) for row in rows]
 
 

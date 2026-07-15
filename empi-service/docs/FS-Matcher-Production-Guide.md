@@ -90,14 +90,20 @@ All commands run from the `empi-service/` directory on the VM (conda env
 python -m src.models.fs_matcher.train
 ```
 
-Auto-resolves the latest cleaned records, the latest candidate-pairs file, and
-the silver labels at `data/silver_labels/silver_labels_v1_2026_06_21.csv`. It
-does an 80/20 stratified split (train the model / measure held-out precision &
+Resolves its `cleaned`/`candidate_pairs` inputs from the **latest `RunManifest`**
+in `data/runs/` (guaranteeing same-run lineage and that the orchestrator's
+stacked blocker produced them, not the narrower standalone `run_blocking.py`
+CLI — see `docs/Data-Contract.md` Stage 2's warning), falling back to
+directory-latest resolution only if no manifest exists yet. Also resolves the
+silver labels at `data/silver_labels/silver_labels_v1_2026_06_21.csv`. It does
+an 80/20 stratified split (train the model / measure held-out precision &
 recall), writes the model + a `.meta.json` with the metrics, and writes the
 **labeled GBT training feature file**. It does **not** activate the model.
 
-Useful flags: `--silver-labels PATH`, `--cleaned-index PATH`,
-`--candidate-pairs PATH`, `--test-size 0.2`, `--split-seed 42`, `--data-version TAG`.
+Useful flags: `--run-id ID` (pin a specific run's manifest instead of the
+latest), `--silver-labels PATH`, `--cleaned-index PATH` / `--candidate-pairs
+PATH` (explicit overrides, skip manifest resolution for that input),
+`--test-size 0.2`, `--split-seed 42`, `--data-version TAG`.
 
 ### 3.2 Train **and** deploy
 

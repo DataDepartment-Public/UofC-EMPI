@@ -1,11 +1,16 @@
-"""Publish step: one pipeline run's Parquet output → `empi.db` (SQLite).
+"""Publish step: one pipeline run's Parquet output → the resolved-output
+index (`empi.db` / SQLite, or the local Parquet index — see
+docs/Data-Contract.md Stage 6).
 
 Loads a `RunManifest`, groups the run's `ClusterAssignments` into entities,
-and upserts them into the resolved-output DB. Never touches the Parquet
-artifacts — they stay the immutable record of "what the algorithm produced".
+and upserts them via `src.api.index_backend.IndexBackend` — never `store`
+directly, and never a raw connection, exactly like `src/api/incremental.py`
+(see that module's docstring for why the storage layer is backend-agnostic).
+Never touches the Parquet pipeline artifacts themselves — they stay the
+immutable record of "what the algorithm produced".
 
 Reconciliation (docs/API-Design.md §2, §6 open decision 1 — "sticky unmerge"):
-a PATID `store.locked_patids` reports as reviewer-touched is **never**
+a PATID `backend.locked_patids` reports as reviewer-touched is **never**
 repointed to a new `mid` here. Its would-be new grouping is written to
 `entity_suggestion` instead — visible for a future admin/reviewer view, not
 auto-applied. Untouched PATIDs upsert normally: reuse an existing `mid` if any
@@ -27,14 +32,24 @@ Raw fields (FR-24, "View Raw Data" drawer): every `*_raw` passthrough column
 from the cleaned dataset is denormalized into `record_raw` as one JSON blob
 per PATID.
 
+Incremental-scoring index (`block_key` / `cleaned_attrs` — see
+`src/api/incremental.py`): every full publish also rebuilds these two tables
+wholesale from `cleaned` — `block_key` is the on-disk equivalent of
+`blocking.BlockingIndex` (a persisted posting list so a later single-record
+score doesn't need to reload the whole population to find candidates), and
+`cleaned_attrs` is a queryable mirror of the `CleanedRecords` contract (so
+rule evaluation for a handful of candidates doesn't need a Parquet read
+either). Both are the self-healing anchor point for indexes `incremental.py`
+otherwise appends to a record at a time.
+
 PERFORMANCE: a real run clusters ~160k records into ~140k entities (see
 `to-do.md` / the full-population smoke run). The whole publish runs as ONE
-SQLite transaction, so it must be fast — issuing one `execute()` (and worse,
-one lookup `SELECT`) per record made an early version of this function take
-minutes and hold a write lock the whole time, causing "database is locked"
-for any concurrent reader. Everything below is planned in pure Python/pandas
-first (dict lookups, no DB round-trips per row), then written with a handful
-of `executemany` calls total.
+backend transaction, so it must be fast — issuing one call (and worse, one
+lookup) per record made an early version of this function take minutes and
+hold a write lock the whole time, causing "database is locked" for any
+concurrent reader (on the SQLite backend). Everything below is planned in
+pure Python/pandas first (dict lookups, no backend round-trips per row), then
+written with a handful of `*_bulk`/`replace_*` backend calls total.
 """
 
 from __future__ import annotations
@@ -46,6 +61,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.api.index_backend import IndexBackend
 from src.config import Settings
 from src.contracts import (
     ADDRESS1,
@@ -56,12 +72,20 @@ from src.contracts import (
     PATID,
     PATID_A,
     PATID_B,
+    PHONES,
     RunManifest,
     SEX,
+    SSN,
     SSN_LAST4,
+    VALID_RECORD,
     ZIP_BASE,
 )
-from src.api import store
+from src.preprocessing.blocking import (
+    HASHED_BLOCKS,
+    _parse_phone_set,
+    build_blocking_index,
+    hash_block_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -235,8 +259,61 @@ def _review_candidate_rows(
     return rows, patids
 
 
-def publish_run(conn, run_id: str, settings: Settings) -> dict:
-    """Publish one run's final output into `empi.db`. Returns summary counts."""
+def _cleaned_attrs_rows(cleaned: pd.DataFrame, run_id: str) -> list[tuple]:
+    """Full-population rows for `store.replace_cleaned_attrs` — restricted to
+    `valid_record` rows, matching what `build_blocking_index` itself includes
+    (an invalid record is never a blocking/rule-evaluation candidate).
+    Column order matches `store._CLEANED_ATTRS_COLUMNS`."""
+    valid = cleaned[cleaned[VALID_RECORD].astype(bool)]
+    if valid.empty:
+        return []
+    dedup = valid.drop_duplicates(subset=PATID, keep="first")
+    birth_dt_str = dedup[BIRTH_DT].dt.strftime("%Y-%m-%d")
+    rows: list[tuple] = []
+    for patid, first, last, birth, ssn, ssn4, email, zip_base, addr, sex, phones in zip(
+        dedup[PATID], dedup[FIRST_NM], dedup[LAST_NM], birth_dt_str,
+        dedup[SSN], dedup[SSN_LAST4], dedup[EMAIL], dedup[ZIP_BASE],
+        dedup[ADDRESS1], dedup[SEX], dedup[PHONES],
+    ):
+        rows.append((
+            patid, _clean_str(first), _clean_str(last),
+            birth if isinstance(birth, str) else None,
+            _clean_str(ssn), _clean_str(ssn4), _clean_str(email),
+            _clean_str(zip_base), _clean_str(addr), _clean_str(sex),
+            json.dumps(sorted(_parse_phone_set(phones))),
+            run_id,
+        ))
+    return rows
+
+
+def _block_key_rows(blocking_index) -> list[tuple]:
+    """Invert a `blocking.BlockingIndex`'s posting lists into `(block_id,
+    key_value, patid)` rows for `backend.replace_block_keys`. B1/B6 key
+    values are hashed (`hash_block_key`) since they are direct identifiers
+    (full SSN, email) — every other block's key is already a lossy derived
+    signal (phonetic code, zip, birth year, name prefix)."""
+    rows: list[tuple] = []
+    scalar_indexes = {
+        "B1": blocking_index.b1_index, "B3": blocking_index.b3_index,
+        "B4": blocking_index.b4_index, "B6": blocking_index.b6_index,
+        "B7": blocking_index.b7_index, "B8": blocking_index.b8_index,
+        "B9": blocking_index.b9_index,
+    }
+    for block_id, index in scalar_indexes.items():
+        hashed = block_id in HASHED_BLOCKS
+        for key_value, patids in index.items():
+            stored_key = hash_block_key(str(key_value)) if hashed else str(key_value)
+            for patid in patids:
+                rows.append((block_id, stored_key, patid))
+    for phone, patids in blocking_index.b5_phone_index.items():
+        for patid in patids:
+            rows.append(("B5", phone, patid))
+    return rows
+
+
+def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
+    """Publish one run's final output via `backend` (SQLite or Parquet local
+    mode — see `src/api/index_backend.py`). Returns summary counts."""
     manifest = _load_manifest(run_id, settings)
 
     clusters = pd.read_parquet(_resolve(manifest.clusters.path, settings))
@@ -253,14 +330,19 @@ def publish_run(conn, run_id: str, settings: Settings) -> dict:
     raw_by_patid = _raw_index(cleaned)
     conf_by_patid = _confidence_by_patid(matches)
     pair_evidence = _pair_evidence_index(matches)
-    locked = store.locked_patids(conn)
-    existing_mid_by_patid = store.all_entity_member_mids(conn)
-    next_seq = store.max_mid_sequence(conn) + 1
+    locked = backend.locked_patids()
+    existing_mid_by_patid = backend.all_entity_member_mids()
+    next_seq = backend.max_mid_sequence() + 1
     now = _now()
 
     review_candidate_rows, review_patids = _review_candidate_rows(
         non_matches, review_evidence, run_id, now
     )
+
+    # Incremental-scoring index rebuild — pure Python/pandas, no DB round-trips
+    # (see module docstring's PERFORMANCE note; same principle applies here).
+    cleaned_attrs_rows = _cleaned_attrs_rows(cleaned, run_id)
+    block_key_rows = _block_key_rows(build_blocking_index(cleaned))
 
     counts = {
         "clusters_seen": 0,
@@ -269,6 +351,8 @@ def publish_run(conn, run_id: str, settings: Settings) -> dict:
         "locked_skipped": 0,
         "suggestions_written": 0,
         "review_candidates": len(review_candidate_rows),
+        "cleaned_attrs_indexed": len(cleaned_attrs_rows),
+        "block_keys_indexed": len(block_key_rows),
     }
 
     entity_rows: list[tuple] = []
@@ -340,25 +424,29 @@ def publish_run(conn, run_id: str, settings: Settings) -> dict:
             if raw_row is not None:
                 raw_rows.append(raw_row)
 
-    conn.execute("BEGIN")
+    backend.begin()
     try:
-        store.upsert_entities_bulk(conn, entity_rows)
-        store.upsert_entity_members_bulk(conn, member_rows)
-        store.upsert_record_attrs_bulk(conn, attrs_rows)
-        store.upsert_record_raw_bulk(conn, raw_rows)
-        store.upsert_suggestions_bulk(conn, suggestion_rows)
-        store.replace_review_candidates_for_run(conn, run_id, review_candidate_rows)
-        conn.commit()
+        backend.upsert_entities_bulk(entity_rows)
+        backend.upsert_entity_members_bulk(member_rows)
+        backend.upsert_record_attrs_bulk(attrs_rows)
+        backend.upsert_record_raw_bulk(raw_rows)
+        backend.upsert_suggestions_bulk(suggestion_rows)
+        backend.replace_review_candidates_for_run(run_id, review_candidate_rows)
+        backend.replace_cleaned_attrs(cleaned_attrs_rows)
+        backend.replace_block_keys(block_key_rows)
+        backend.commit()
     except Exception:
-        conn.rollback()
+        backend.rollback()
         raise
 
     logger.info(
         "Published run %s: %d clusters, %d entities, %d members, "
-        "%d locked-skipped, %d suggestions, %d review candidates",
+        "%d locked-skipped, %d suggestions, %d review candidates, "
+        "%d cleaned_attrs indexed, %d block_keys indexed",
         run_id, counts["clusters_seen"], counts["entities_upserted"],
         counts["members_upserted"], counts["locked_skipped"],
         counts["suggestions_written"], counts["review_candidates"],
+        counts["cleaned_attrs_indexed"], counts["block_keys_indexed"],
     )
     return counts
 

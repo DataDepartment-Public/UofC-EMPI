@@ -70,6 +70,8 @@ from src.contracts import (
     SEX,
     SSN,
     SSN_LAST4,
+    TIER_HUMAN_REVIEW,
+    TIER_NO_MATCH,
     VALID_RECORD,
     ZIP_BASE,
 )
@@ -234,7 +236,7 @@ def _score_one_record(
         decided = classify_non_matches(candidate_pairs, confirmed, mini_clean)
         pair_cols = ["PATID_A", "PATID_B", "source_blocks", "n_blocks"]
         non_matches = pd.concat(
-            [review_confirmed[pair_cols], decided[decided["decision"] == "review"][pair_cols]]
+            [review_confirmed[pair_cols], decided[decided["decision"] == TIER_HUMAN_REVIEW][pair_cols]]
         ).reset_index(drop=True)
 
     target_mid = _resolve_auto_merge(backend, patid, matches, run_id, now, outcome)
@@ -254,7 +256,7 @@ def _score_one_record(
         backend.upsert_entity_member(
             patid, target_mid, is_primary=True, added_by="pipeline", updated_utc=now,
         )
-        outcome["tier"] = "review" if has_review else "no_match"
+        outcome["tier"] = TIER_HUMAN_REVIEW if has_review else TIER_NO_MATCH
 
     outcome["mid"] = target_mid
 
@@ -374,7 +376,7 @@ def score_records(
     `backend` transaction. Returns one outcome dict per input record, in
     order: `{"patid", "tier", "mid", "match_rule", "confidence",
     "matched_patids", "fs_match_probability", "fs_classification_tier"}`;
-    `tier` is one of `"auto_merge" | "review" | "no_match" | "invalid"`.
+    `tier` is one of `"auto_merge" | "human_review" | "no_match" | "invalid"`.
     """
     outcomes = []
     for raw in records:

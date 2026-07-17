@@ -336,6 +336,8 @@ class ParquetIndexBackend:
         ssn_last4: str | None = None,
         updated_after: str | None = None,
         updated_before: str | None = None,
+        confidence_min: float | None = None,
+        confidence_max: float | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[dict], int]:
@@ -343,7 +345,10 @@ class ParquetIndexBackend:
         the entity set the same way the SQL version's WHERE clauses do:
         `search`/`birth_date`/`ssn_last4` are member-level (computed as "the
         set of mids with >=1 matching member", then ANDed together and with
-        the scalar entity-level filters)."""
+        the scalar entity-level filters). `confidence_min`/`confidence_max`
+        exclude NaN confidence the same way SQL NULL comparisons do — pandas'
+        comparison operators against NaN are already False, so no explicit
+        `.notna()` guard is needed."""
         entities = self._tables["entity"]
         members = self._tables["entity_member"]
         attrs = self._tables["record_attrs"][
@@ -353,13 +358,17 @@ class ParquetIndexBackend:
 
         mask = pd.Series(True, index=entities.index)
         if origin is not None:
-            mask &= entities["origin"] == origin
+            mask &= entities["origin"].isin(origin.split(","))
         if is_merged is not None:
             mask &= entities["is_merged"] == int(is_merged)
         if updated_after:
             mask &= entities["updated_utc"] >= updated_after
         if updated_before:
             mask &= entities["updated_utc"] <= updated_before
+        if confidence_min is not None:
+            mask &= entities["confidence"] >= confidence_min
+        if confidence_max is not None:
+            mask &= entities["confidence"] <= confidence_max
 
         if search:
             like = search.lower()
@@ -457,6 +466,76 @@ class ParquetIndexBackend:
             .sort_values(["confidence", "patid_a", "patid_b"], ascending=[False, True, True])
         )
         return [_row_to_dict(row) for _, row in joined.iterrows()]
+
+    def list_review_candidates(
+        self,
+        *,
+        confidence_min: float | None = None,
+        confidence_max: float | None = None,
+        reviewed: bool | None = None,
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[dict], int]:
+        """Pandas equivalent of `store.list_review_candidates` — candidate-grain
+        (one row per pair, not per cluster). "Reviewed" mirrors the SQL
+        version: both sides sharing a `mid` today (merged), or a prior
+        `dismiss` audit_log entry for the exact pair."""
+        rc = self._tables["review_candidate"]
+        members = self._tables["entity_member"][["patid", "mid"]]
+        attrs = self._tables["record_attrs"][_DISPLAY_ATTR_COLUMNS]
+
+        mid_a = members.rename(columns={"patid": "patid_a", "mid": "mid_a"})
+        mid_b = members.rename(columns={"patid": "patid_b", "mid": "mid_b"})
+        a_attrs = attrs.add_prefix("a_").rename(columns={"a_patid": "patid_a"})
+        b_attrs = attrs.add_prefix("b_").rename(columns={"b_patid": "patid_b"})
+
+        joined = (
+            rc.merge(mid_a, on="patid_a", how="inner")
+            .merge(mid_b, on="patid_b", how="inner")
+            .merge(a_attrs, on="patid_a", how="left")
+            .merge(b_attrs, on="patid_b", how="left")
+        )
+
+        member_counts = members.groupby("mid").size()
+        joined["member_count_a"] = joined["mid_a"].map(member_counts).fillna(0).astype(int)
+        joined["member_count_b"] = joined["mid_b"].map(member_counts).fillna(0).astype(int)
+
+        dismissed_pairs = set()
+        audit = self._tables["audit_log"]
+        for _, row in audit.loc[audit["action"] == "dismiss", "patids"].items():
+            dismissed_pairs.add(row)
+        joined["reviewed"] = (joined["mid_a"] == joined["mid_b"]) | (
+            joined["patid_a"] + "," + joined["patid_b"]
+        ).isin(dismissed_pairs)
+
+        mask = pd.Series(True, index=joined.index)
+        if confidence_min is not None:
+            mask &= joined["confidence"] >= confidence_min
+        if confidence_max is not None:
+            mask &= joined["confidence"] <= confidence_max
+        if search:
+            like = search.lower()
+            mask &= (
+                joined["a_first_name"].str.lower().str.contains(like, na=False)
+                | joined["a_last_name"].str.lower().str.contains(like, na=False)
+                | joined["b_first_name"].str.lower().str.contains(like, na=False)
+                | joined["b_last_name"].str.lower().str.contains(like, na=False)
+                | joined["patid_a"].str.lower().str.contains(like, na=False)
+                | joined["patid_b"].str.lower().str.contains(like, na=False)
+            )
+        if reviewed is True:
+            mask &= joined["reviewed"]
+        elif reviewed is False:
+            mask &= ~joined["reviewed"]
+
+        filtered = joined[mask].sort_values(
+            ["confidence", "patid_a", "patid_b"], ascending=[False, True, True]
+        )
+        total = len(filtered)
+        start = max(page - 1, 0) * page_size
+        page_rows = filtered.iloc[start : start + page_size]
+        return [_row_to_dict(row) for _, row in page_rows.iterrows()], total
 
     # ── Reviewer audit log (src/api/routers/audit.py) ───────────────────────
     def insert_audit_log(

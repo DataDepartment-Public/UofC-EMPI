@@ -470,7 +470,7 @@ class TestIncrementalAgainstParquetBackend:
         finally:
             backend.close()
         outcome = outcomes[0]
-        assert outcome["tier"] == "review"
+        assert outcome["tier"] == "human_review"
         entity = ParquetIndexBackend(settings.local_index_dir)
         try:
             got = entity.get_entity(outcome["mid"])

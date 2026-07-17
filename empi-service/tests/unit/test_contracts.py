@@ -22,6 +22,8 @@ from src.contracts import (
     Matches,
     NonMatches,
     Rejects,
+    TIER_HUMAN_REVIEW,
+    TIER_NO_MATCH,
     assert_patid_coverage,
     validate,
 )
@@ -151,7 +153,7 @@ def _rejects(**override) -> pd.DataFrame:
         "source_blocks": ["B1"],
         "n_blocks": [1],
         "n_contradictions": [3],
-        "decision": ["reject"],
+        "decision": [TIER_NO_MATCH],
         "reject_rule": ["STRONG_ID_CONFLICT"],
     }
     base.update(override)
@@ -164,7 +166,7 @@ class TestRejects:
 
     def test_rejects_non_reject_decision(self):
         with pytest.raises(_SCHEMA_ERR):
-            validate(_rejects(decision=["review"]), Rejects)
+            validate(_rejects(decision=[TIER_HUMAN_REVIEW]), Rejects)
 
     def test_rejects_unknown_reject_rule(self):
         with pytest.raises(_SCHEMA_ERR):

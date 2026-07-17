@@ -1,0 +1,151 @@
+"""Unit tests for MLMatcher (src/models/ml_matcher/matcher.py).
+
+Mirrors test_fs_matcher_base.py's classify-threshold pattern (same cutoffs,
+same inclusive-boundary behavior) plus the BYOM/BYOF plumbing specific to the
+ML matcher: predict()'s no-model guard, run()'s 5-col projection, and the
+train() stub.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.contracts import ClassificationResults, validate
+from src.models.ml_matcher.base import ClassificationConfig
+from src.models.ml_matcher.matcher import MLMatcher, MODEL_NAME
+
+
+class _FakeModel:
+    """Sklearn-shaped fake — predict_proba returns a fixed probability."""
+
+    def __init__(self, positive_proba: float = 0.9, as_1d: bool = False):
+        self.positive_proba = positive_proba
+        self.as_1d = as_1d
+
+    def fit(self, X, y):
+        return self
+
+    def predict_proba(self, X):
+        n = len(X)
+        if self.as_1d:
+            return np.full(n, self.positive_proba)
+        return np.column_stack([np.full(n, 1 - self.positive_proba), np.full(n, self.positive_proba)])
+
+
+class _FakeFeatureBuilder:
+    def build_features(self, candidate_pairs, df_clean, fs_features=None):
+        out = candidate_pairs[["PATID_A", "PATID_B"]].copy()
+        out["feat1"] = 1.0
+        return out
+
+
+def _pairs() -> pd.DataFrame:
+    return pd.DataFrame({"PATID_A": ["A", "C"], "PATID_B": ["B", "D"]})
+
+
+def _clean() -> pd.DataFrame:
+    return pd.DataFrame({"PATID": ["A", "B", "C", "D"]})
+
+
+# ─── classify: tier thresholds (inclusive) — mirrors FSModel.classify() ───────
+@pytest.mark.parametrize(
+    "score, expected",
+    [
+        (0.39, "no_match"),
+        (0.40, "human_review"),   # review_floor inclusive
+        (0.94, "human_review"),
+        (0.95, "auto_merge"),     # auto_merge_threshold inclusive
+        (0.999, "auto_merge"),
+    ],
+)
+def test_classify_thresholds_inclusive(score, expected):
+    out = MLMatcher().classify(pd.DataFrame({"match_probability": [score]}))
+    assert out["classification_tier"].iloc[0] == expected
+
+
+def test_classify_respects_custom_thresholds():
+    cfg = ClassificationConfig(auto_merge_threshold=0.8, review_floor=0.2)
+    out = MLMatcher(classification_config=cfg).classify(
+        pd.DataFrame({"match_probability": [0.5]})
+    )
+    assert out["classification_tier"].iloc[0] == "human_review"
+
+
+# ─── predict() ──────────────────────────────────────────────────────────────────
+def test_predict_raises_without_attached_model():
+    features = pd.DataFrame({"PATID_A": ["A"], "PATID_B": ["B"], "feat1": [1.0]})
+    with pytest.raises(RuntimeError, match="no model attached"):
+        MLMatcher().predict(features)
+
+
+def test_predict_uses_positive_class_column_from_2d_proba():
+    features = pd.DataFrame({"PATID_A": ["A"], "PATID_B": ["B"], "feat1": [1.0]})
+    out = MLMatcher(model=_FakeModel(0.73)).predict(features)
+    assert out["match_probability"].iloc[0] == pytest.approx(0.73)
+
+
+def test_predict_accepts_1d_proba_output():
+    features = pd.DataFrame({"PATID_A": ["A"], "PATID_B": ["B"], "feat1": [1.0]})
+    out = MLMatcher(model=_FakeModel(0.42, as_1d=True)).predict(features)
+    assert out["match_probability"].iloc[0] == pytest.approx(0.42)
+
+
+# ─── run() — the PairClassifier entry point ────────────────────────────────────
+def test_run_produces_classification_results_shape():
+    m = MLMatcher(model=_FakeModel(0.99), feature_builder=_FakeFeatureBuilder())
+    out = m.run(_pairs(), _clean())
+    assert list(out.columns) == ["PATID_A", "PATID_B", "model_name", "score", "predicted_tier"]
+    assert (out["model_name"] == MODEL_NAME).all()
+    assert (out["predicted_tier"] == "auto_merge").all()
+    validate(out, ClassificationResults, allow_empty=False)
+
+
+def test_run_passes_fs_features_through_to_builder():
+    seen = {}
+
+    class RecordingBuilder:
+        def build_features(self, candidate_pairs, df_clean, fs_features=None):
+            seen["fs_features"] = fs_features
+            out = candidate_pairs[["PATID_A", "PATID_B"]].copy()
+            out["feat1"] = 1.0
+            return out
+
+    fs_feats = pd.DataFrame({"PATID_A": ["A"], "PATID_B": ["B"], "gamma_dob": [2]})
+    m = MLMatcher(model=_FakeModel(0.5), feature_builder=RecordingBuilder())
+    m.run(_pairs(), _clean(), fs_features=fs_feats)
+    assert seen["fs_features"] is fs_feats
+
+
+# ─── to_ml_features() ───────────────────────────────────────────────────────────
+def _classified() -> pd.DataFrame:
+    return pd.DataFrame({
+        "PATID_A": ["a", "a"], "PATID_B": ["b", "c"],
+        "match_probability": [0.98, 0.10],
+        "classification_tier": ["auto_merge", "no_match"],
+        "feat1": [1.0, 2.0],
+    })
+
+
+def test_to_ml_features_keeps_feature_columns():
+    out = MLMatcher().to_ml_features(_classified(), candidates_only=False)
+    assert "feat1" in out.columns
+    assert len(out) == 2
+
+
+def test_to_ml_features_candidates_only_filters_below_review_floor():
+    out = MLMatcher().to_ml_features(_classified(), candidates_only=True)
+    assert len(out) == 1
+    assert out.iloc[0]["PATID_B"] == "b"
+
+
+def test_to_ml_features_raises_on_missing_columns():
+    with pytest.raises(ValueError, match="missing columns"):
+        MLMatcher().to_ml_features(pd.DataFrame({"PATID_A": ["a"]}))
+
+
+# ─── train() — deliberate stub ─────────────────────────────────────────────────
+def test_train_raises_not_implemented():
+    with pytest.raises(NotImplementedError, match="scaffold stub"):
+        MLMatcher().train(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())

@@ -454,6 +454,97 @@ def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[di
     return [dict(r) for r in rows]
 
 
+def list_review_candidates(
+    conn: sqlite3.Connection,
+    *,
+    confidence_min: float | None = None,
+    confidence_max: float | None = None,
+    reviewed: bool | None = None,
+    search: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[dict], int]:
+    """Paginated, candidate-grain review queue — one row per pending pair,
+    not per cluster (docs/Dashboard-Guide.md's Review Queue: the same cluster
+    can surface multiple candidates, and each should appear once here).
+
+    A pair counts as "reviewed" if either:
+      * both sides currently share a `mid` (the merge already happened —
+        mirrors the client-side `pendingCandidates` filter in
+        `DatasetRow.tsx`), or
+      * a `dismiss` audit_log entry exists for the exact `(patid_a, patid_b)`
+        pair (the reviewer's "Not a match" action — `POST /audit/dismiss`).
+
+    `reviewed=False` (the default queue) excludes both; `reviewed=True`
+    surfaces only them ("Already reviewed"). Default order is confidence
+    DESC, with NULL-confidence (blocking-only, no rule fired) pairs last —
+    same convention as `review_candidates_for_patid`.
+    """
+    where = []
+    params: list = []
+    if confidence_min is not None:
+        where.append("rc.confidence >= ?")
+        params.append(confidence_min)
+    if confidence_max is not None:
+        where.append("rc.confidence <= ?")
+        params.append(confidence_max)
+    if search:
+        where.append(
+            "(ra_a.first_name LIKE ? OR ra_a.last_name LIKE ? OR "
+            "ra_b.first_name LIKE ? OR ra_b.last_name LIKE ? OR "
+            "rc.patid_a LIKE ? OR rc.patid_b LIKE ?)"
+        )
+        like = f"%{search}%"
+        params.extend([like, like, like, like, like, like])
+
+    reviewed_expr = (
+        "(ema.mid = emb.mid OR EXISTS ("
+        "SELECT 1 FROM audit_log al WHERE al.action = 'dismiss' "
+        "AND al.patids = rc.patid_a || ',' || rc.patid_b))"
+    )
+    if reviewed is True:
+        where.append(reviewed_expr)
+    elif reviewed is False:
+        where.append(f"NOT {reviewed_expr}")
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+
+    base_from = """
+        FROM review_candidate rc
+        JOIN entity_member ema ON ema.patid = rc.patid_a
+        JOIN entity_member emb ON emb.patid = rc.patid_b
+        LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
+        LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
+    """
+
+    total = conn.execute(
+        f"SELECT COUNT(*) AS n {base_from} {where_sql}", params
+    ).fetchone()["n"]
+
+    offset = max(page - 1, 0) * page_size
+    rows = conn.execute(
+        f"""
+        SELECT rc.*, ema.mid AS mid_a, emb.mid AS mid_b,
+               ra_a.first_name AS a_first_name, ra_a.last_name AS a_last_name,
+               ra_a.birth_date AS a_birth_date, ra_a.ssn_last4 AS a_ssn_last4,
+               ra_a.email AS a_email, ra_a.zip_code AS a_zip_code,
+               ra_a.address1 AS a_address1, ra_a.sex AS a_sex, ra_a.phone AS a_phone,
+               ra_b.first_name AS b_first_name, ra_b.last_name AS b_last_name,
+               ra_b.birth_date AS b_birth_date, ra_b.ssn_last4 AS b_ssn_last4,
+               ra_b.email AS b_email, ra_b.zip_code AS b_zip_code,
+               ra_b.address1 AS b_address1, ra_b.sex AS b_sex, ra_b.phone AS b_phone,
+               (SELECT COUNT(*) FROM entity_member em WHERE em.mid = ema.mid) AS member_count_a,
+               (SELECT COUNT(*) FROM entity_member em WHERE em.mid = emb.mid) AS member_count_b,
+               {reviewed_expr} AS reviewed
+        {base_from}
+        {where_sql}
+        ORDER BY rc.confidence DESC NULLS LAST, rc.id
+        LIMIT ? OFFSET ?
+        """,
+        [*params, page_size, offset],
+    ).fetchall()
+    return [dict(r) for r in rows], total
+
+
 def patids_with_review_candidates(conn: sqlite3.Connection) -> set[str]:
     """Every PATID appearing on either side of any `review_candidate` row —
     used to upgrade a singleton entity's `origin` from `'none'` to `'review'`."""
@@ -520,6 +611,8 @@ def list_entities(
     ssn_last4: str | None = None,
     updated_after: str | None = None,
     updated_before: str | None = None,
+    confidence_min: float | None = None,
+    confidence_max: float | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
@@ -529,21 +622,30 @@ def list_entities(
     patient name, masked SSN, birthdate, match status, merge status,
     last-updated date):
       * `search` — case-insensitive substring against PATID/mid/first/last name.
-      * `origin` — match status ('deterministic' | 'review' | 'merge' | 'none').
+      * `origin` — match status ('deterministic' | 'review' | 'merge' | 'none'),
+        or a comma-separated list of any of those (e.g. the Patient Registry
+        view's "final clusters only" = "deterministic,merge,none", excluding
+        'review' — still-pending candidates belong in the Review Queue, not
+        the resolved registry).
       * `is_merged` — merge status, independent of origin (a reviewer-merge is
         `origin='merge'` AND `is_merged=1`; this lets a caller ask for "any
         merged entity" without caring how it got there).
       * `birth_date` — exact `YYYY-MM-DD` match against any member.
       * `ssn_last4` — exact 4-digit match against any member.
       * `updated_after` / `updated_before` — ISO-8601 bounds on `updated_utc`.
+      * `confidence_min` / `confidence_max` — bounds on `e.confidence`. Entities
+        with a NULL confidence (no deterministic rule fired) are excluded by
+        either bound, same as SQL's normal NULL comparison semantics — a caller
+        wanting those back should leave both bounds unset.
 
     Returns (rows, total_count).
     """
     where = []
     params: list = []
     if origin is not None:
-        where.append("e.origin = ?")
-        params.append(origin)
+        origins = origin.split(",")
+        where.append(f"e.origin IN ({','.join('?' for _ in origins)})")
+        params.extend(origins)
     if is_merged is not None:
         where.append("e.is_merged = ?")
         params.append(int(is_merged))
@@ -553,6 +655,12 @@ def list_entities(
     if updated_before:
         where.append("e.updated_utc <= ?")
         params.append(updated_before)
+    if confidence_min is not None:
+        where.append("e.confidence >= ?")
+        params.append(confidence_min)
+    if confidence_max is not None:
+        where.append("e.confidence <= ?")
+        params.append(confidence_max)
     if search:
         where.append(
             "(e.mid LIKE ? OR EXISTS (SELECT 1 FROM entity_member em2 "

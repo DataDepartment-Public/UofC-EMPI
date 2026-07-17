@@ -3,7 +3,7 @@
 import { Suspense, use } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { compareRecords, plainLanguageSummary } from "@/lib/compare";
+import { compareRecords } from "@/lib/compare";
 import { decodeExplainPayload } from "@/lib/explain";
 import { fullName } from "@/lib/format";
 import { FeatureComparisonTable } from "@/components/FeatureComparisonTable";
@@ -47,7 +47,16 @@ function ExplainPageContent({ mid }: { mid: string }) {
     );
   }
 
-  const { patientA, patientB, rule, confidence, evidence, updated } = payload;
+  const {
+    patientA,
+    patientB,
+    rule,
+    confidence,
+    evidence,
+    updated,
+    fsMatchProbability,
+    fsClassificationTier,
+  } = payload;
   const rows = compareRecords(patientA, patientB);
   const predictedClass = rule ? "Confirmed duplicate (rule-matched)" : "Uncertain — pending review";
 
@@ -60,13 +69,18 @@ function ExplainPageContent({ mid }: { mid: string }) {
           Match explanation — {fullName(patientA.first_name, patientA.last_name)} vs{" "}
           {fullName(patientB.first_name, patientB.last_name)}
         </h2>
+        <p
+          className="mt-0.5 font-mono text-[11px] text-gray"
+          title="Patient IDs compared"
+        >
+          {patientA.patid} vs {patientB.patid}
+        </p>
         <p className="mt-1 text-[13px] text-gray">
           Why this pair was — or wasn&apos;t yet — classified as a likely duplicate.
         </p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-        <MetaCard label="Patients compared" value={`${patientA.patid.slice(0, 10)}… vs ${patientB.patid.slice(0, 10)}…`} mono />
         <MetaCard label="Rule fired" value={rule ?? "None (unconfirmed)"} />
         <MetaCard label="Predicted class" value={predictedClass} />
         <MetaCard label="Rule confidence" value={confidence != null ? confidence.toFixed(3) : "—"} mono />
@@ -83,7 +97,11 @@ function ExplainPageContent({ mid }: { mid: string }) {
           Every field the deterministic rules consider, compared exactly as the
           pipeline sees them (cleaned/normalized values, not raw source text).
         </p>
-        <FeatureComparisonTable rows={rows} />
+        <FeatureComparisonTable
+          rows={rows}
+          patidA={patientA.patid}
+          patidB={patientB.patid}
+        />
       </div>
 
       {evidence && evidence !== rule && (
@@ -95,11 +113,29 @@ function ExplainPageContent({ mid }: { mid: string }) {
         </div>
       )}
 
-      <div className="card mt-5 border-[#cfe6f7] bg-[#f3f9fe] p-5">
-        <h4 className="mb-2 text-[15px] font-semibold text-brand-blue">
-          Plain-language summary
-        </h4>
-        <p className="text-[14px] text-ink-2">{plainLanguageSummary(rule, rows)}</p>
+      <div className="card mt-5 flex items-center justify-between gap-4 border-[#cfe6f7] bg-[#f3f9fe] p-5">
+        <div>
+          <h4 className="text-[15px] font-semibold text-brand-blue">
+            FS matcher signal
+          </h4>
+          <p className="mt-1 max-w-md text-xs text-gray-2">
+            {fsMatchProbability != null
+              ? "Audit-only signal from the Fellegi-Sunter matcher — feeds a future GBT model, not a scored decision on this pair."
+              : "Not scored for this run. The FS matcher only runs on candidates scored via incremental scoring; this pair came from a full batch publish, which doesn't invoke it yet."}
+          </p>
+        </div>
+        {fsMatchProbability != null && (
+          <div className="text-right">
+            <div className="text-2xl font-extrabold text-brand-blue tabular-nums">
+              {Math.round(fsMatchProbability * 100)}%
+            </div>
+            {fsClassificationTier && (
+              <div className="text-xs font-semibold text-gray-2">
+                {fsClassificationTier}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

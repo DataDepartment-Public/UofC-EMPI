@@ -78,6 +78,11 @@ export const ReviewCandidateSchema = z.object({
   source_blocks: z.string().nullable(),
   patient_a: CandidatePatientSchema,
   patient_b: CandidatePatientSchema,
+  // Audit-only FS matcher signal — feeds a future GBT, not a scored decision.
+  // Only populated for candidates scored via the incremental path; null for
+  // candidates from a full batch publish.
+  fs_match_probability: z.number().nullable().optional(),
+  fs_classification_tier: z.string().nullable().optional(),
 });
 export type ReviewCandidate = z.infer<typeof ReviewCandidateSchema>;
 
@@ -110,6 +115,37 @@ export const RecordsPageSchema = z.object({
   items: z.array(EntitySchema),
 });
 export type RecordsPage = z.infer<typeof RecordsPageSchema>;
+
+export const ReviewQueueItemSchema = z.object({
+  patid_a: z.string(),
+  patid_b: z.string(),
+  mid_a: z.string(),
+  mid_b: z.string(),
+  member_count_a: z.number(),
+  member_count_b: z.number(),
+  match_rule: z.string().nullable(),
+  confidence: z.number().nullable(),
+  evidence: z.string().nullable(),
+  source_blocks: z.string().nullable(),
+  fs_match_probability: z.number().nullable().optional(),
+  fs_classification_tier: z.string().nullable().optional(),
+  reviewed: z.boolean(),
+  patient_a: CandidatePatientSchema,
+  patient_b: CandidatePatientSchema,
+});
+export type ReviewQueueItem = z.infer<typeof ReviewQueueItemSchema>;
+
+export const ReviewQueuePageSchema = z.object({
+  total: z.number(),
+  page: z.number(),
+  page_size: z.number(),
+  items: z.array(ReviewQueueItemSchema),
+});
+export type ReviewQueuePage = z.infer<typeof ReviewQueuePageSchema>;
+
+export const DismissResponseSchema = z.object({
+  audit_id: z.number(),
+});
 
 export const RawRecordSchema = z.object({
   patid: z.string(),
@@ -157,7 +193,7 @@ export const AuditLogRowSchema = z.object({
   id: z.number(),
   ts_utc: z.string(),
   user: z.string(),
-  action: z.enum(["merge", "unmerge", "split"]),
+  action: z.enum(["merge", "unmerge", "split", "dismiss"]),
   patids: z.string(),
   mid: z.string(),
   prev_state: z.string(),

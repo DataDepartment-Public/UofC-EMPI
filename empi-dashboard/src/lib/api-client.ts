@@ -9,6 +9,7 @@ import {
   AuditLogRowSchema,
   DashboardSummary,
   DashboardSummarySchema,
+  DismissResponseSchema,
   Entity,
   EntitySchema,
   MergeResponseSchema,
@@ -16,6 +17,8 @@ import {
   RawRecordSchema,
   RecordsPage,
   RecordsPageSchema,
+  ReviewQueuePage,
+  ReviewQueuePageSchema,
   RunCreateResponse,
   RunCreateResponseSchema,
   RunDetail,
@@ -57,6 +60,17 @@ export interface RecordsFilters {
   is_merged?: boolean;
   birth_date?: string;
   ssn_last4?: string;
+  confidence_min?: number;
+  confidence_max?: number;
+  page?: number;
+  page_size?: number;
+}
+
+export interface ReviewQueueFilters {
+  search?: string;
+  confidence_min?: number;
+  confidence_max?: number;
+  reviewed?: boolean;
   page?: number;
   page_size?: number;
 }
@@ -78,6 +92,12 @@ export const api = {
 
   listRecords: (filters: RecordsFilters = {}) =>
     call<RecordsPage>(RecordsPageSchema, `/api/records${toQuery(filters)}`),
+
+  listReviewQueue: (filters: ReviewQueueFilters = {}) =>
+    call<ReviewQueuePage>(
+      ReviewQueuePageSchema,
+      `/api/review-queue${toQuery(filters)}`,
+    ),
 
   getCluster: (mid: string) =>
     call<Entity>(EntitySchema, `/api/clusters/${encodeURIComponent(mid)}`),
@@ -126,6 +146,13 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mid, patid }),
+    }),
+
+  dismiss: (patidA: string, patidB: string) =>
+    call(DismissResponseSchema, "/api/audit/dismiss", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ patid_a: patidA, patid_b: patidB }),
     }),
 };
 

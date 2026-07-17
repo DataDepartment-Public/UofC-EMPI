@@ -96,9 +96,15 @@ buckets. The split is by **rule tier** (`apply_rules` + the `AUTO_MERGE_RULES` /
 
 | Decision | Condition | Destination |
 |----------|-----------|-------------|
-| **match** | confirmed by an **auto-merge-tier** rule (`SSN_DOB` / `NAME_DOB_EMAIL` / `NAME_DOB_PHONE`) | auto-merge |
-| **review** | confirmed **only** by a review-tier rule (`NAME_DOB_SEX` / `NAME_DOB_ADDRESS`), **OR** no rule fired and < 3 contradictions | `data/non_matches/` → downstream probabilistic / ML stage |
-| **reject** | no rule fired **and ≥3 strong identifiers strictly disagree** (full SSN / first / last / DOB) | dropped — written to `data/rejects/` for audit, **not** sent downstream |
+| **auto_merge** | confirmed by an **auto-merge-tier** rule (`SSN_DOB` / `NAME_DOB_EMAIL` / `NAME_DOB_PHONE`) | auto-merge |
+| **human_review** | confirmed **only** by a review-tier rule (`NAME_DOB_SEX` / `NAME_DOB_ADDRESS`), **OR** no rule fired and < 3 contradictions | `data/non_matches/` → downstream probabilistic / ML stage |
+| **no_match** | no rule fired **and ≥3 strong identifiers strictly disagree** (full SSN / first / last / DOB) | dropped — written to `data/rejects/` for audit, **not** sent downstream |
+
+This is the same three-way vocabulary (`contracts.CLASSIFICATION_TIERS`) the
+FS matcher and the pluggable ML matcher use — see
+`src.models.deterministic_rules.DeterministicRulesClassifier`, which adapts
+this functional API onto the shared `src.models.base.PairClassifier`
+interface all three classifier stages implement.
 
 A review-tier rule confirmation is **never** reject-scored: `apply_rules` returns it
 as a confirmed pair (so `classify_non_matches` excludes it from the contradiction
@@ -125,9 +131,9 @@ Reflecting **both** 2026-06-29 changes — the [stacked blocker](Blocking-Guide.
 
 | Decision | Pairs | Notes |
 |----------|-------|-------|
-| match (auto-merge) | 23,155 | confirmed by an auto-merge-tier rule |
-| review | 57,666 | 21,842 review-tier rule confirmations + 35,824 unconfirmed (<3 contradictions) → probabilistic stage |
-| reject | 28,240 | `STRONG_ID_CONFLICT` (≥3 contradictions); dropped |
+| auto_merge | 23,155 | confirmed by an auto-merge-tier rule |
+| human_review | 57,666 | 21,842 review-tier rule confirmations + 35,824 unconfirmed (<3 contradictions) → probabilistic stage |
+| no_match | 28,240 | `STRONG_ID_CONFLICT` (≥3 contradictions); dropped |
 | *(candidate pairs)* | *109,061* | from the stacked blocker |
 
 > **How the two changes compose.** On the raw 8-block candidate set (204,805) the

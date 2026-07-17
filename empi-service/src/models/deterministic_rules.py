@@ -22,25 +22,30 @@ INPUTS:
 PUBLIC API:
     apply_rules(candidate_pairs, df_clean)      -> pd.DataFrame (confirmed pairs)
     get_non_matches(candidate_pairs, matches)   -> pd.DataFrame (unconfirmed pairs)
-    classify_non_matches(pairs, matches, clean) -> pd.DataFrame (+ reject/review)
+    classify_non_matches(pairs, matches, clean) -> pd.DataFrame (+ no_match/human_review)
     get_match_stats(matches, n_records)         -> dict         (audit report)
 
     Connected-component clustering now lives in `src/models/clustering.py`
     (stage 5 of the pipeline) — see `assign_clusters` / `build_cluster_assignments`
     there. `get_match_stats` imports it for the cluster-size stats below.
 
+    `DeterministicRulesClassifier` (bottom of this module) adapts this
+    functional API to `src.models.base.PairClassifier` — the same shared
+    interface the FS matcher and the ML matcher satisfy.
+
 THREE-WAY DECISION:
-    Each candidate pair lands in one of three buckets:
-      * match  — confirmed by an AUTO-MERGE-tier rule (`apply_rules`)  -> auto-merge
-      * reject — a confident non-match (>= 3 strong contradictions)    -> dropped
-      * review — confirmed only by a REVIEW-tier rule, OR unconfirmed
-                 with < 3 contradictions                              -> probabilistic
+    Each candidate pair lands in one of three buckets — the same vocabulary
+    used by every classifier stage (`src.contracts.CLASSIFICATION_TIERS`):
+      * auto_merge   — confirmed by an AUTO-MERGE-tier rule (`apply_rules`)
+      * no_match     — a confident non-match (>= 3 strong contradictions), dropped
+      * human_review — confirmed only by a REVIEW-tier rule, OR unconfirmed
+                       with < 3 contradictions -> probabilistic stage
     `apply_rules` returns every pair any rule confirmed (both tiers, with the
     winning `match_rule`); the caller routes them by tier via `AUTO_MERGE_RULES` /
-    `REVIEW_RULES`. `classify_non_matches` assigns reject/review to the pairs no
-    rule confirmed. NAME_DOB_SEX and NAME_DOB_ADDRESS are REVIEW-tier (~65% / ~67%
-    silver precision) — they fire and keep provenance but never auto-merge on their
-    own. See docs/Deterministic-Rules-Guide.md.
+    `REVIEW_RULES`. `classify_non_matches` assigns no_match/human_review to the
+    pairs no rule confirmed. NAME_DOB_SEX and NAME_DOB_ADDRESS are REVIEW-tier
+    (~65% / ~67% silver precision) — they fire and keep provenance but never
+    auto-merge on their own. See docs/Deterministic-Rules-Guide.md.
 
 OUTPUT SCHEMA (matches DataFrame):
     PATID_A        str   — canonical first PATID (carried from blocking)
@@ -71,6 +76,11 @@ import numpy as np
 import pandas as pd
 
 from src.config import settings
+from src.contracts import (
+    TIER_AUTO_MERGE,
+    TIER_HUMAN_REVIEW,
+    TIER_NO_MATCH,
+)
 from src.models.clustering import assign_clusters
 
 logger = logging.getLogger(__name__)
@@ -136,13 +146,14 @@ _CONTRADICTION_COLS = (COL_SSN, COL_FIRST_NM, COL_LAST_NM, COL_BIRTH_DT)
 
 # ── Rule definitions ──────────────────────────────────────────────────────────
 # A rule's tier decides what a confirmed pair *does*, not whether it fires:
-#   * "auto_merge" — the pair is auto-merged (the `match` decision).
-#   * "review"     — the pair is routed to the downstream probabilistic / clerical
-#                    review stage instead of being auto-merged.
+#   * "auto_merge"   — the pair is auto-merged (the `auto_merge` decision).
+#   * "human_review" — the pair is routed to the downstream probabilistic /
+#                      clerical review stage instead of being auto-merged.
 # Every rule still fires and records full provenance regardless of tier; only the
 # routing differs. See `AUTO_MERGE_RULES` / `REVIEW_RULES` below.
-TIER_AUTO_MERGE = "auto_merge"
-TIER_REVIEW = "review"
+# TIER_AUTO_MERGE / TIER_HUMAN_REVIEW / TIER_NO_MATCH are imported from
+# src.contracts — the single source of truth for this vocabulary, shared with
+# the FS matcher and the ML matcher (src.models.base.PairClassifier).
 
 
 @dataclass(frozen=True)
@@ -177,7 +188,7 @@ class MatchRule:
 # docs/Deterministic-Rules-Guide.md "Evaluation"). Email is only trustworthy when
 # corroborated by name + DOB, which is exactly NAME_DOB_EMAIL.
 #
-# NAME_DOB_SEX and NAME_DOB_ADDRESS are tier "review", NOT auto-merge. Against the
+# NAME_DOB_SEX and NAME_DOB_ADDRESS are tier "human_review", NOT auto-merge. Against the
 # silver labels they adjudicate at only ~65% / ~67% precision and carry essentially
 # all of the false merges: name + DOB + sex is not a unique identity (a common
 # name, shared birthday, and sex collide on real data), and a shared street address
@@ -190,9 +201,9 @@ RULES: tuple[MatchRule, ...] = (
     MatchRule("SSN_DOB", 1.000, ("ssn", "dob")),
     MatchRule("NAME_DOB_EMAIL", 0.990, ("first", "last", "dob", "email")),
     MatchRule("NAME_DOB_PHONE", 0.985, ("first", "last", "dob", "phone")),
-    MatchRule("NAME_DOB_SEX", 0.980, ("first", "last", "dob", "sex"), TIER_REVIEW),
+    MatchRule("NAME_DOB_SEX", 0.980, ("first", "last", "dob", "sex"), TIER_HUMAN_REVIEW),
     MatchRule(
-        "NAME_DOB_ADDRESS", 0.970, ("first", "last", "dob", "address"), TIER_REVIEW
+        "NAME_DOB_ADDRESS", 0.970, ("first", "last", "dob", "address"), TIER_HUMAN_REVIEW
     ),
 )
 
@@ -202,7 +213,7 @@ AUTO_MERGE_RULES: frozenset[str] = frozenset(
     r.name for r in RULES if r.tier == TIER_AUTO_MERGE
 )
 REVIEW_RULES: frozenset[str] = frozenset(
-    r.name for r in RULES if r.tier == TIER_REVIEW
+    r.name for r in RULES if r.tier == TIER_HUMAN_REVIEW
 )
 
 
@@ -669,8 +680,8 @@ def classify_non_matches(
     -------
     pd.DataFrame
         The `get_non_matches` frame plus three columns: `n_contradictions` (int),
-        `decision` (`"reject"` / `"review"`), and `reject_rule` (the firing reject
-        rule's name on rejected rows, else NA).
+        `decision` (`TIER_NO_MATCH` / `TIER_HUMAN_REVIEW`), and `reject_rule`
+        (the firing reject rule's name on rejected rows, else NA).
     """
     reject_rule = REJECT_RULES[0]
     non_matches = get_non_matches(candidate_pairs, matches)
@@ -684,13 +695,13 @@ def classify_non_matches(
     frame = _materialize_pairs(non_matches, df_clean)
     n_contradictions = _count_contradictions(frame, reject_rule.fields)
     is_reject = n_contradictions >= min_contradictions
-    decision = np.where(is_reject, "reject", "review")
+    decision = np.where(is_reject, TIER_NO_MATCH, TIER_HUMAN_REVIEW)
 
     out = non_matches.copy()
     out["n_contradictions"] = n_contradictions.to_numpy()
     out["decision"] = decision
     out["reject_rule"] = np.where(is_reject, reject_rule.name, pd.NA)
-    n_reject = int((out["decision"] == "reject").sum())
+    n_reject = int((out["decision"] == TIER_NO_MATCH).sum())
     logger.info(
         "Three-way split of %d unconfirmed pairs: %d reject (>=%d "
         "contradictions, dropped), %d review (-> probabilistic stage).",
@@ -744,9 +755,9 @@ def get_match_stats(
     if decided is not None:
         dvc = decided["decision"].value_counts() if not decided.empty else {}
         decision_distribution = {
-            "match": len(matches),
-            "review": int(dvc.get("review", 0)) + n_review_confirmed,
-            "reject": int(dvc.get("reject", 0)),
+            TIER_AUTO_MERGE: len(matches),
+            TIER_HUMAN_REVIEW: int(dvc.get(TIER_HUMAN_REVIEW, 0)) + n_review_confirmed,
+            TIER_NO_MATCH: int(dvc.get(TIER_NO_MATCH, 0)),
         }
 
     rule_counts = matches["match_rule"].value_counts().to_dict()
@@ -826,3 +837,88 @@ def _empty_matches(candidate_pairs: pd.DataFrame) -> pd.DataFrame:
         if passthrough in candidate_pairs.columns:
             cols.append(passthrough)
     return pd.DataFrame(columns=cols)
+
+
+# ── PairClassifier adapter ──────────────────────────────────────────────────
+_CLASSIFICATION_RESULTS_COLS = ("PATID_A", "PATID_B", "model_name", "score", "predicted_tier")
+
+
+def _to_classification_results(
+    frame: pd.DataFrame,
+    *,
+    model_name: str,
+    tier: str | None = None,
+    tier_col: str | None = None,
+    score_col: str | None = None,
+) -> pd.DataFrame:
+    """Project a rules-stage frame to the shared 5-col `ClassificationResults`
+    shape. Exactly one of `tier` (fixed for every row) or `tier_col` (a
+    per-row tier column, e.g. `decided["decision"]`) is used."""
+    n = len(frame)
+    if n == 0:
+        return pd.DataFrame(columns=list(_CLASSIFICATION_RESULTS_COLS))
+    predicted_tier = frame[tier_col].to_numpy() if tier_col else tier
+    score = frame[score_col].to_numpy() if score_col else np.nan
+    return pd.DataFrame(
+        {
+            "PATID_A": frame["PATID_A"].to_numpy(),
+            "PATID_B": frame["PATID_B"].to_numpy(),
+            "model_name": model_name,
+            "score": score,
+            "predicted_tier": predicted_tier,
+        }
+    )
+
+
+class DeterministicRulesClassifier:
+    """Adapter exposing the deterministic-rules functional API through the
+    shared `src.models.base.PairClassifier` interface.
+
+    Delegates entirely to `apply_rules`/`classify_non_matches` — no new
+    matching logic lives here. This exists for uniformity with the FS and ML
+    matchers (e.g. any future cross-model tooling built against
+    `PairClassifier`), not to replace `src/pipeline.py`'s Stage 3, which
+    calls the underlying functions directly to produce the richer
+    `Matches`/`NonMatches`/`Rejects` artifacts this adapter's minimal 5-col
+    frame can't carry (cluster_id, rules_fired, is_suspicious, ...).
+    """
+
+    model_name = "deterministic_rules"
+
+    def __init__(
+        self,
+        ssn_fanout_threshold: int = DEFAULT_SSN_FANOUT_THRESHOLD,
+        min_contradictions: int = DEFAULT_REJECT_MIN_CONTRADICTIONS,
+    ):
+        self.ssn_fanout_threshold = ssn_fanout_threshold
+        self.min_contradictions = min_contradictions
+
+    def run(
+        self, candidate_pairs: pd.DataFrame, df_clean: pd.DataFrame, **kwargs: object
+    ) -> pd.DataFrame:
+        """Classify every candidate pair; returns a frame satisfying
+        `src.contracts.ClassificationResults`."""
+        confirmed = apply_rules(candidate_pairs, df_clean, self.ssn_fanout_threshold)
+        decided = classify_non_matches(
+            candidate_pairs, confirmed, df_clean, self.min_contradictions
+        )
+        is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
+        auto = confirmed[is_auto]
+        review_confirmed = confirmed[~is_auto]
+
+        return pd.concat(
+            [
+                _to_classification_results(
+                    auto, model_name=self.model_name,
+                    tier=TIER_AUTO_MERGE, score_col="confidence",
+                ),
+                _to_classification_results(
+                    review_confirmed, model_name=self.model_name,
+                    tier=TIER_HUMAN_REVIEW, score_col="confidence",
+                ),
+                _to_classification_results(
+                    decided, model_name=self.model_name, tier_col="decision",
+                ),
+            ],
+            ignore_index=True,
+        )

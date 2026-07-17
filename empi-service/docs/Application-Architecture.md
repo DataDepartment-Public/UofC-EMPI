@@ -48,7 +48,7 @@ Three tiers, each with one job:
 |---|---|---|
 | **Front-end** | Node.js · Next.js · React · TypeScript | Reviewer UI, identity/session, BFF proxy |
 | **Backend API** | Python · FastAPI · uvicorn | Pipeline orchestration, resolved-output DB, audit |
-| **Pipeline** (existing) | Python · pandas · pandera | `clean → block → rules → cluster`, unchanged |
+| **Pipeline** (existing) | Python · pandas · pandera | `clean → block → rules → [FS matcher] → [ML matcher] → cluster` (see `docs/Data-Contract.md`) |
 
 The split keeps the data-science code (Python) and the interactive app code
 (Node/React) in their native ecosystems, talking over a versioned JSON contract.

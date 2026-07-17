@@ -4,11 +4,15 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
 
-/** FR-1/2/3: top nav (logo + title) + the two top-level tabs. Tab switches
- * are client-side Next.js navigation — no full page reload. */
+/** FR-1/2/3: top nav (logo + title) + the top-level tabs (Dashboard /
+ * Review Queue / Patient Registry). Tab switches are client-side Next.js
+ * navigation — no full page reload. "Patient Registry" is the clinical-facing
+ * label for the `/dataset` route — the final, resolved patient list, as
+ * opposed to Review Queue's in-progress candidate work. */
 export function TopNav() {
   const pathname = usePathname();
   const onDataset = pathname.startsWith("/dataset");
+  const onReview = pathname.startsWith("/review");
 
   return (
     <div className="sticky top-0 z-50">
@@ -31,11 +35,14 @@ export function TopNav() {
         </div>
       </header>
       <nav className="flex gap-1 border-b border-line bg-white px-6">
-        <TabLink href="/" active={!onDataset}>
+        <TabLink href="/" active={!onDataset && !onReview}>
           Dashboard
         </TabLink>
+        <TabLink href="/review" active={onReview}>
+          Review Queue
+        </TabLink>
         <TabLink href="/dataset" active={onDataset}>
-          Dataset
+          Patient Registry
         </TabLink>
       </nav>
     </div>

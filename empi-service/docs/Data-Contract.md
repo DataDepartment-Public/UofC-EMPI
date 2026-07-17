@@ -53,18 +53,30 @@ _Last updated: 2026-07-14._
        │          │
        │   ┌──────▼────────────────────┐
        │   │ 4. FS MATCHER              │  src/models/fs_matcher/               [IMPLEMENTED]
-       │   │ (candidate/feature         │  candidate + feature generator for
-       │   │  generator for a           │  a downstream GBT — does NOT feed
-       │   │  downstream GBT)           │  clustering
+       │   │ (candidate/feature         │  candidate + feature generator,
+       │   │  generator)                │  PairClassifier-shaped
        │   └──┬───────────────────┬─────┘
        │  data/matches_model/  data/FS_output/
-       │  (audit, no reader)   (GBT candidates, no reader yet)
+       │  (audit, or feeds     (candidates, or feeds
+       │   clustering if       a downstream model if
+       │   fs_feeds_clustering) ml_feeds_clustering consumes it)
+       │          │
+       │   ┌──────▼────────────────────┐
+       │   │ 4.5 ML MATCHER              │  src/models/ml_matcher/              [SCAFFOLD]
+       │   │ (pluggable candidate/      │  bring-your-own-model/-features;
+       │   │  feature generator)        │  same PairClassifier shape as FS
+       │   └──┬───────────────────┬─────┘
+       │  data/matches_ml/     data/ML_output/
+       │  (audit, or feeds     (candidates)
+       │   clustering if
+       │   ml_feeds_clustering)
        │
    ┌───▼─────────────────────────────┐
    │ 5. CLUSTERING                    │  src/models/clustering.py                [IMPLEMENTED]
-   │   (deterministic auto-merge      │  — terminal stage; does NOT union in
-   │    edges only)                   │    Stage 4 output (team decision)
-   └──────────────┬───────────────────┘
+   │   (deterministic auto-merge      │  — terminal stage; unions in Stage 4/4.5
+   │    edges, + Stage 4/4.5 edges    │    auto_merge edges ONLY when
+   │    if their toggle is on)        │    fs_feeds_clustering/ml_feeds_clustering
+   └──────────────┬───────────────────┘    is explicitly turned on (both default off)
    data/clusters/cluster_assignments_*.parquet
                   │
    ┌──────────────▼───────────────┐
@@ -74,7 +86,7 @@ _Last updated: 2026-07-14._
    data/empi.db  (or  data/local_index/*.parquet)
 ```
 
-**Entry point.** The canonical way to run all five stages is the orchestrator
+**Entry point.** The canonical way to run all stages is the orchestrator
 `src/pipeline.py` (`python -m src.pipeline`), which runs them in process,
 threads one `run_id` through every artifact name, validates each boundary
 against `src/contracts.py`, and writes a `RunManifest` to
@@ -89,8 +101,20 @@ orchestrator never reads it, and neither does the API. `run_blocking.py` in
 particular produces a **structurally different, narrower** candidate pool than
 the orchestrator (see Stage 2) — never substitute one for the other.
 
-All six stages are implemented and in production, on both of stage 6's
-backends (SQLite and Parquet local mode — see its own section).
+Stages 1-3, 4, and 6 are implemented and in production, on both of stage 6's
+backends (SQLite and Parquet local mode — see its own section). Stage 4.5
+(the ML matcher) is **scaffolding**: the pluggable interface, pipeline wiring,
+registry, and contracts are real; feature preprocessing and model training
+are a deliberate stub pending a real implementation — see
+`docs/ML-Matcher-Integration-Guide.md`.
+
+Stage 4 and Stage 4.5 are structurally identical — both implement
+`src.models.base.PairClassifier` (`run(candidate_pairs, df_clean) ->
+ClassificationResults`), the same interface `src.models.deterministic_rules.
+DeterministicRulesClassifier` adapts the rules engine onto. All three
+classifier stages emit the shared 5-column `ClassificationResults` shape
+(`PATID_A, PATID_B, model_name, score, predicted_tier`), so they can be
+compared, swapped, or unioned into clustering uniformly.
 
 ---
 
@@ -310,8 +334,8 @@ routing below differs by tier.
 |---|---|---|---|
 | `PATID_A` / `PATID_B` / `source_blocks` / `n_blocks` | (as `CandidatePairs`) | no | Passthrough from blocking. |
 | `n_contradictions` | int64 | no | Count of strong-identifier disagreements. |
-| `decision` | string | no | Always `"reject"` in this artifact. |
-| `reject_rule` | string | no | The reject rule that fired (`contracts.REJECT_RULE_NAMES` = `("STRONG_ID_CONFLICT",)`) — always populated here, since every row that survives the `decision == "reject"` filter already fired it. |
+| `decision` | string | no | Always `"no_match"` in this artifact (`contracts.TIER_NO_MATCH`). |
+| `reject_rule` | string | no | The reject rule that fired (`contracts.REJECT_RULE_NAMES` = `("STRONG_ID_CONFLICT",)`) — always populated here, since every row that survives the `decision == TIER_NO_MATCH` filter already fired it. |
 
 **Invariant:** `matches ⊎ non_matches ⊎ rejects == candidate_pairs` (disjoint
 union), keyed on `(PATID_A, PATID_B)`.
@@ -326,12 +350,16 @@ union), keyed on `(PATID_A, PATID_B)`.
   (`registry.resolve_active_model`) and the `non_matches` pool is non-empty;
   otherwise Stage 4 is skipped with a clear log line.
 - **Role:** scores the Stage 3 `non_matches` pool and surfaces a **candidate +
-  feature set for a downstream GBT** — it does **not** produce edges for
-  clustering. Full MLOps lifecycle (train/promote/serve/swap, config knobs,
-  deploy-gate): `docs/FS-Matcher-Production-Guide.md`. The trained model
-  artifacts themselves (`fs_model_<ts>.json`, `.meta.json`, `active.json`)
-  live in `models/fs/` — not under `data/` — gitignored, VM-populated; see
-  that guide for the full store layout.
+  feature set**. Implements `src.models.base.PairClassifier` (same shape as
+  Stage 4.5's ML matcher and the deterministic-rules adapter), so its output
+  is also projected to the uniform `ClassificationResults` frame
+  (`FSMatcher.to_evaluation_schema`). By default its `auto_merge`-tier output
+  does **not** feed clustering — see `settings.fs_feeds_clustering` (default
+  `False`) to change that. Full MLOps lifecycle (train/promote/serve/swap,
+  config knobs, deploy-gate): `docs/FS-Matcher-Production-Guide.md`. The
+  trained model artifacts themselves (`fs_model_<ts>.json`, `.meta.json`,
+  `active.json`) live in `models/fs/` — not under `data/` — gitignored,
+  VM-populated; see that guide for the full store layout.
 - **Training input resolution:** `train.py` resolves its `cleaned` +
   `candidate_pairs` inputs from the **latest `RunManifest`**
   (`data/runs/run_<run_id>.json`), not by globbing "newest file in a
@@ -345,8 +373,8 @@ union), keyed on `(PATID_A, PATID_B)`.
 - **Contract:** `contracts.ProbabilisticMatches` (`strict=True`).
 - **Location:** `data/matches_model/matches_model_<run_id>.parquet`
 - **Grain:** every scored `non_matches` pair, all tiers including `no_match`.
-- **Status:** terminal — no downstream reader today. Kept for auditability;
-  deliberately **not** unioned into clustering.
+- **Status:** audit frame; no downstream reader other than Stage 5's optional
+  edge union (see below) when `settings.fs_feeds_clustering` is on.
 
 | Column | Dtype | Nullable | Notes |
 |---|---|---|---|
@@ -354,11 +382,11 @@ union), keyed on `(PATID_A, PATID_B)`.
 | `match_source` | string | no | Always `"model"`. |
 | `score` | float64 | no | Match probability, `[0.0, 1.0]`. |
 | `match_weight` | float64 | no | Log-Bayes-factor match weight. |
-| `classification_tier` | string | no | ∈ `{auto_merge, human_review, no_match}` — **informational only**; Stage 4 routes nothing, it labels tiers for audit/the GBT. |
+| `classification_tier` | string | no | ∈ `{auto_merge, human_review, no_match}` (`contracts.CLASSIFICATION_TIERS`) — routes into clustering only when `settings.fs_feeds_clustering` is on; otherwise informational/audit only. |
 | `veto_reason` | string | yes (optional) | Present only if the producer applies a veto layer; the production matcher omits the column entirely. |
 | `source_blocks` / `n_blocks` | string / int64 | yes | Passthrough from blocking, where available. |
 
-### 4b — FSFeatures (the GBT deliverable)
+### 4b — FSFeatures (the candidate deliverable)
 
 - **Contract:** `contracts.FSFeatures` (`strict=False` — `gamma_<field>` /
   `bf_<field>` feature columns are dynamic extras, checked for presence by
@@ -369,40 +397,90 @@ union), keyed on `(PATID_A, PATID_B)`.
 - **Grain:** candidates only — filtered to `match_probability >=
   settings.fs_review_floor` (0.40 default; doubles as the tier boundary *and*
   the candidate cutoff).
-- **Status:** terminal today — no in-repo GBT consumer yet; this is the
-  contract a future GBT training/serving path will read.
+- **Status:** its intended consumer is a downstream trained model — either the
+  ML matcher (Stage 4.5, which can join on this frame via its optional
+  `fs_features` input) or a bespoke offline GBT training run.
 
 | Column | Dtype | Nullable | Notes |
 |---|---|---|---|
 | `PATID_A` / `PATID_B` | string | no | Canonical pair. |
 | `match_probability` | float64 | no | Same as `ProbabilisticMatches.score`. |
 | `match_weight` | float64 | no | Same as `ProbabilisticMatches.match_weight`. |
-| `classification_tier` | string | no | Informational, as above. |
+| `classification_tier` | string | no | Same as `ProbabilisticMatches.classification_tier`, above. |
 | `label` | float64 (0.0/1.0) | yes | Present (non-null) only on the training feature set; absent/null when scoring. |
 | `gamma_<field>` (×7) | int | no | Per-comparison level index (one per Splink comparison: FirstNM, LastNM, BirthDT, SSN, Email, Phones, Address). |
 | `bf_<field>` (×N) | float64 | no | Per-comparison Bayes-factor bits, incl. `bf_tf_adj_*` for term-frequency-adjusted fields. |
 
 ---
 
+## Stage 4.5 — ML matcher (pluggable candidate/feature generator)  `[SCAFFOLD]`
+
+- **Producer:** `src/models/ml_matcher/` (`MLMatcher.score` for serving,
+  `python -m src.models.ml_matcher.train` — a CLI skeleton whose training
+  call is a deliberate stub). Invoked from `src/pipeline.py` when an active
+  model is resolvable (`ml_matcher.registry.resolve_active_model`) and the
+  `non_matches` pool is non-empty; otherwise Stage 4.5 is skipped with a
+  clear log line — structurally identical gating to Stage 4.
+- **Role:** structurally identical to Stage 4 — implements
+  `src.models.base.PairClassifier`, scores the same `non_matches` pool, and
+  emits the same shape of audit + candidate artifacts. Two differences from
+  Stage 4: (1) bring-your-own-model (`src.models.ml_matcher.base.MLModel`,
+  scikit-learn-shaped `fit`/`predict_proba` duck typing) and
+  bring-your-own-features (`FeatureBuilder`, run directly off
+  `candidate_pairs`/`df_clean`, optionally enriched with Stage 4's
+  `FSFeatures`); (2) model training/serialization is genuinely unimplemented
+  — see `docs/ML-Matcher-Integration-Guide.md` for the extension contract a
+  real model needs to satisfy.
+- **Status:** scaffold. The pluggable interface, pipeline wiring, registry
+  (active-model pointer + deploy-gate, mirroring Stage 4's), and contracts
+  below are real and enforced; `MLMatcher.train()` raises
+  `NotImplementedError` until a real training implementation exists.
+
+### 4.5a — matches_ml (full audit frame, ClassificationResults-shaped)
+
+- **Contract:** `contracts.ClassificationResults` (the same shared 5-column
+  shape every classifier stage emits — see the Pipeline overview note).
+- **Location:** `data/matches_ml/matches_ml_<run_id>.parquet`
+- **Grain:** every scored `non_matches` pair, all tiers.
+- **Status:** audit frame; feeds Stage 5's optional edge union when
+  `settings.ml_feeds_clustering` is on.
+
+### 4.5b — MLFeatures (the candidate deliverable)
+
+- **Contract:** `contracts.MLFeatures` (`strict=False` — BYOF means feature
+  column names/count are the implementer's choice; only the pair key is
+  validated by name, via `validate_ml_features`).
+- **Location:** `data/ML_output/ml_features_<run_id>.parquet`
+- **Grain:** candidates only — filtered to `match_probability >=
+  settings.ml_review_floor` (0.40 default).
+
+---
+
 ## Stage 5 — Clustering  `[IMPLEMENTED]`
 
 `src/models/clustering.py` is the terminal stage of `src/pipeline.py`, run
-once per pipeline invocation after stage 3. **It clusters deterministic
-auto-merge matches only** (`AUTO_MERGE_RULES`-tier pairs) — review-tier
-confirmations, non-matches, and the Stage 4 FS output are all excluded. Stage
-3 still stamps a per-pair `cluster_id` onto `matches` (via
+once per pipeline invocation after stages 3, 4, and 4.5. **By default it
+clusters deterministic auto-merge matches only** (`AUTO_MERGE_RULES`-tier
+pairs) — review-tier confirmations and non-matches are excluded, and the
+Stage 4/4.5 classifier output is excluded too *unless explicitly turned on*.
+Stage 3 still stamps a per-pair `cluster_id` onto `matches` (via
 `clustering.assign_clusters`, used internally by
 `deterministic_rules.get_match_stats` for audit stats), but the authoritative,
 singleton-inclusive assignment is `clustering.build_cluster_assignments`'s
 output, written to `data/clusters/`.
 
-**This is a deliberate, current design decision, not a placeholder awaiting
-Stage 4:** the team decided the FS matcher is a candidate/feature generator
-for a downstream GBT, not an edge source, so its output does **not** union
-into clustering — `contracts.Edges` (below) is *not on the roadmap*.
+**Configurable edge union:** `settings.fs_feeds_clustering` /
+`settings.ml_feeds_clustering` (both default `False`) independently control
+whether Stage 4's / Stage 4.5's `auto_merge`-tier `ClassificationResults` rows
+(projected to `contracts.Edges` via `src.models.base.to_edges`) union into the
+edge set clustering runs union-find over. With both off — the out-of-the-box
+configuration — clustering input is byte-identical to `matches` alone. This
+activates what `contracts.Edges` (below) was originally defined for.
 
-- **Input:** `matches` (deterministic auto-merge edges) + `cleaned` (for the
-  full valid-record population, so singletons get a cluster too).
+- **Input:** `matches` (deterministic auto-merge edges), optionally unioned
+  with Stage 4's and/or Stage 4.5's `auto_merge`-tier edges per the toggles
+  above, + `cleaned` (for the full valid-record population, so singletons get
+  a cluster too).
 - **Algorithm:** union-find / connected components over `(PATID_A, PATID_B)`.
 - **Output:** `contracts.ClusterAssignments` — one row per valid record incl.
   singletons, written to `data/clusters/cluster_assignments_<run_id>.parquet`
@@ -416,13 +494,15 @@ into clustering — `contracts.Edges` (below) is *not on the roadmap*.
 Future merge-safety controls (don't bridge a suspicious edge, cap cluster
 size, correlation clustering) belong in this stage.
 
-### `contracts.Edges` — not on the current roadmap
+### `contracts.Edges`
 
 A uniform edge schema (`PATID_A`, `PATID_B`, `confidence`, `match_source`,
-`evidence`) that would let clustering consume one concatenated
-deterministic+probabilistic frame is still defined in `contracts.py` as a
-historical placeholder, but **no stage produces it and none is planned to** —
-see the design decision above. Don't build against it.
+`evidence`) letting clustering consume one concatenated
+deterministic+probabilistic/ML frame. Produced by `src.models.base.to_edges`,
+projecting the `auto_merge`-tier rows of any `ClassificationResults` frame.
+Unioned into Stage 5's clustering input only when `fs_feeds_clustering` /
+`ml_feeds_clustering` is on (see above) — with both off, no stage produces an
+`Edges` frame and clustering behaves exactly as it always has.
 
 ---
 
@@ -675,6 +755,7 @@ specifically to replace fragile "latest version in the directory" resolution —
 | `raw_input`, `cleaned`, `candidate_pairs`, `matches`, `non_matches` | `ArtifactRef` | Always populated. |
 | `rejects`, `clusters`, `review_evidence` | `ArtifactRef`, optional | Populated by every current run; optional for backward-compat with older manifest shapes. |
 | `matches_model`, `fs_features` | `ArtifactRef`, optional | Populated **only** when an active FS model scored the run (null if Stage 4 was skipped). |
+| `matches_ml`, `ml_features` | `ArtifactRef`, optional | Populated **only** when an active ML model scored the run (null if Stage 4.5 was skipped — the common case today, since ml_matcher ships with no trained model). |
 | `counts` | `dict[str, int]` | `raw_rows`, `cleaned_rows`, `valid_records`, `candidate_pairs`, `matches`, `non_matches`, `rejects`, `clusters`, `total_clusters`. |
 
 Each `ArtifactRef` carries a project-root-relative `path`, `rows`, and a
@@ -695,14 +776,17 @@ whether that's by design.
 | `data/matches/` | Stage 3 (auto-merge tier) | `src/api/publish.py`, `src/evaluation/rule_eval.py` | Active |
 | `data/non_matches/` | Stage 3 (`non_matches_*` + `review_evidence_*` companion) | Stage 4 (scores `non_matches`), `src/api/publish.py` (both files) | Active |
 | `data/rejects/` | Stage 3 | *(none)* | Terminal — audit only, no reader |
-| `data/matches_model/` | Stage 4 (`ProbabilisticMatches`) | *(none)* | Terminal — audit only, deliberately not unioned into clustering |
-| `data/FS_output/` | Stage 4 (pipeline candidates + `train.py` labeled training set) | *(none yet)* | Terminal today — the contract a future GBT will read |
+| `data/matches_model/` | Stage 4 (`ProbabilisticMatches`) | *(none, unless `fs_feeds_clustering` is on)* | Audit by default; feeds Stage 5's edge union when explicitly turned on |
+| `data/FS_output/` | Stage 4 (pipeline candidates + `train.py` labeled training set) | Stage 4.5 (`fs_features` enrichment input, optional) | Active — a real consumer now exists |
+| `data/matches_ml/` | Stage 4.5 (`ClassificationResults`) | *(none, unless `ml_feeds_clustering` is on)* | Audit by default; feeds Stage 5's edge union when explicitly turned on |
+| `data/ML_output/` | Stage 4.5 (pipeline candidates) | *(none yet)* | Scaffold — no in-repo consumer until a real model is trained |
 | `data/clusters/` | Stage 5 | `src/api/publish.py` | Active |
 | `data/runs/` | `src/pipeline.py` (`RunManifest`) | `src/api/publish.py`, `fs_matcher/train.py` (input resolution), `scripts/build_eval_workbook.py` | Active |
 | `data/silver_labels/` | *(external, VM-only)* | `fs_matcher/train.py` | VM-only PHI input, gitignored |
 | `data/empi.db` | `src/api/publish.py` | `src/api/store.py` + routers | Active — serves the review dashboard |
 | `data/local_index/` | `src/api/publish.py` / `publish_local.py` (batch), `src/api/incremental.py` / `local_score.py` (incremental) | `src/api/parquet_backend.py`-backed routes (records/dashboard/audit), `src/api/local_score.py` | Active — full parity with `data/empi.db` (Stage 6) |
 | `models/fs/` *(not under `data/`)* | `fs_matcher/train.py` | Stage 4 (`registry.resolve_active_model`) | See `docs/FS-Matcher-Production-Guide.md` for the full model-store layout |
+| `models/ml/` *(not under `data/`)* | `ml_matcher/train.py` (scaffold — training unimplemented) | Stage 4.5 (`ml_matcher.registry.resolve_active_model`) | See `docs/ML-Matcher-Integration-Guide.md` |
 
 ---
 

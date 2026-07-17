@@ -223,7 +223,7 @@ class TestReviewTier:
             run_id="r1",
         )
         outcome = outcomes[0]
-        assert outcome["tier"] == "review"
+        assert outcome["tier"] == "human_review"
         entity = store.get_entity(conn, outcome["mid"])
         assert entity["entity"]["origin"] == "review"
         assert entity["entity"]["is_merged"] == 0

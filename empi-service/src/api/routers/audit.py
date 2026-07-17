@@ -17,6 +17,8 @@ from src.api.index_backend import IndexBackend
 from src.api.routers.records import _to_entity
 from src.api.schemas import (
     AuditLogRow,
+    DismissRequest,
+    DismissResponse,
     MergeRequest,
     MergeResponse,
     UnmergeRequest,
@@ -141,6 +143,43 @@ def unmerge(
         audit_id=audit_id, new_mid=new_mid,
         entity=_to_entity(backend, detail["entity"], detail["members"]),
     )
+
+
+@router.post("/dismiss", response_model=DismissResponse)
+def dismiss(
+    body: DismissRequest,
+    backend: IndexBackend = Depends(get_backend),
+    reviewer_id: str = Depends(get_reviewer_id),
+) -> DismissResponse:
+    """Mark a review-queue candidate "Not a match" — the reviewer's
+    considered rejection of a false-positive suggestion, distinct from
+    simply leaving it unreviewed. Recorded as an audit_log entry only; no
+    entity/member mutation, since the pair was never merged. The queue query
+    (`store.list_review_candidates`) excludes any pair with a prior `dismiss`
+    entry from the default "Needs review" view — it moves to "Already
+    reviewed" instead of reappearing indefinitely."""
+    mid = backend.get_entity_mid_for_patid(
+        body.patid_a
+    ) or backend.get_entity_mid_for_patid(body.patid_b)
+    if mid is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Neither {body.patid_a} nor {body.patid_b} has a known mid.",
+        )
+
+    backend.begin()
+    try:
+        audit_id = backend.insert_audit_log(
+            ts_utc=_now(), user=reviewer_id, action="dismiss",
+            patids=f"{body.patid_a},{body.patid_b}", mid=mid,
+            prev_state="Needs review", next_state="Dismissed",
+            run_id=None,
+        )
+        backend.commit()
+    except Exception:
+        backend.rollback()
+        raise
+    return DismissResponse(audit_id=audit_id)
 
 
 @router.get("", response_model=list[AuditLogRow])

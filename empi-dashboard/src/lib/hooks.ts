@@ -1,13 +1,18 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, RecordsFilters } from "./api-client";
+import { api, RecordsFilters, ReviewQueueFilters } from "./api-client";
 
 /** FR-40: any workflow action must refresh Dashboard KPIs, the status
  * chart, and the dataset list. Centralizing the query keys + this
  * invalidation set is what makes that "automatic" — every mutation below
- * invalidates all three. */
-const REFRESH_KEYS = [["dashboard-summary"], ["records"], ["audit"]] as const;
+ * invalidates all four. */
+const REFRESH_KEYS = [
+  ["dashboard-summary"],
+  ["records"],
+  ["review-queue"],
+  ["audit"],
+] as const;
 
 export function useDashboardSummary() {
   return useQuery({
@@ -21,6 +26,13 @@ export function useRecords(filters: RecordsFilters) {
   return useQuery({
     queryKey: ["records", filters],
     queryFn: () => api.listRecords(filters),
+  });
+}
+
+export function useReviewQueue(filters: ReviewQueueFilters) {
+  return useQuery({
+    queryKey: ["review-queue", filters],
+    queryFn: () => api.listReviewQueue(filters),
   });
 }
 
@@ -81,6 +93,15 @@ export function useUnmergeMutation() {
   return useMutation({
     mutationFn: ({ mid, patid }: { mid: string; patid: string }) =>
       api.unmerge(mid, patid),
+    onSuccess: refresh,
+  });
+}
+
+export function useDismissMutation() {
+  const refresh = useRefreshAll();
+  return useMutation({
+    mutationFn: ({ patidA, patidB }: { patidA: string; patidB: string }) =>
+      api.dismiss(patidA, patidB),
     onSuccess: refresh,
   });
 }

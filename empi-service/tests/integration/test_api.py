@@ -299,7 +299,7 @@ class TestRecordsScore:
         assert len(body["outcomes"]) == 1
         outcome = body["outcomes"][0]
         assert outcome["patid"] == "P6"
-        assert outcome["tier"] == "review"
+        assert outcome["tier"] == "human_review"
         mid = outcome["mid"]
 
         entity = client.get(f"/clusters/{mid}").json()

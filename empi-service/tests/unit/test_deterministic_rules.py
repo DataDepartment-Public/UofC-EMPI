@@ -22,7 +22,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.contracts import Rejects, validate as validate_contract
+from src.contracts import (
+    Rejects,
+    TIER_AUTO_MERGE,
+    TIER_HUMAN_REVIEW,
+    TIER_NO_MATCH,
+    validate as validate_contract,
+)
 from src.models.deterministic_rules import (
     AUTO_MERGE_RULES,
     REJECT_RULES,
@@ -198,7 +204,7 @@ class TestClassifyNonMatches:
              "BirthDT_clean": pd.Timestamp("1985-02-02"), "SSN_clean": "222222222"},
         ], ("A", "B"))
         row = _one(out)
-        assert row["decision"] == "reject"
+        assert row["decision"] == TIER_NO_MATCH
         assert row["n_contradictions"] == 4
 
     def test_two_contradictions_review(self):
@@ -212,7 +218,7 @@ class TestClassifyNonMatches:
              "BirthDT_clean": pd.Timestamp("1990-01-01"), "SSN_clean": "222222222"},
         ], ("A", "B"))
         row = _one(out)
-        assert row["decision"] == "review"
+        assert row["decision"] == TIER_HUMAN_REVIEW
         assert row["n_contradictions"] == 2
 
     def test_single_contradiction_reviews(self):
@@ -225,7 +231,7 @@ class TestClassifyNonMatches:
              "BirthDT_clean": pd.Timestamp("1990-01-01")},
         ], ("A", "B"))
         row = _one(out)
-        assert row["decision"] == "review"
+        assert row["decision"] == TIER_HUMAN_REVIEW
         assert row["n_contradictions"] == 1
 
     def test_name_typo_alone_is_not_a_rejection(self):
@@ -238,7 +244,7 @@ class TestClassifyNonMatches:
              "BirthDT_clean": pd.Timestamp("1990-01-01")},
         ], ("A", "B"))
         row = _one(out)
-        assert row["decision"] == "review"
+        assert row["decision"] == TIER_HUMAN_REVIEW
         assert row["n_contradictions"] == 1
 
     def test_no_contradictions_reviews(self):
@@ -249,7 +255,7 @@ class TestClassifyNonMatches:
              "BirthDT_clean": pd.Timestamp("1990-01-01")},
         ], ("A", "B"))
         row = _one(out)
-        assert row["decision"] == "review"
+        assert row["decision"] == TIER_HUMAN_REVIEW
         assert row["n_contradictions"] == 0
 
     def test_confirmed_pairs_are_excluded(self):
@@ -274,7 +280,7 @@ class TestClassifyNonMatches:
         )
         row = _one(out)
         assert row["source_blocks"] == "B4|B8"
-        assert row["decision"] == "reject"  # 1 contradiction meets the lowered threshold
+        assert row["decision"] == TIER_NO_MATCH  # 1 contradiction meets the lowered threshold
 
     def test_reject_rule_stamped_on_rejected_rows(self):
         # Rejected rows carry the firing reject rule's name; review rows do not.
@@ -285,7 +291,7 @@ class TestClassifyNonMatches:
              "BirthDT_clean": pd.Timestamp("1985-02-02"), "SSN_clean": "222222222"},
         ], ("A", "B"))
         row = _one(out)
-        assert row["decision"] == "reject"
+        assert row["decision"] == TIER_NO_MATCH
         assert row["reject_rule"] == REJECT_RULES[0].name == "STRONG_ID_CONFLICT"
 
     def test_review_rows_have_no_reject_rule(self):
@@ -296,7 +302,7 @@ class TestClassifyNonMatches:
              "BirthDT_clean": pd.Timestamp("1990-01-01")},
         ], ("A", "B"))
         row = _one(out)
-        assert row["decision"] == "review"
+        assert row["decision"] == TIER_HUMAN_REVIEW
         assert pd.isna(row["reject_rule"])
 
     def test_reject_rule_threshold_matches_calibration(self):
@@ -307,8 +313,8 @@ class TestClassifyNonMatches:
         assert len(rule.fields) == 4
 
     def test_rejected_rows_validate_against_contracts_rejects(self):
-        # The real production rejects slice (decided[decision == "reject"], as
-        # both src.pipeline and run_rules.py build it) must pass the
+        # The real production rejects slice (decided[decision == TIER_NO_MATCH],
+        # as both src.pipeline and run_rules.py build it) must pass the
         # contracts.Rejects boundary validation added alongside pipeline.py's
         # validate(rejects, Rejects) call.
         out = self._classify([
@@ -317,7 +323,7 @@ class TestClassifyNonMatches:
             {COL_PATID: "B", "FirstNM_clean": "JANE", "LastNM_clean": "JONES",
              "BirthDT_clean": pd.Timestamp("1985-02-02"), "SSN_clean": "222222222"},
         ], ("A", "B"))
-        rejects = out[out["decision"] == "reject"].reset_index(drop=True)
+        rejects = out[out["decision"] == TIER_NO_MATCH].reset_index(drop=True)
         assert not rejects.empty
         validate_contract(rejects, Rejects, allow_empty=False)
 
@@ -462,7 +468,7 @@ class TestRuleTiers:
         )
         assert stats["total_matches"] == 1
         assert stats["decision_distribution"] == {
-            "match": 1, "review": 1, "reject": 0
+            TIER_AUTO_MERGE: 1, TIER_HUMAN_REVIEW: 1, TIER_NO_MATCH: 0
         }
         assert stats["review_match_distribution"] == {"NAME_DOB_SEX": 1}
 
@@ -758,9 +764,11 @@ class TestStats:
         ])
         pairs = _pairs(("A", "B"), ("C", "D"))
         matches = apply_rules(pairs, df)          # A,B -> SSN_DOB
-        decided = classify_non_matches(pairs, matches, df)  # C,D -> reject (4 contra)
+        decided = classify_non_matches(pairs, matches, df)  # C,D -> no_match (4 contra)
         stats = get_match_stats(matches, n_records=4, decided=decided)
-        assert stats["decision_distribution"] == {"match": 1, "review": 0, "reject": 1}
+        assert stats["decision_distribution"] == {
+            TIER_AUTO_MERGE: 1, TIER_HUMAN_REVIEW: 0, TIER_NO_MATCH: 1
+        }
 
     def test_decision_distribution_absent_by_default(self):
         df = _clean_df([

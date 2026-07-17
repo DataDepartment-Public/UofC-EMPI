@@ -106,6 +106,8 @@ class IndexBackend(Protocol):
         ssn_last4: str | None = None,
         updated_after: str | None = None,
         updated_before: str | None = None,
+        confidence_min: float | None = None,
+        confidence_max: float | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[dict], int]: ...
@@ -113,6 +115,16 @@ class IndexBackend(Protocol):
     def dashboard_summary(self) -> dict: ...
     def get_record_raw(self, patid: str) -> str | None: ...
     def review_candidates_for_patid(self, patid: str) -> list[dict]: ...
+    def list_review_candidates(
+        self,
+        *,
+        confidence_min: float | None = None,
+        confidence_max: float | None = None,
+        reviewed: bool | None = None,
+        search: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[dict], int]: ...
 
     # ── Reviewer audit log (src/api/routers/audit.py) ───────────────────────
     def insert_audit_log(
@@ -245,12 +257,14 @@ class SqlIndexBackend:
         *,
         search=None, origin=None, is_merged=None, birth_date=None,
         ssn_last4=None, updated_after=None, updated_before=None,
+        confidence_min=None, confidence_max=None,
         page=1, page_size=50,
     ) -> tuple[list[dict], int]:
         return self._store.list_entities(
             self.conn, search=search, origin=origin, is_merged=is_merged,
             birth_date=birth_date, ssn_last4=ssn_last4,
             updated_after=updated_after, updated_before=updated_before,
+            confidence_min=confidence_min, confidence_max=confidence_max,
             page=page, page_size=page_size,
         )
 
@@ -262,6 +276,17 @@ class SqlIndexBackend:
 
     def review_candidates_for_patid(self, patid: str) -> list[dict]:
         return self._store.review_candidates_for_patid(self.conn, patid)
+
+    def list_review_candidates(
+        self,
+        *,
+        confidence_min=None, confidence_max=None, reviewed=None, search=None,
+        page=1, page_size=50,
+    ) -> tuple[list[dict], int]:
+        return self._store.list_review_candidates(
+            self.conn, confidence_min=confidence_min, confidence_max=confidence_max,
+            reviewed=reviewed, search=search, page=page, page_size=page_size,
+        )
 
     def insert_audit_log(
         self, *, ts_utc, user, action, patids, mid, prev_state, next_state, run_id,

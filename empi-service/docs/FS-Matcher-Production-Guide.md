@@ -9,7 +9,7 @@ who needs to operate and maintain the matcher — no Splink internals required.
 
 ## 1. What it is and where it sits
 
-The pipeline resolves patient records in five stages:
+The pipeline resolves patient records in six stages:
 
 ```
 raw → 1. clean → 2. blocking → 3. deterministic rules ─┬─► matches (auto-merge)
@@ -21,22 +21,33 @@ raw → 1. clean → 2. blocking → 3. deterministic rules ─┬─► matches
                                               • surfaces likely-match CANDIDATES
                                               • emits per-pair FEATURES
                                               │
-                                              ▼  (feeds the downstream GBT, NOT clustering)
-                                       5. clustering → cluster_assignments
-                                          (deterministic auto-merge edges only)
+                                              ▼  (optionally enriches Stage 4.5)
+                                     4.5. ML matcher (src/models/ml_matcher/, pluggable)
+                                              │
+                                              ▼  (both feed clustering only if their
+                                                   *_feeds_clustering toggle is on)
+                                       6. clustering → cluster_assignments
+                                          (deterministic auto-merge edges by default)
 ```
 
 The deterministic rules (Stage 3) confidently **auto-merge** the easy pairs and
 send everything uncertain to the **non-matches** pool. The FS matcher's job is to
-comb that no-match pool and **surface additional candidate pairs** — pairs that
-look like the same patient — together with a rich set of **features**, for a
-downstream **Gradient-Boosted-Tree (GBT)** to make the final call.
+comb that pool and **surface additional candidate pairs** — pairs that look like
+the same patient — together with a rich set of **features**, for a downstream
+model (in-repo today: the pluggable ML matcher, Stage 4.5 — see
+`docs/ML-Matcher-Integration-Guide.md`) to make the final call.
 
-**Important:** the FS matcher does **not** merge anything and does **not** affect
-clustering. Clustering continues to group only the deterministic auto-merge
-edges. The FS matcher is a *candidate + feature generator* that hands off to the
-GBT. This keeps the automatic-merge behavior unchanged while giving the GBT a
-strong, interpretable signal.
+**The FS matcher, the ML matcher, and the deterministic-rules engine all
+implement the same shared interface** (`src.models.base.PairClassifier`) and
+emit the same 5-column `ClassificationResults` shape — see
+`docs/Data-Contract.md`'s Pipeline overview for the cross-stage picture.
+
+**By default the FS matcher does not affect clustering.** Clustering groups
+only the deterministic auto-merge edges unless `settings.fs_feeds_clustering`
+is explicitly turned on (default `False`) — see `docs/Data-Contract.md`'s
+Stage 5 section for the (now real, not merely proposed) edge-union mechanism.
+The FS matcher remains a *candidate + feature generator* first; opting it
+into auto-merge is a deliberate operational decision, not the default.
 
 **Model:** 7 two-level comparisons (First name, Last name, Date of birth, SSN,
 Email, Phone, Address), each contributing one interpretable weight. The model is
@@ -191,8 +202,10 @@ inference, consumes the per-run candidate file.
 Alongside the feature file, the pipeline writes
 `data/matches_model/matches_model_<run_id>.parquet` (`ProbabilisticMatches`): the
 **full** scored non-matches set (including pairs below the candidate floor) with
-tiers and scores. It is a read-only audit/review record — nothing downstream
-consumes it, and it is **not** unioned into clustering.
+tiers and scores. It is a read-only audit/review record by default — nothing
+downstream consumes it, and it is **not** unioned into clustering **unless**
+`settings.fs_feeds_clustering` is explicitly turned on (default `False`; see
+`docs/Data-Contract.md` Stage 5).
 
 ---
 

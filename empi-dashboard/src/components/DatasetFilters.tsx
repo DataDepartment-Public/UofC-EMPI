@@ -2,8 +2,11 @@
 
 import type { RecordsFilters } from "@/lib/api-client";
 
-/** FR-22: search/filter by Master Patient ID, name, masked SSN, birthdate,
- * match status, merge status, last-updated date. */
+/** Patient Registry search/filter — the registry is read-mostly (final,
+ * resolved clusters only), so this stays to just what a data steward needs
+ * to locate one patient: name/ID, birthdate, SSN. Match/merge status and
+ * confidence filters live on the Review Queue tab instead, where they're
+ * actually actionable. */
 export function DatasetFilters({
   value,
   onChange,
@@ -24,37 +27,6 @@ export function DatasetFilters({
           onChange={(e) => set({ search: e.target.value || undefined })}
           className="w-56 rounded-md border border-line px-2.5 py-1.5 text-sm outline-none focus:border-brand-blue"
         />
-      </Field>
-      <Field label="Match status">
-        <select
-          value={value.origin ?? ""}
-          onChange={(e) => set({ origin: e.target.value || undefined })}
-          className="rounded-md border border-line px-2.5 py-1.5 text-sm outline-none focus:border-brand-blue"
-        >
-          <option value="">All</option>
-          <option value="deterministic">Auto-match</option>
-          <option value="review">Needs review</option>
-          <option value="merge">Manually merged</option>
-          <option value="none">No match</option>
-        </select>
-      </Field>
-      <Field label="Merge status">
-        <select
-          value={
-            value.is_merged === undefined ? "" : value.is_merged ? "merged" : "unmerged"
-          }
-          onChange={(e) =>
-            set({
-              is_merged:
-                e.target.value === "" ? undefined : e.target.value === "merged",
-            })
-          }
-          className="rounded-md border border-line px-2.5 py-1.5 text-sm outline-none focus:border-brand-blue"
-        >
-          <option value="">All</option>
-          <option value="merged">Merged</option>
-          <option value="unmerged">Unmerged</option>
-        </select>
       </Field>
       <Field label="Birthdate">
         <input

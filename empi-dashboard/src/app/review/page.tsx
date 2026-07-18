@@ -7,11 +7,11 @@ import {
   useMergeMutation,
   useReviewQueue,
 } from "@/lib/hooks";
-import { MergeModal } from "@/components/MergeModal";
-import { RawDataDrawer } from "@/components/RawDataDrawer";
-import { ReviewCandidateDetail } from "@/components/ReviewCandidateDetail";
-import { ReviewQueueList } from "@/components/ReviewQueueList";
-import { Toast } from "@/components/Toast";
+import { MergeModal } from "@/components/review/MergeModal";
+import { RawDataDrawer } from "@/components/shared/RawDataDrawer";
+import { ReviewCandidateDetail } from "@/components/review/ReviewCandidateDetail";
+import { ReviewQueueList } from "@/components/review/ReviewQueueList";
+import { Toast } from "@/components/shared/Toast";
 
 const PAGE_SIZE = 30;
 

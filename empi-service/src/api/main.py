@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api import store
+from src.api.backends import sql_backend
 from src.api.routers import audit, dashboard, health, records, runs
 from src.config import configure_logging, settings
 
@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     configure_logging(settings)  # idempotent — see src/config.py
     settings.ensure_dirs()
-    conn = store.get_connection(settings.db_path)
+    conn = sql_backend.get_connection(settings.db_path)
     try:
-        store.init_db(conn)
+        sql_backend.init_db(conn)
     finally:
         conn.close()
     logger.info("eMPI API started — db=%s", settings.db_path)

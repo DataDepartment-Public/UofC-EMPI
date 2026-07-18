@@ -3,8 +3,8 @@
 **Status:** exploratory research, **analysis only — not integrated into the
 pipeline.** Every experiment is read-only on `data/processed/` and `data/raw/`; no
 production code was changed. Three committed harnesses reproduce every number
-(`scripts/research_blocking_labels.py`, `scripts/research_blocking_scalable.py`,
-`scripts/research_blocking_round4.py`, plus `scripts/eval_against_labels.py`); see
+(`scripts/research/research_blocking_labels.py`, `scripts/research/research_blocking_scalable.py`,
+`scripts/research/research_blocking_round4.py`, plus `scripts/eval_against_labels.py`); see
 [§9](#9-reproducibility).
 
 This document is the **final research synthesis** before an implementation decision.
@@ -656,9 +656,9 @@ All harnesses are committed, read-only on the data, and write a JSON artifact:
 
 | Script | Produces | Covers |
 |---|---|---|
-| `scripts/research_blocking_labels.py` | `data/runs/research_blocking_labels.json` | q-gram (exact) vs rules + silver + synthetic (§3.2–3.3) |
-| `scripts/research_blocking_scalable.py` | `data/runs/research_blocking_scalable.json` | block-then-q-gram (§3.4), meta-blocking-vs-silver (§4.3), 2-hop (§4.4) |
-| `scripts/research_blocking_round4.py` | `data/runs/research_blocking_round4.json` | hub/degree (§4.5), community detection (§4.6), SNM (§5.1), super-string LSH (§5.2, behind `--with-superstring`), stacking (§6), residual deep-dive (§3.5) |
+| `scripts/research/research_blocking_labels.py` | `data/runs/research_blocking_labels.json` | q-gram (exact) vs rules + silver + synthetic (§3.2–3.3) |
+| `scripts/research/research_blocking_scalable.py` | `data/runs/research_blocking_scalable.json` | block-then-q-gram (§3.4), meta-blocking-vs-silver (§4.3), 2-hop (§4.4) |
+| `scripts/research/research_blocking_round4.py` | `data/runs/research_blocking_round4.json` | hub/degree (§4.5), community detection (§4.6), SNM (§5.1), super-string LSH (§5.2, behind `--with-superstring`), stacking (§6), residual deep-dive (§3.5) |
 | `scripts/eval_against_labels.py` | (reused) | synthetic record reconstruction + label scoring |
 
 - **Caches:** rules-as-truth **R** at `data/runs/_cache_rules_R_real.parquet`; the

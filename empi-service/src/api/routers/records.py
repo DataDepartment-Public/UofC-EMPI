@@ -15,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from src.api import jobs
 from src.api.deps import get_backend, get_settings
-from src.api.index_backend import IndexBackend
+from src.api.backends.index_backend import IndexBackend
 from src.api.schemas import (
     CandidatePatient,
     Entity,
@@ -202,7 +202,7 @@ def score_records(
 ) -> ScoreCreateResponse:
     """Score one or a batch of new records against the existing population
     without re-running the full pipeline — see `docs/API-Design.md` and
-    `src/api/incremental.py`. Always a background job (same 202 + poll
+    `src/api/ingest/incremental.py`. Always a background job (same 202 + poll
     pattern as `POST /runs`), regardless of batch size."""
     settings.ensure_dirs()
     run_id = jobs.new_run_id()

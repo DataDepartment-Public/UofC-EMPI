@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Montserrat, Raleway } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
-import { TopNav } from "@/components/TopNav";
+import { TopNav } from "@/components/shared/TopNav";
 
 const montserrat = Montserrat({
   variable: "--font-montserrat",

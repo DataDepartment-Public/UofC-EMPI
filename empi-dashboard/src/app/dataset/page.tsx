@@ -1,14 +1,14 @@
 "use client";
 
 import { Suspense, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, RecordsFilters } from "@/lib/api-client";
 import { useRecords, useUnmergeMutation } from "@/lib/hooks";
-import { DatasetFilters } from "@/components/DatasetFilters";
-import { DatasetRow } from "@/components/DatasetRow";
-import { UnmergeModal } from "@/components/UnmergeModal";
-import { RawDataDrawer } from "@/components/RawDataDrawer";
-import { Toast } from "@/components/Toast";
+import { DatasetFilters } from "@/components/dataset/DatasetFilters";
+import { DatasetRow } from "@/components/dataset/DatasetRow";
+import { UnmergeModal } from "@/components/dataset/UnmergeModal";
+import { RawDataDrawer } from "@/components/shared/RawDataDrawer";
+import { Toast } from "@/components/shared/Toast";
 
 const PAGE_SIZE = 25;
 
@@ -17,6 +17,30 @@ const PAGE_SIZE = 25;
 // awaiting a decision (`origin: "review"`) belongs on the Review Queue tab,
 // not here.
 const FINAL_ORIGINS = "deterministic,merge,none";
+
+/** Filters live in the URL (not just component state) so that navigating
+ * away — e.g. to a patient's Model Explanation page — and back with the
+ * browser's own back button, or a plain page refresh, lands on the exact
+ * same search/filter/page a reviewer had open, instead of a freshly reset
+ * Patient Registry. */
+function filtersFromSearchParams(searchParams: URLSearchParams): RecordsFilters {
+  return {
+    page: Number(searchParams.get("page")) || 1,
+    page_size: PAGE_SIZE,
+    search: searchParams.get("search") ?? undefined,
+    birth_date: searchParams.get("birth_date") ?? undefined,
+    ssn_last4: searchParams.get("ssn_last4") ?? undefined,
+  };
+}
+
+function filtersToSearch(filters: RecordsFilters): string {
+  const params = new URLSearchParams();
+  if (filters.search) params.set("search", filters.search);
+  if (filters.birth_date) params.set("birth_date", filters.birth_date);
+  if (filters.ssn_last4) params.set("ssn_last4", filters.ssn_last4);
+  if (filters.page && filters.page !== 1) params.set("page", String(filters.page));
+  return params.toString();
+}
 
 export default function DatasetPage() {
   return (
@@ -27,12 +51,23 @@ export default function DatasetPage() {
 }
 
 function DatasetPageContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
-  const [filters, setFilters] = useState<RecordsFilters>({
-    page: 1,
-    page_size: PAGE_SIZE,
-    search: searchParams.get("search") ?? undefined,
-  });
+  const [filters, setFiltersState] = useState<RecordsFilters>(() =>
+    filtersFromSearchParams(searchParams),
+  );
+
+  const setFilters = (
+    next: RecordsFilters | ((prev: RecordsFilters) => RecordsFilters),
+  ) => {
+    setFiltersState((prev) => {
+      const resolved = typeof next === "function" ? next(prev) : next;
+      const qs = filtersToSearch(resolved);
+      router.replace(qs ? `/dataset?${qs}` : "/dataset", { scroll: false });
+      return resolved;
+    });
+  };
+
   const [rawPatid, setRawPatid] = useState<string | null>(null);
   const [pendingUnmerge, setPendingUnmerge] = useState<{
     mid: string;

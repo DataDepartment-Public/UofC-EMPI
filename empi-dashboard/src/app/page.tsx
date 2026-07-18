@@ -1,10 +1,10 @@
 "use client";
 
 import { useDashboardSummary } from "@/lib/hooks";
-import { KpiCard, KpiGrid } from "@/components/KpiCard";
-import { MatchStatusChart } from "@/components/MatchStatusChart";
-import { TrendChart } from "@/components/TrendChart";
-import { ModelInfoPanel } from "@/components/ModelInfoPanel";
+import { KpiCard, KpiGrid } from "@/components/dashboard/KpiCard";
+import { MatchStatusChart } from "@/components/dashboard/MatchStatusChart";
+import { TrendChart } from "@/components/dashboard/TrendChart";
+import { ModelInfoPanel } from "@/components/dashboard/ModelInfoPanel";
 
 export default function DashboardPage() {
   const { data: summary, isLoading, isError } = useDashboardSummary();

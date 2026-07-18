@@ -6,7 +6,7 @@ import sqlite3
 
 from fastapi import APIRouter, Depends, Response
 
-from src.api import store
+from src.api.backends import sql_backend
 from src.api.deps import get_settings
 from src.api.schemas import HealthResponse, ReadyChecks, ReadyResponse
 from src.config import Settings
@@ -23,7 +23,7 @@ def health() -> HealthResponse:
 def ready(response: Response, settings: Settings = Depends(get_settings)) -> ReadyResponse:
     db_ok = True
     try:
-        conn = store.get_connection(settings.db_path)
+        conn = sql_backend.get_connection(settings.db_path)
         try:
             conn.execute("SELECT 1")
         finally:

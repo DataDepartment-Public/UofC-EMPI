@@ -3,7 +3,7 @@
 Each write is one `backend` transaction (SQLite or Parquet local mode — see
 docs/Data-Contract.md Stage 6): mutate `entity`/`entity_member`, then insert
 the `audit_log` row — both land or neither does (`backend.begin()`/
-`commit()`/`rollback()` here, exactly like `src/api/incremental.py`).
+`commit()`/`rollback()` here, exactly like `src/api/ingest/incremental.py`).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 
 from src.api.deps import get_backend, get_reviewer_id
-from src.api.index_backend import IndexBackend
+from src.api.backends.index_backend import IndexBackend
 from src.api.routers.records import _to_entity
 from src.api.schemas import (
     AuditLogRow,
@@ -155,7 +155,7 @@ def dismiss(
     considered rejection of a false-positive suggestion, distinct from
     simply leaving it unreviewed. Recorded as an audit_log entry only; no
     entity/member mutation, since the pair was never merged. The queue query
-    (`store.list_review_candidates`) excludes any pair with a prior `dismiss`
+    (`sql_backend.list_review_candidates`) excludes any pair with a prior `dismiss`
     entry from the default "Needs review" view — it moves to "Already
     reviewed" instead of reappearing indefinitely."""
     mid = backend.get_entity_mid_for_patid(

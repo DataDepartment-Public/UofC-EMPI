@@ -1,7 +1,7 @@
 # eMPI Service API — Design
 
 > **Implementation status (2026-07-14):** all build-order steps (1-5) are
-> implemented and in production. `src/api/` — `store.py` (SQLite),
+> implemented and in production. `src/api/` — `sql_backend.py` (SQLite),
 > `parquet_backend.py` (local Parquet index), `index_backend.py` (the
 > pluggable-storage seam both go through), `publish.py` / `publish_local.py`
 > (batch publish), `incremental.py` / `local_score.py` (single/few-record
@@ -19,11 +19,11 @@
 > a raw JSON body (FastAPI can't mix `File` and `Body` params on one route —
 > see `routers/runs.py`).
 >
-> **Storage is fully pluggable** (`src/api/index_backend.py`,
+> **Storage is fully pluggable** (`src/api/backends/index_backend.py`,
 > `EMPI_INDEX_BACKEND`): SQLite (`empi.db`, default) or a local Parquet index
 > (`data/local_index/`, `EMPI_INDEX_BACKEND=parquet`) — every route below,
 > including `/audit/*`, works identically against either. A `python -m
-> src.api.local_score` / `python -m src.api.publish_local` CLI pair needs no
+> src.api.ingest.local_score` / `python -m src.api.ingest.publish_local` CLI pair needs no
 > FastAPI/uvicorn at all for the Parquet path. Full schema + per-table status:
 > [Data-Contract.md](Data-Contract.md) Stage 6.
 
@@ -122,7 +122,7 @@ CREATE TABLE audit_log (
 (`{user, ts, ids, prev, next, mid}`), so the dashboard's audit table renders with no
 shape change.
 
-**Incremental-scoring index** (`src/api/store.py`, feeds `POST
+**Incremental-scoring index** (`src/api/backends/sql_backend.py`, feeds `POST
 /records/score` — see §3): two more tables, rebuilt wholesale by every full
 publish and incrementally appended to between publishes.
 
@@ -224,12 +224,12 @@ re-running `clean → block → rules → cluster` over the whole dataset (`POST
 tracked in a registry separate from full-pipeline runs and not listed by `GET
 /runs`).
 
-**Storage backend.** Scoring is written against `src.api.index_backend.IndexBackend`,
-not a raw connection — `src/api/incremental.py` never imports `store`
+**Storage backend.** Scoring is written against `src.api.backends.index_backend.IndexBackend`,
+not a raw connection — `src/api/ingest/incremental.py` never imports `store`
 directly. Two implementations:
 
 - `SqlIndexBackend` (default, `EMPI_INDEX_BACKEND=sqlite`) — thin adapter
-  over `store.py` + `empi.db`. `store.py`'s own SQL stays SQLite-flavored;
+  over `sql_backend.py` + `empi.db`. `sql_backend.py`'s own SQL stays SQLite-flavored;
   the adapter takes its store module and connection as parameters, so a
   future Postgres-flavored store module could swap in without changing the
   adapter — scaffolding for that, not a built multi-engine store today.
@@ -243,8 +243,8 @@ directly. Two implementations:
   path:
 
   ```
-  python -m src.api.local_score --input record.json [--data-dir data/local_index]
-  python -m src.api.publish_local --run-id <run_id> [--data-dir data/local_index]
+  python -m src.api.ingest.local_score --input record.json [--data-dir data/local_index]
+  python -m src.api.ingest.publish_local --run-id <run_id> [--data-dir data/local_index]
   ```
 
   `--input` is a JSON file (one record object or a list), same raw-column
@@ -255,7 +255,7 @@ directly. Two implementations:
   on the process-local lock (`deps.py::_PARQUET_BACKEND_LOCK`) that
   serializes concurrent requests against this backend.
 
-Implementation (`src/api/incremental.py`): each record is cleaned via the
+Implementation (`src/api/ingest/incremental.py`): each record is cleaned via the
 same `transform_dataframe` normalization as the batch pipeline, candidates
 are found via an indexed lookup against the persisted block-key table (§2)
 rather than rebuilding a `blocking.BlockingIndex` from the full population,
@@ -372,7 +372,7 @@ as-is. `assign_clusters` is reused to seed initial entities on publish.
 
 ## 7. Build order (once approved)
 
-1. `store.py` + schema + `publish.py`; unit-test publish against an existing
+1. `sql_backend.py` + schema + `publish.py`; unit-test publish against an existing
    `data/runs/run_*.json`.
 2. `health` + `runs` routes over the unmodified `run_pipeline` (the §6 "minimal slice").
 3. `records`/`clusters` read models.

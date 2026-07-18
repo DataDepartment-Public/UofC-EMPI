@@ -19,8 +19,8 @@ pandera `DataFrameModel`s (the bulk frames) and pydantic models (the
 `src/pipeline.py` and the stage entry points validate every boundary against
 them. Stage 6 (resolved-output storage) has no pandera contract — it is
 row-oriented, not a bulk frame — and is instead enforced by
-`src/api/store.py`'s `CREATE TABLE` DDL (SQLite) and
-`src/api/parquet_backend.py`'s `_SCHEMAS` (Parquet), which this document's
+`src/api/backends/sql_backend.py`'s `CREATE TABLE` DDL (SQLite) and
+`src/api/backends/parquet_backend.py`'s `_SCHEMAS` (Parquet), which this document's
 Stage 6 section mirrors. This document is the human-readable spec; the code
 is the enforcement — keep them mirrored.
 
@@ -44,7 +44,7 @@ _Last updated: 2026-07-14._
    data/blocking/candidate_pairs_*.parquet
                   │
    ┌──────────────▼───────────────┐
-   │ 3. DETERMINISTIC RULES        │  src/models/deterministic_rules.py         [IMPLEMENTED]
+   │ 3. DETERMINISTIC RULES        │  src/models/deterministic_rules/         [IMPLEMENTED]
    │    (needs cleaned + pairs)    │
    └───┬──────────┬──────────┬─────┘
        │          │          │
@@ -80,7 +80,7 @@ _Last updated: 2026-07-14._
    data/clusters/cluster_assignments_*.parquet
                   │
    ┌──────────────▼───────────────┐
-   │ 6. RESOLVED-OUTPUT INDEX       │  src/api/publish.py, incremental.py,      [IMPLEMENTED]
+   │ 6. RESOLVED-OUTPUT INDEX       │  src/api/ingest/publish.py, incremental.py,      [IMPLEMENTED]
    │    (mutable; API layer)       │  publish_local.py, local_score.py
    └───────────────────────────────┘
    data/empi.db  (or  data/local_index/*.parquet)
@@ -251,7 +251,7 @@ meta-blocking (ARCS + Cardinality Node Pruning) — see `docs/Blocking-Guide.md`
 
 ## Stage 3 — Deterministic matches, non-matches & rejects  `[IMPLEMENTED]`
 
-- **Producer:** `src/models/deterministic_rules.py::apply_rules` +
+- **Producer:** `src/models/deterministic_rules::apply_rules` +
   `classify_non_matches`, invoked from `src/pipeline.py` (which also owns the
   auto-merge/review **tier split** described below — the tier routing logic
   itself lives in `pipeline.py`, not inside `apply_rules`).
@@ -317,7 +317,7 @@ routing below differs by tier.
   full column set for provenance (1) above — `match_rule`, `confidence`,
   `rules_fired`, etc. — that the closed `NonMatches`/`CandidatePairs` schema
   trims. Not part of a strict pandera contract (nothing in the pipeline reads
-  it back), but it has exactly one consumer: `src/api/publish.py`, which
+  it back), but it has exactly one consumer: `src/api/ingest/publish.py`, which
   surfaces *why* a review-tier pair was flagged rather than just that it was.
 
 ### 3c — Rejects (terminal, audit-only)
@@ -515,25 +515,25 @@ FastAPI service and the `empi-dashboard/` Next.js app actually read and write
 — nothing downstream of stage 5 talks to `data/clusters/*.parquet` directly.
 
 - **Producers:**
-  `src/api/publish.py::publish_run` — one `RunManifest`'s `clusters` /
+  `src/api/ingest/publish.py::publish_run` — one `RunManifest`'s `clusters` /
   `matches` / `non_matches` / `cleaned` (+ `review_evidence` if present) →
   resolved entities. Batch-only, run once per full pipeline run.
-  `src/api/incremental.py::score_records` — one or a few new records scored
+  `src/api/ingest/incremental.py::score_records` — one or a few new records scored
   against the *existing* resolved population, no full pipeline re-run. Used
-  by `POST /records/score` and the local CLI (`src/api/local_score.py`).
+  by `POST /records/score` and the local CLI (`src/api/ingest/local_score.py`).
 - **Consumers:** `src/api/routers/*` (records, dashboard, audit, runs) and
   `empi-dashboard/`.
 - **Two interchangeable backends**, both fully implementing
-  `src/api/index_backend.py::IndexBackend` (every table below, both the
+  `src/api/backends/index_backend.py::IndexBackend` (every table below, both the
   batch-publish and incremental-score paths, and the reviewer audit log):
-  - **SQLite** (`src/api/store.py`, `data/empi.db`) — the live,
+  - **SQLite** (`src/api/backends/sql_backend.py`, `data/empi.db`) — the live,
     multi-request service. Default (`EMPI_INDEX_BACKEND=sqlite`).
-  - **Parquet local mode** (`src/api/parquet_backend.py::ParquetIndexBackend`,
+  - **Parquet local mode** (`src/api/backends/parquet_backend.py::ParquetIndexBackend`,
     `data/local_index/*.parquet`) — no DB required; a fully self-contained
     local dev/CI/batch/incremental/dashboard deployment with zero SQLite
     dependency. `EMPI_INDEX_BACKEND=parquet`. Batch publish:
-    `python -m src.pipeline` then `python -m src.api.publish_local --run-id
-    <id>`. Incremental: `python -m src.api.local_score --input record.json`,
+    `python -m src.pipeline` then `python -m src.api.ingest.publish_local --run-id
+    <id>`. Incremental: `python -m src.api.ingest.local_score --input record.json`,
     or the same FastAPI service with `EMPI_INDEX_BACKEND=parquet` set.
     One process-local lock (`src/api/deps.py::_PARQUET_BACKEND_LOCK`)
     serializes requests against this backend — it was designed for one-shot
@@ -773,18 +773,18 @@ whether that's by design.
 | `data/raw/` | (external upload) | Stage 1 (`clean.py`) | Active — pipeline input |
 | `data/processed/` | Stage 1 | Stage 2, Stage 3 (attribute join), `fs_matcher/train.py` | Active |
 | `data/blocking/` | Stage 2 (stacked, production) / standalone `run_blocking.py` (8-block-only, dev — see warning) | Stage 3, `fs_matcher/train.py` | Active |
-| `data/matches/` | Stage 3 (auto-merge tier) | `src/api/publish.py`, `src/evaluation/rule_eval.py` | Active |
-| `data/non_matches/` | Stage 3 (`non_matches_*` + `review_evidence_*` companion) | Stage 4 (scores `non_matches`), `src/api/publish.py` (both files) | Active |
+| `data/matches/` | Stage 3 (auto-merge tier) | `src/api/ingest/publish.py`, `src/evaluation/rule_eval.py` | Active |
+| `data/non_matches/` | Stage 3 (`non_matches_*` + `review_evidence_*` companion) | Stage 4 (scores `non_matches`), `src/api/ingest/publish.py` (both files) | Active |
 | `data/rejects/` | Stage 3 | *(none)* | Terminal — audit only, no reader |
 | `data/matches_model/` | Stage 4 (`ProbabilisticMatches`) | *(none, unless `fs_feeds_clustering` is on)* | Audit by default; feeds Stage 5's edge union when explicitly turned on |
 | `data/FS_output/` | Stage 4 (pipeline candidates + `train.py` labeled training set) | Stage 4.5 (`fs_features` enrichment input, optional) | Active — a real consumer now exists |
 | `data/matches_ml/` | Stage 4.5 (`ClassificationResults`) | *(none, unless `ml_feeds_clustering` is on)* | Audit by default; feeds Stage 5's edge union when explicitly turned on |
 | `data/ML_output/` | Stage 4.5 (pipeline candidates) | *(none yet)* | Scaffold — no in-repo consumer until a real model is trained |
-| `data/clusters/` | Stage 5 | `src/api/publish.py` | Active |
-| `data/runs/` | `src/pipeline.py` (`RunManifest`) | `src/api/publish.py`, `fs_matcher/train.py` (input resolution), `scripts/build_eval_workbook.py` | Active |
+| `data/clusters/` | Stage 5 | `src/api/ingest/publish.py` | Active |
+| `data/runs/` | `src/pipeline.py` (`RunManifest`) | `src/api/ingest/publish.py`, `fs_matcher/train.py` (input resolution), `scripts/build_eval_workbook.py` | Active |
 | `data/silver_labels/` | *(external, VM-only)* | `fs_matcher/train.py` | VM-only PHI input, gitignored |
-| `data/empi.db` | `src/api/publish.py` | `src/api/store.py` + routers | Active — serves the review dashboard |
-| `data/local_index/` | `src/api/publish.py` / `publish_local.py` (batch), `src/api/incremental.py` / `local_score.py` (incremental) | `src/api/parquet_backend.py`-backed routes (records/dashboard/audit), `src/api/local_score.py` | Active — full parity with `data/empi.db` (Stage 6) |
+| `data/empi.db` | `src/api/ingest/publish.py` | `src/api/backends/sql_backend.py` + routers | Active — serves the review dashboard |
+| `data/local_index/` | `src/api/ingest/publish.py` / `publish_local.py` (batch), `src/api/ingest/incremental.py` / `local_score.py` (incremental) | `src/api/backends/parquet_backend.py`-backed routes (records/dashboard/audit), `src/api/ingest/local_score.py` | Active — full parity with `data/empi.db` (Stage 6) |
 | `models/fs/` *(not under `data/`)* | `fs_matcher/train.py` | Stage 4 (`registry.resolve_active_model`) | See `docs/FS-Matcher-Production-Guide.md` for the full model-store layout |
 | `models/ml/` *(not under `data/`)* | `ml_matcher/train.py` (scaffold — training unimplemented) | Stage 4.5 (`ml_matcher.registry.resolve_active_model`) | See `docs/ML-Matcher-Integration-Guide.md` |
 

@@ -73,12 +73,12 @@ mutate that index directly — never the Parquet artifacts, which remain the
 immutable record of "what the algorithm produced for run X."
 
 The resolved-output index itself is **backend-pluggable**
-(`src/api/index_backend.py`, `EMPI_INDEX_BACKEND`): **SQLite** (`empi.db`,
+(`src/api/backends/index_backend.py`, `EMPI_INDEX_BACKEND`): **SQLite** (`empi.db`,
 default) or a **local Parquet index** (`data/local_index/`,
 `EMPI_INDEX_BACKEND=parquet`) — every route below works identically against
 either, including `/audit/*`. The Parquet option needs no database server at
-all, which is what makes `python -m src.api.local_score` / `python -m
-src.api.publish_local` possible with no FastAPI process running either. Full
+all, which is what makes `python -m src.api.ingest.local_score` / `python -m
+src.api.ingest.publish_local` possible with no FastAPI process running either. Full
 schema for both: [Data-Contract.md](Data-Contract.md) Stage 6.
 
 ```
@@ -113,11 +113,13 @@ src/api/
   deps.py              # get_settings, get_db, get_backend (+ the Parquet-mode lock)
   schemas.py           # request/response models; some reuse contracts.RunManifest
   jobs.py              # background job wrappers + status registries
-  index_backend.py    # the pluggable-storage seam (IndexBackend protocol)
-  store.py             # SQLite implementation
-  parquet_backend.py  # local Parquet implementation
-  publish.py / publish_local.py       # batch: run output -> index (reuses assign_clusters)
-  incremental.py / local_score.py     # single/few-record scoring -> index
+  backends/
+    index_backend.py  # the pluggable-storage seam (IndexBackend protocol)
+    sql_backend.py     # SQLite implementation
+    parquet_backend.py # local Parquet implementation
+  ingest/
+    publish.py / publish_local.py     # batch: run output -> index (reuses assign_clusters)
+    incremental.py / local_score.py   # single/few-record scoring -> index
   routers/{health,runs,records,audit,dashboard}.py
 ```
 
@@ -251,7 +253,7 @@ capstone; the only stateful piece is the `data/` volume.
 
 ## 6. Build order (as built)
 
-1. **Backend slice** — `store.py` + `publish.py`, then `health` + `runs` routes
+1. **Backend slice** — `sql_backend.py` + `publish.py`, then `health` + `runs` routes
    over the unmodified pipeline.
 2. **Read models** — `records`/`clusters`/`dashboard` routes.
 3. **Front-end shell** — Next.js app (`empi-dashboard/`), branding, two tabs

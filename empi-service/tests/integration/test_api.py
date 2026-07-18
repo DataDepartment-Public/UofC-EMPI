@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import jobs
-from src.api.index_backend import build_index_backend
+from src.api.backends.index_backend import build_index_backend
 from src.api.main import app
 from src.config import Settings, settings as real_settings
 from src.contracts import ArtifactRef, RunManifest
@@ -68,7 +68,7 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
     P1<->P2 auto-merge (SSN_DOB); P3 true singleton; P4<->P5 review-tier
     candidate (NAME_DOB_SEX) — exercises the review-queue/raw-data routes too.
     """
-    from src.api import publish
+    from src.api.ingest import publish
 
     cleaned = pd.DataFrame({
         "PATID": ["P1", "P2", "P3", "P4", "P5"],
@@ -266,8 +266,8 @@ def _incoming(patid, first, last, birth, sex=None):
 
 class TestRecordsScore:
     """POST /records/score end-to-end: the HTTP layer around
-    `src/api/incremental.py` (already unit-tested in isolation in
-    `tests/unit/test_incremental.py`) — background job, polling, and that the
+    `src/api/ingest/incremental.py` (already unit-tested in isolation in
+    `tests/unit/api/test_incremental.py`) — background job, polling, and that the
     outcome is visible through the normal read routes."""
 
     def test_review_tier_match_visible_through_normal_routes(
@@ -395,7 +395,7 @@ class TestAudit:
             headers={"X-Reviewer-Id": "reviewer.jclark"},
         )
 
-        from src.api import publish
+        from src.api.ingest import publish
 
         backend = build_index_backend(test_settings)
         try:
@@ -598,7 +598,7 @@ class TestAuditAgainstParquetBackend:
             headers={"X-Reviewer-Id": "reviewer.jclark"},
         )
 
-        from src.api import publish
+        from src.api.ingest import publish
 
         backend = build_index_backend(parquet_test_settings)
         try:

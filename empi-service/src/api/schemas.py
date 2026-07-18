@@ -2,7 +2,7 @@
 
 Responses reuse `src.contracts.RunManifest` where the doc says to; everything
 else (entities, members, audit rows) is modeled here against the SQLite shape
-in `src/api/store.py`.
+in `src/api/backends/sql_backend.py`.
 
 Deviation from the doc's literal request body for `POST /audit/*`: `user` is
 NOT accepted in the body. Identity comes from the trusted `X-Reviewer-Id`
@@ -77,7 +77,7 @@ class CandidatePatient(RecordAttrs):
 
 class ReviewCandidate(BaseModel):
     """An unresolved candidate pair from the review queue — not a confirmed
-    membership. See `src/api/store.py` `review_candidate` table."""
+    membership. See `src/api/backends/sql_backend.py` `review_candidate` table."""
 
     patid_a: str
     patid_b: str
@@ -89,7 +89,7 @@ class ReviewCandidate(BaseModel):
     patient_b: CandidatePatient
     #: Audit-only FS matcher signal (docs/FS-Matcher-Production-Guide.md) — feeds
     #: a future GBT, not a scored decision on this pair. Populated only for
-    #: candidates scored via the incremental path (src/api/incremental.py); null
+    #: candidates scored via the incremental path (src/api/ingest/incremental.py); null
     #: for candidates from a full batch publish, which doesn't run FS yet.
     fs_match_probability: float | None = None
     fs_classification_tier: str | None = None
@@ -117,7 +117,7 @@ class RecordsPage(BaseModel):
 
 class ReviewQueueItem(BaseModel):
     """One candidate-grain row of `GET /review-queue` — a pending pair, not a
-    cluster. See `src/api/store.py` `list_review_candidates`."""
+    cluster. See `src/api/backends/sql_backend.py` `list_review_candidates`."""
 
     patid_a: str
     patid_b: str
@@ -259,7 +259,7 @@ ScoreTier = Literal["auto_merge", "human_review", "no_match", "invalid"]
 
 
 class RecordScoreOutcome(BaseModel):
-    """One submitted record's result — see `src/api/incremental.py`."""
+    """One submitted record's result — see `src/api/ingest/incremental.py`."""
 
     patid: str
     tier: ScoreTier

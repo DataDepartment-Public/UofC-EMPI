@@ -6,7 +6,7 @@ import { useSearchParams } from "next/navigation";
 import { compareRecords } from "@/lib/compare";
 import { decodeExplainPayload } from "@/lib/explain";
 import { fullName } from "@/lib/format";
-import { FeatureComparisonTable } from "@/components/FeatureComparisonTable";
+import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
 import { useDashboardSummary } from "@/lib/hooks";
 
 /** FR-31..FR-38: per-pair "why was this a match?" detail, reached from a

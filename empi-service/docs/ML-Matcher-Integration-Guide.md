@@ -1,28 +1,44 @@
 # ML Matcher — Integration Guide
 
-> **Status:** SPEC, not yet built. Nothing under `src/models/ml_matcher/`
-> exists in the codebase today. This document is the contract to build your
-> model against — Jason will wire the pipeline side (registry, pipeline
-> stage, schema validation) around whatever you produce here. Treat this as
-> a handoff spec, not a description of shipped code.
+> **Status:** Scaffold built and tested; your two extension points are still
+> stubs. Everything under `src/models/ml_matcher/` exists today — the
+> `MLMatcher` class, the model registry (active-pointer + deploy-gate,
+> mirroring the FS matcher's), the `train` CLI, pipeline wiring as Stage 4.5
+> (with schema validation), and a full unit test suite
+> (`tests/unit/models/ml_matcher/`). Run `pytest tests/unit/models/ml_matcher/
+> -v` first to confirm the scaffold works in your environment.
+>
+> What's actually left, concretely — everything else in this doc is context
+> for these four:
+> 1. A `FeatureBuilder` implementation (§3).
+> 2. A trained `MLModel`-compatible estimator (§3).
+> 3. `MLMatcher.train()` — currently a stub that raises `NotImplementedError`
+>    (`src/models/ml_matcher/matcher.py`).
+> 4. `registry.load_model_artifact()` — currently a stub; the one function
+>    that deserializes whatever format you save your model in
+>    (`src/models/ml_matcher/registry.py`). This is where your answer to
+>    §8.1 (serialization format) actually gets wired in.
 
 ## 1. Where your model fits
 
 ```
-raw ─► clean ─► block ─► deterministic rules (Stage 3)
-                              │
-                              ▼
-                    Fellegi-Sunter matcher (Stage 4, audit-only)
-                              │
-                              ▼
-                    ┌─────────────────────┐
-                    │   YOUR MODEL HERE    │   ← new stage, between FS and clustering
-                    │  (src/models/ml_matcher/) │
-                    └─────────────────────┘
-                              │
-                              ▼
-                    clustering (Stage 5, terminal)
+[1/6] clean ─► [2/6] block ─► [3/6] deterministic rules
+                                        │
+                                        ▼
+                          [4/6] Fellegi-Sunter matcher (audit-only)
+                                        │
+                                        ▼
+                          ┌─────────────────────┐
+                          │   YOUR MODEL HERE    │   [5/6] — between FS and clustering
+                          │  (src/models/ml_matcher/) │
+                          └─────────────────────┘
+                                        │
+                                        ▼
+                          [6/6] clustering (terminal)
 ```
+
+(`[n/6]` matches the tags you'll actually see in pipeline log lines —
+`MODEL(FS)` is `[4/6]`, `MODEL(ML)` is `[5/6]`.)
 
 The deterministic rules stage already splits every candidate pair into three
 buckets: pairs it's confident enough about get **auto-merged** directly into
@@ -31,9 +47,10 @@ clustering; everything else falls into a `non_matches` pool. The FS matcher
 its output is **audit-only today** — it does not feed clustering. Your model
 scores that same `non_matches` pool (optionally enriched with FS's features)
 and is likewise a scored classifier, not an automatic merger — whether its
-`auto_merge`-tier output eventually feeds clustering is a config toggle
-Jason will add on the pipeline side once your model is validated, not
-something your code needs to worry about.
+`auto_merge`-tier output feeds clustering is already a config toggle today
+(`settings.ml_feeds_clustering`, off by default — see §4), not something your
+code needs to worry about. Flip it once your model's validated enough to
+trust for auto-merge.
 
 **Your job is exactly this:** given a pool of candidate patient-record pairs,
 produce a calibrated match probability and a three-way tier for each pair.
@@ -65,7 +82,7 @@ Join this onto both sides of a pair (see how `deterministic_rules.py` and
 ### `FSFeatures` — the readiest-made feature set (already produced every run)
 
 The FS matcher already writes this parquet per pipeline run
-(`data/FS_output/fs_features_<run_id>.parquet`), and a **labeled** version for
+(`data/fs_output/fs_features_<run_id>.parquet`), and a **labeled** version for
 training via `python -m src.models.fs_matcher.train` (writes a labeled GBT
 training feature file — this is very likely your best starting point for a
 first model, since it reuses the same labeled pairs FS itself trained on).
@@ -97,14 +114,35 @@ directly off `candidate_pairs` + `df_clean` (e.g. your own name-similarity
 metric, a phone/email network feature, whatever you want). Both paths are
 first-class; see the interface below.
 
-## 3. The interface your code needs to satisfy
+## 3. Where you plug in — the class hierarchy
 
-Two small pieces, both plain Python — no framework lock-in:
+Three layers, outer to inner. You only ever touch the innermost one.
+
+```
+src.models.base.PairClassifier          (Protocol — the pipeline's contract)
+        │  model_name: str
+        │  run(candidate_pairs, df_clean, **kwargs) -> ClassificationResults
+        │
+        ▼
+src.models.ml_matcher.matcher.MLMatcher  (ALREADY BUILT — satisfies PairClassifier)
+        │  score() / classify() / predict() / run() / to_ml_features() — all
+        │  implemented and tested. train() is a stub — see §3.3.
+        │  Wraps:
+        ├── self.feature_builder: FeatureBuilder   ← YOU implement this
+        └── self.model:            MLModel          ← YOU provide this (fitted)
+```
+
+`PairClassifier` (`src/models/base.py`) is the shared contract every scoring
+stage satisfies — deterministic rules, the FS matcher, and `MLMatcher`. It's a
+`typing.Protocol`, not an ABC (structural typing — `MLMatcher` satisfies it by
+having the right shape, no explicit inheritance), and its `run()` is what
+`src/pipeline.py` actually calls. **You never touch this layer** — `MLMatcher`
+already satisfies it, fully implemented, tested
+(`tests/unit/models/ml_matcher/test_ml_matcher_matcher.py`).
+
+Your job is the two Protocols `MLMatcher` wraps (`src/models/ml_matcher/base.py`):
 
 ```python
-from typing import Protocol
-import pandas as pd
-
 class FeatureBuilder(Protocol):
     def build_features(
         self,
@@ -127,37 +165,84 @@ hand the fitted estimator over. If you want to use PyTorch/TensorFlow/a
 neural net, write a ~10-line wrapper class exposing `fit`/`predict_proba` in
 front of it; the pipeline only ever calls those two methods.
 
-Deliverables from you, concretely:
+You pass both into the already-built matcher: `MLMatcher(model=your_model,
+feature_builder=YourFeatureBuilder())`. Until you do, it uses
+`NotImplementedFeatureBuilder` (raises immediately with a message pointing
+back here) and a `None` model (raises on `predict`/`run`) — that's the
+scaffold's deliberate default, not a bug if you hit it before wiring yours up.
+
+### 3.1 See it work end to end first
+
+`tests/unit/models/ml_matcher/test_ml_matcher_matcher.py` has a complete toy
+`FeatureBuilder`/`MLModel` pair (`_FakeFeatureBuilder`, `_FakeModel`) and
+exercises the exact call shape — `run()` in, `ClassificationResults` out.
+Reading that file (or having your coding agent read it) is the fastest way to
+see the real usage pattern before writing anything. Run it directly:
+
+```bash
+pytest tests/unit/models/ml_matcher/ -v
+```
+
+### 3.2 What "deliverables" actually means, concretely
+
 1. A `FeatureBuilder` implementation (a class or even just a function with
    that signature).
 2. A trained model object satisfying `MLModel` — however you serialize it
-   (pickle/joblib/ONNX — your call, flag your preference so the loader on
-   the pipeline side matches) is fine, just document the format.
-3. The threshold values you'd recommend for your model (see §4) based on
+   (pickle/joblib/ONNX — your call) is fine, just document the format and
+   implement `registry.load_model_artifact()` to match (§8.1).
+3. `MLMatcher.train()` filled in — see §3.3.
+4. The threshold values you'd recommend for your model (see §4) based on
    your held-out evaluation.
 
-## 4. What your scored output needs to look like
+### 3.3 Filling in `MLMatcher.train()`
+
+The method signature already exists (`src/models/ml_matcher/matcher.py`) —
+it's a stub that raises `NotImplementedError` until you implement it:
+
+```python
+def train(
+    self,
+    candidate_pairs: pd.DataFrame,
+    df_clean: pd.DataFrame,
+    labels: pd.DataFrame,
+    fs_features: pd.DataFrame | None = None,
+) -> None:
+    """Fit self.model in place."""
+```
+
+A real implementation calls `self.build_features(...)`, derives `X`/`y` from
+`labels` (the label file's format — silver-label CSV, whatever — is your
+choice), and calls `self.model.fit(X, y)`. `src/models/ml_matcher/train.py`
+is the CLI that calls this — it already resolves `candidate_pairs`/`df_clean`
+from the latest pipeline run's manifest and handles `--promote`; it stops
+today exactly at `model.train(...)` with the `NotImplementedError` above.
+
+## 4. What your scored output looks like (already implemented — nothing to write here)
 
 The pipeline expects a uniform 5-column shape from every classifier stage
 (rules, FS, and yours) — `PATID_A, PATID_B, model_name, score, predicted_tier`
-— where `predicted_tier ∈ {"auto_merge", "human_review", "no_match"}`. Use
-the exact same threshold pattern FS already uses
-(`src/models/fs_matcher/base.py`, `FSModel.classify()`):
+— where `predicted_tier ∈ {"auto_merge", "human_review", "no_match"}`. You
+don't write this — `MLMatcher.classify()` already does it, with the exact
+same inclusive-boundary threshold pattern `FSModel.classify()` uses
+(`src/models/fs_matcher/base.py`), tested in
+`test_ml_matcher_matcher.py::test_classify_thresholds_inclusive`.
 
-```python
-def classify(scored: pd.DataFrame, auto_merge_threshold: float, review_floor: float) -> pd.DataFrame:
-    p = scored["match_probability"]
-    tier = pd.Series("no_match", index=scored.index)
-    tier = tier.mask(p >= review_floor, "human_review")
-    tier = tier.mask(p >= auto_merge_threshold, "auto_merge")
-    return scored.assign(classification_tier=tier)
-```
+All you provide are the threshold *values* — `ClassificationConfig
+(auto_merge_threshold, review_floor)` — based on your held-out evaluation
+(precision/recall at each threshold). These are already real, defaulted
+settings in `src/config.py`:
 
-Report your recommended `auto_merge_threshold` / `review_floor` from your
-held-out evaluation (precision/recall at each threshold) — these become
-config values on the pipeline side (mirrors `fs_auto_merge_threshold` /
-`fs_review_floor` in `src/config.py` today), not something baked into your
-model code.
+| Setting | Default | Meaning |
+|---|---|---|
+| `ml_auto_merge_threshold` | `0.95` | score ≥ this → `auto_merge` tier |
+| `ml_review_floor` | `0.40` | score ≥ this → `human_review` tier; also the cutoff for landing in the `MLFeatures` candidate parquet at all |
+| `ml_deploy_gate_margin` | `0.02` | a retrained model may only promote if held-out precision/recall are within this margin of the currently-active model's |
+| `ml_feeds_clustering` | `False` | when `True`, your `auto_merge`-tier pairs union into clustering edges alongside the deterministic rules' |
+| `ml_model_dir` | `models/ml/` | where trained artifacts + `active.json` live |
+| `ml_active_model` | `None` | explicit override; when unset, the registry resolves `active.json` (or the newest artifact) |
+
+Report your recommended values for the first two; Jason (or you) update the
+defaults once your held-out numbers are in.
 
 ## 5. Training data / labels
 
@@ -176,23 +261,51 @@ Don't start from zero — this project already has labeled pairs:
   as a proxy, not ground truth, same caveat that applies to the rules and FS
   evaluations already in this repo.
 
-## 6. What Jason is building around this (so you don't duplicate it)
+## 6. What's already built around this (so you don't duplicate it)
 
-You don't need to build any of the following — it's pipeline-side scaffolding:
-- **Model registry / promotion** — an active-model pointer + deploy-gate
-  pattern mirroring `src/models/fs_matcher/registry.py` (a retrained model
-  only promotes if its held-out metrics don't regress past a margin).
-- **Pipeline wiring** — a new stage between FS and clustering that resolves
-  the active model, skips cleanly if none is active (same pattern FS uses
-  today — the pipeline runs fine with no ML model plugged in), and persists
-  your output as a per-run parquet.
-- **The configurable clustering-feed toggle** — whether your `auto_merge`
-  tier actually unions into clustering's edges (vs. staying audit-only, like
-  FS is today) is a settings flag, off by default until your model is
-  validated enough to trust for auto-merge.
-- **Schema validation** (pandera contracts) on your output shape.
+None of the following is left to build — it's already in the repo, tested:
+- **Model registry / promotion** (`src/models/ml_matcher/registry.py`) — an
+  active-model pointer + deploy-gate, mirroring
+  `src/models/fs_matcher/registry.py` exactly: `resolve_active_model()`,
+  `passes_deploy_gate()`, `promote()`. A retrained model only promotes if its
+  held-out `auto_merge`-tier precision/recall don't regress past
+  `ml_deploy_gate_margin`. The one piece *not* filled in is
+  `load_model_artifact()` — deserializing whatever format you save your
+  model in (§3, §8.1).
+- **Pipeline wiring** (`src/pipeline.py`, Stage 4.5) — resolves the active
+  model, skips cleanly if none is active or `non_matches` is empty (same
+  pattern FS uses — the pipeline runs fine with no ML model plugged in), and
+  persists your output as a per-run parquet in `data/ml_output/` (the audit
+  frame and the candidate feature file both land there).
+- **The configurable clustering-feed toggle** (`settings.ml_feeds_clustering`,
+  default `False`) — whether your `auto_merge` tier actually unions into
+  clustering's edges, or stays audit-only like FS is today.
+- **Schema validation** (pandera contracts `MLFeatures` /
+  `ClassificationResults` in `src/contracts.py`) on your output shape —
+  `MLMatcher.run()`/`to_ml_features()` already produce validated frames.
 
-## 7. Open decisions to settle together before you start
+## 7. Verifying your integration
+
+Three checkpoints, cheapest first:
+
+1. **Scaffold sanity** — `pytest tests/unit/models/ml_matcher/ -v`. Should
+   pass with zero changes on your part; confirms your environment can import
+   everything before you write real code.
+2. **Your code in isolation** — write unit tests for your `FeatureBuilder`
+   and trained model the same way `test_ml_matcher_matcher.py` tests the
+   scaffold (swap `_FakeFeatureBuilder`/`_FakeModel` for real ones).
+3. **End to end in the real pipeline** — once `MLMatcher.train()` and
+   `load_model_artifact()` are implemented:
+   ```bash
+   python -m src.models.ml_matcher.train --promote   # trains, writes ml_model_<ts>.json + .meta.json, promotes
+   python -m src.pipeline --input data/raw/MDM_Population.csv
+   ```
+   Watch for `[5/6] MODEL(ML) — scoring N non-match pairs with ML model ...`
+   in the log (not the `skipped` variant) — that confirms the registry
+   resolved your promoted model and Stage 4.5 actually ran. Check
+   `data/ml_output/ml_features_<run_id>.parquet` for your output.
+
+## 8. Open decisions to settle together before you start
 
 1. **Model serialization format** — pickle, joblib, or ONNX? Whichever you
    pick determines how the pipeline-side loader is written.

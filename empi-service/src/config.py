@@ -47,11 +47,9 @@ class Settings(BaseSettings):
     raw_dir: Path = _DATA / "raw"
     processed_dir: Path = _DATA / "processed"
     blocking_dir: Path = _DATA / "blocking"
-    matches_dir: Path = _DATA / "matches"
-    matches_model_dir: Path = _DATA / "matches_model"
-    matches_ml_dir: Path = _DATA / "matches_ml"
+    auto_merge_dir: Path = _DATA / "auto_merge"
     non_matches_dir: Path = _DATA / "non_matches"
-    rejects_dir: Path = _DATA / "rejects"
+    no_match_dir: Path = _DATA / "no_match"
     clusters_dir: Path = _DATA / "clusters"
     runs_dir: Path = _DATA / "runs"
     log_dir: Path = _PROJECT_ROOT / "logs"
@@ -155,9 +153,10 @@ class Settings(BaseSettings):
         "registry resolves the active pointer (or latest) in fs_model_dir.",
     )
     fs_output_dir: Path = Field(
-        default=_DATA / "FS_output",
-        description="Output dir for the GBT feature parquet — the pipeline's "
-        "per-run candidate set and the train CLI's labeled training set. Gitignored.",
+        default=_DATA / "fs_output",
+        description="Output dir for both the ProbabilisticMatches audit frame "
+        "and the GBT feature parquet — the pipeline's per-run candidate set "
+        "and the train CLI's labeled training set. Gitignored.",
     )
     fs_auto_merge_threshold: float = Field(
         default=0.95,
@@ -206,8 +205,9 @@ class Settings(BaseSettings):
         "ml_model_dir.",
     )
     ml_output_dir: Path = Field(
-        default=_DATA / "ML_output",
-        description="Output dir for the ML matcher's feature parquet — the "
+        default=_DATA / "ml_output",
+        description="Output dir for both the ML matcher's full "
+        "ClassificationResults audit frame and its feature parquet — the "
         "pipeline's per-run candidate set and the train CLI's labeled "
         "training set. Gitignored.",
     )
@@ -300,15 +300,13 @@ class Settings(BaseSettings):
             self.raw_dir,
             self.processed_dir,
             self.blocking_dir,
-            self.matches_dir,
+            self.auto_merge_dir,
             self.non_matches_dir,
-            self.rejects_dir,
+            self.no_match_dir,
             self.clusters_dir,
             self.runs_dir,
-            self.matches_model_dir,
             self.fs_model_dir,
             self.fs_output_dir,
-            self.matches_ml_dir,
             self.ml_model_dir,
             self.ml_output_dir,
             self.db_path.parent,

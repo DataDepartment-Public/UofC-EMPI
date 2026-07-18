@@ -227,7 +227,7 @@ def run_pipeline(
         len(matches), len(non_matches), len(review_confirmed), len(rejects),
         stats.get("n_clusters", 0),
     )
-    matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
+    matches_path = settings.auto_merge_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
     non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
@@ -243,7 +243,7 @@ def run_pipeline(
         settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
     )
     review_confirmed.to_parquet(review_evidence_path, index=False)
-    rejects_path = settings.rejects_dir / f"rejects_{run_id}.parquet"
+    rejects_path = settings.no_match_dir / f"rejects_{run_id}.parquet"
     rejects.to_parquet(rejects_path, index=False)
 
     # ── Stage 4: Fellegi-Sunter matcher (candidate/feature generator) ──────
@@ -288,7 +288,7 @@ def run_pipeline(
 
         prob_matches = _model.to_probabilistic_matches(classified)
         validate(prob_matches, ProbabilisticMatches)
-        matches_model_path = settings.matches_model_dir / f"matches_model_{run_id}.parquet"
+        matches_model_path = settings.fs_output_dir / f"matches_model_{run_id}.parquet"
         prob_matches.to_parquet(matches_model_path, index=False)
 
         fs_features = _model.to_fs_features(classified, candidates_only=True)
@@ -351,7 +351,7 @@ def run_pipeline(
         # matcher — feeds the optional ml_feeds_clustering union in Stage 6.
         eval_frame_ml = _ml_model.to_evaluation_schema(classified_ml)
         validate(eval_frame_ml, ClassificationResults)
-        matches_ml_path = settings.matches_ml_dir / f"matches_ml_{run_id}.parquet"
+        matches_ml_path = settings.ml_output_dir / f"matches_ml_{run_id}.parquet"
         eval_frame_ml.to_parquet(matches_ml_path, index=False)
 
         ml_features = _ml_model.to_ml_features(classified_ml, candidates_only=True)

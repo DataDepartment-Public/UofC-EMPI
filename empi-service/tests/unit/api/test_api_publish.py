@@ -46,7 +46,7 @@ def fixture_settings(tmp_path):
     settings = Settings(project_root=tmp_path)
     settings.runs_dir = tmp_path / "data" / "runs"
     settings.clusters_dir = tmp_path / "data" / "clusters"
-    settings.matches_dir = tmp_path / "data" / "matches"
+    settings.auto_merge_dir = tmp_path / "data" / "auto_merge"
     settings.non_matches_dir = tmp_path / "data" / "non_matches"
     settings.processed_dir = tmp_path / "data" / "processed"
     settings.ensure_dirs()
@@ -84,7 +84,7 @@ def _write_run(settings: Settings, run_id: str):
         "high_fanout_ssn": [False], "cluster_id": [0],
         "source_blocks": ["B1"], "n_blocks": [1],
     })
-    matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
+    matches_path = settings.auto_merge_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
 
     non_matches = pd.DataFrame({

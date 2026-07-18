@@ -98,7 +98,7 @@ buckets. The split is by **rule tier** (`apply_rules` + the `AUTO_MERGE_RULES` /
 |----------|-----------|-------------|
 | **auto_merge** | confirmed by an **auto-merge-tier** rule (`SSN_DOB` / `NAME_DOB_EMAIL` / `NAME_DOB_PHONE`) | auto-merge |
 | **human_review** | confirmed **only** by a review-tier rule (`NAME_DOB_SEX` / `NAME_DOB_ADDRESS`), **OR** no rule fired and < 3 contradictions | `data/non_matches/` → downstream probabilistic / ML stage |
-| **no_match** | no rule fired **and ≥3 strong identifiers strictly disagree** (full SSN / first / last / DOB) | dropped — written to `data/rejects/` for audit, **not** sent downstream |
+| **no_match** | no rule fired **and ≥3 strong identifiers strictly disagree** (full SSN / first / last / DOB) | dropped — written to `data/no_match/` for audit, **not** sent downstream |
 
 This is the same three-way vocabulary (`contracts.CLASSIFICATION_TIERS`) the
 FS matcher and the pluggable ML matcher use — see

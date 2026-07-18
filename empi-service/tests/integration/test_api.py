@@ -31,9 +31,9 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(real_settings, "raw_dir", tmp_path / "data" / "raw")
     monkeypatch.setattr(real_settings, "processed_dir", tmp_path / "data" / "processed")
     monkeypatch.setattr(real_settings, "blocking_dir", tmp_path / "data" / "blocking")
-    monkeypatch.setattr(real_settings, "matches_dir", tmp_path / "data" / "matches")
+    monkeypatch.setattr(real_settings, "auto_merge_dir", tmp_path / "data" / "auto_merge")
     monkeypatch.setattr(real_settings, "non_matches_dir", tmp_path / "data" / "non_matches")
-    monkeypatch.setattr(real_settings, "rejects_dir", tmp_path / "data" / "rejects")
+    monkeypatch.setattr(real_settings, "no_match_dir", tmp_path / "data" / "no_match")
     monkeypatch.setattr(real_settings, "clusters_dir", tmp_path / "data" / "clusters")
     monkeypatch.setattr(real_settings, "runs_dir", tmp_path / "data" / "runs")
     monkeypatch.setattr(real_settings, "db_path", tmp_path / "empi.db")
@@ -98,7 +98,7 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
         "high_fanout_ssn": [False], "cluster_id": [0],
         "source_blocks": ["B1"], "n_blocks": [1],
     })
-    matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
+    matches_path = settings.auto_merge_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
 
     non_matches = pd.DataFrame({

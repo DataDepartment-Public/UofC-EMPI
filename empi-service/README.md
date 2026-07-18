@@ -36,7 +36,7 @@ python -m src.pipeline --input data/raw/MDM_Population.csv
 
 Runs all five stages in process (`src/pipeline.py`), validates every boundary
 against `src/contracts.py`, and writes Parquet artifacts under
-`data/{processed,blocking,matches,non_matches,rejects,matches_model,FS_output,
+`data/{processed,blocking,auto_merge,non_matches,no_match,fs_output,ml_output,
 clusters}/` plus a `RunManifest` to `data/runs/run_<run_id>.json`. Stage 4 (the
 FS matcher) is skipped with a log line if no model is active yet — see
 [`docs/FS-Matcher-Production-Guide.md`](docs/FS-Matcher-Production-Guide.md)
@@ -129,6 +129,11 @@ docs/                       # see below
   matching rules, their tiers, and precision/recall evaluation.
 - [`FS-Matcher-Production-Guide.md`](docs/FS-Matcher-Production-Guide.md) — the
   Fellegi-Sunter matcher's train/promote/serve/swap lifecycle.
+- [`ML-Matcher-Integration-Guide.md`](docs/ML-Matcher-Integration-Guide.md) —
+  handoff spec for plugging a bring-your-own model into Stage 4.5
+  (`src/models/ml_matcher/`): the `FeatureBuilder`/`MLModel` extension points,
+  what's already built (registry, pipeline wiring, schema validation), and
+  what's still a stub.
 - [`API-Design.md`](docs/API-Design.md) — the FastAPI route contract.
 - [`Application-Architecture.md`](docs/Application-Architecture.md) — how the
   backend and `empi-dashboard/` fit together end to end.

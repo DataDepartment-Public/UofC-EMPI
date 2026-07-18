@@ -12,7 +12,7 @@ def test_fs_defaults():
     assert s.fs_deploy_gate_margin == 0.02
     assert s.fs_active_model is None
     assert s.fs_model_dir.name == "fs"
-    assert s.fs_output_dir.name == "FS_output"
+    assert s.fs_output_dir.name == "fs_output"
 
 
 def test_env_overrides_thresholds(monkeypatch):
@@ -35,14 +35,12 @@ def test_env_override_active_model_path(monkeypatch, tmp_path):
 def test_ensure_dirs_creates_fs_dirs(tmp_path, monkeypatch):
     s = Settings()
     monkeypatch.setattr(s, "fs_model_dir", tmp_path / "models" / "fs")
-    monkeypatch.setattr(s, "fs_output_dir", tmp_path / "data" / "FS_output")
-    monkeypatch.setattr(s, "matches_model_dir", tmp_path / "data" / "matches_model")
+    monkeypatch.setattr(s, "fs_output_dir", tmp_path / "data" / "fs_output")
     # redirect the rest under tmp so ensure_dirs doesn't touch the repo
-    for attr in ("raw_dir", "processed_dir", "blocking_dir", "matches_dir",
-                 "non_matches_dir", "rejects_dir", "clusters_dir", "runs_dir"):
+    for attr in ("raw_dir", "processed_dir", "blocking_dir", "auto_merge_dir",
+                 "non_matches_dir", "no_match_dir", "clusters_dir", "runs_dir"):
         monkeypatch.setattr(s, attr, tmp_path / attr)
     monkeypatch.setattr(s, "db_path", tmp_path / "empi.db")
     s.ensure_dirs()
     assert (tmp_path / "models" / "fs").is_dir()
-    assert (tmp_path / "data" / "FS_output").is_dir()
-    assert (tmp_path / "data" / "matches_model").is_dir()
+    assert (tmp_path / "data" / "fs_output").is_dir()

@@ -216,7 +216,7 @@ class ProbabilisticMatches(pa.DataFrameModel):
     """Full audit record of the FS module's scoring of the `non_matches` pool.
 
     Produced by `src/models/fs_matcher/` (`FSMatcher.to_probabilistic_matches`).
-    Written per run to `data/matches_model/matches_model_<run_id>.parquet` for
+    Written per run to `data/fs_output/matches_model_<run_id>.parquet` for
     auditability/review — it is **not** unioned into clustering (clustering stays
     on the deterministic auto-merge edges only). Carries every scored pair with
     its tier, so it includes `no_match`-tier rows too.
@@ -260,7 +260,7 @@ class FSFeatures(pa.DataFrameModel):
 
     Produced by `FSMatcher.to_fs_features`. The pipeline writes the
     candidate-filtered set (``match_probability >= review_floor``) per run to
-    `data/FS_output/fs_features_<run_id>.parquet`; the `fs-train` CLI writes a
+    `data/fs_output/fs_features_<run_id>.parquet`; the `fs-train` CLI writes a
     labeled full set for GBT training. In addition to the base columns below,
     the frame carries one `gamma_<field>` (level index) and one `bf_<field>`
     (Bayes-factor bits) column per Splink comparison — validated by presence via

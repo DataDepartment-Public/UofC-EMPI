@@ -10,8 +10,10 @@ Thumbs.db
 .claude/
 CLAUDE.md
 
-#data
-empi-service/data/
+# data/ — handled by empi-service/.gitignore (per-subdirectory rules; a bare
+# "empi-service/data/" here would prune the whole subtree from git's
+# ignore-check traversal, which breaks that file's per-directory
+# !data/<dir>/SCHEMA.md negations — see the git docs on excluded parent dirs).
 
 
 

@@ -68,7 +68,7 @@ never retrains at run time and never needs the PHI labels to score.
   │  python -m src.models.fs_matcher.train                               │
   │    → models/fs/fs_model_<ts>.json        (the trained model)         │
   │    → models/fs/fs_model_<ts>.meta.json   (metrics + provenance)      │
-  │    → data/FS_output/fs_features_train_*.parquet  (GBT training data) │
+  │    → data/fs_output/fs_features_train_*.parquet  (GBT training data) │
   └──────────────────────────────────────────────────────────────────────┘
                          │  --promote  (passes the deploy-gate?)
                          ▼
@@ -80,8 +80,8 @@ never retrains at run time and never needs the PHI labels to score.
   ┌─ SERVE (every pipeline run — no labels, no training) ────────────────┐
   │  python -m src.pipeline                                               │
   │    Stage 4 loads the active model, scores non-matches, writes:       │
-  │      data/matches_model/matches_model_<run>.parquet  (audit)         │
-  │      data/FS_output/fs_features_<run>.parquet        (GBT candidates)│
+  │      data/fs_output/matches_model_<run>.parquet      (audit)         │
+  │      data/fs_output/fs_features_<run>.parquet        (GBT candidates)│
   └──────────────────────────────────────────────────────────────────────┘
 
   SWAP a model:  point EMPI_FS_ACTIVE_MODEL at a different fs_model_*.json,
@@ -161,7 +161,7 @@ Every setting is overridable via an `EMPI_`-prefixed environment variable (see
 | `fs_deploy_gate_margin` | `EMPI_FS_DEPLOY_GATE_MARGIN` | `0.02` | How much held-out precision/recall a retrain may drop before promotion is refused. |
 | `fs_active_model` | `EMPI_FS_ACTIVE_MODEL` | `None` | Explicit model file to serve (overrides `active.json`). |
 | `fs_model_dir` | `EMPI_FS_MODEL_DIR` | `models/fs` | Model store (trained JSON + meta + `active.json`). |
-| `fs_output_dir` | `EMPI_FS_OUTPUT_DIR` | `data/FS_output` | Where the GBT feature files are written. |
+| `fs_output_dir` | `EMPI_FS_OUTPUT_DIR` | `data/fs_output` | Where both the GBT feature files and the audit frame are written. |
 
 > **One knob to widen/narrow the candidate net:** lower `EMPI_FS_REVIEW_FLOOR`
 > to surface more (lower-confidence) candidates to the GBT; raise it to surface
@@ -173,8 +173,8 @@ Every setting is overridable via an `EMPI_`-prefixed environment variable (see
 
 ## 5. The GBT feature file (`FSFeatures`)
 
-Written to `data/FS_output/fs_features_<run_id>.parquet` on each pipeline run
-(candidates only) and to `data/FS_output/fs_features_train_<version>.parquet` by
+Written to `data/fs_output/fs_features_<run_id>.parquet` on each pipeline run
+(candidates only) and to `data/fs_output/fs_features_train_<version>.parquet` by
 the train CLI (the labeled training set). One row per candidate record pair:
 
 | Column | Type | Description |
@@ -200,7 +200,7 @@ inference, consumes the per-run candidate file.
 ### Audit artifact
 
 Alongside the feature file, the pipeline writes
-`data/matches_model/matches_model_<run_id>.parquet` (`ProbabilisticMatches`): the
+`data/fs_output/matches_model_<run_id>.parquet` (`ProbabilisticMatches`): the
 **full** scored non-matches set (including pairs below the candidate floor) with
 tiers and scores. It is a read-only audit/review record by default — nothing
 downstream consumes it, and it is **not** unioned into clustering **unless**

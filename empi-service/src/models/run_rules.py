@@ -16,7 +16,7 @@ USAGE:
         python src/models/run_rules.py \
             --clean   data/processed/MDM_Population_cleaned_v1_2026_05_24.parquet \
             --pairs   data/blocking/candidate_pairs_v1_2026_05_24.parquet \
-            --output  data/matches/
+            --output  data/auto_merge/
 
 What the script does:
     1. Resolves the project root so imports work from any working directory
@@ -89,7 +89,7 @@ from src.config import settings  # noqa: E402
 DEFAULT_CLEAN_DIR = settings.processed_dir
 DEFAULT_CLEAN_STEM = settings.cleaned_stem
 DEFAULT_PAIRS_DIR = settings.blocking_dir
-DEFAULT_OUTPUT_DIR = settings.matches_dir
+DEFAULT_OUTPUT_DIR = settings.auto_merge_dir
 DEFAULT_NON_MATCH_DIR = settings.non_matches_dir
 
 
@@ -272,9 +272,9 @@ def main(
         len(non_matches),
     )
 
-    settings.rejects_dir.mkdir(parents=True, exist_ok=True)
-    rj_version = _next_version(settings.rejects_dir, stem="rejects")
-    reject_path = settings.rejects_dir / f"rejects_{rj_version}_{date_tag}.parquet"
+    settings.no_match_dir.mkdir(parents=True, exist_ok=True)
+    rj_version = _next_version(settings.no_match_dir, stem="rejects")
+    reject_path = settings.no_match_dir / f"rejects_{rj_version}_{date_tag}.parquet"
     rejects.to_parquet(reject_path, index=False)
     logger.info(
         "Rejected (confident non-match) pairs saved to %s (%d rows); not routed "

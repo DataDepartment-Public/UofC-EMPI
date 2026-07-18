@@ -506,7 +506,7 @@ def evaluate(
 
 def _load_run(run_id: str, root: Path):
     cleaned = pd.read_parquet(root / f"data/processed/MDM_Population_cleaned_{run_id}.parquet")
-    matches = pd.read_parquet(root / f"data/matches/matches_{run_id}.parquet")
+    matches = pd.read_parquet(root / f"data/auto_merge/matches_{run_id}.parquet")
     nm_path = root / f"data/non_matches/non_matches_{run_id}.parquet"
     non_matches = pd.read_parquet(nm_path) if nm_path.exists() else None
     return cleaned, matches, non_matches

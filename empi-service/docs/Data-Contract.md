@@ -48,27 +48,26 @@ _Last updated: 2026-07-14._
    │    (needs cleaned + pairs)    │
    └───┬──────────┬──────────┬─────┘
        │          │          │
-  data/matches/  data/     data/rejects/
-  (auto-merge)   non_matches/ (dropped, audit-only)
+  data/auto_merge/  data/     data/no_match/
+  (auto-merge)      non_matches/ (dropped, audit-only)
        │          │
        │   ┌──────▼────────────────────┐
        │   │ 4. FS MATCHER              │  src/models/fs_matcher/               [IMPLEMENTED]
        │   │ (candidate/feature         │  candidate + feature generator,
        │   │  generator)                │  PairClassifier-shaped
        │   └──┬───────────────────┬─────┘
-       │  data/matches_model/  data/FS_output/
-       │  (audit, or feeds     (candidates, or feeds
-       │   clustering if       a downstream model if
-       │   fs_feeds_clustering) ml_feeds_clustering consumes it)
+       │           data/fs_output/
+       │  (audit frame + candidates — audit feeds clustering if
+       │   fs_feeds_clustering; candidates feed a downstream model
+       │   if ml_feeds_clustering consumes them)
        │          │
        │   ┌──────▼────────────────────┐
        │   │ 4.5 ML MATCHER              │  src/models/ml_matcher/              [SCAFFOLD]
        │   │ (pluggable candidate/      │  bring-your-own-model/-features;
        │   │  feature generator)        │  same PairClassifier shape as FS
        │   └──┬───────────────────┬─────┘
-       │  data/matches_ml/     data/ML_output/
-       │  (audit, or feeds     (candidates)
-       │   clustering if
+       │           data/ml_output/
+       │  (audit frame + candidates — audit feeds clustering if
        │   ml_feeds_clustering)
        │
    ┌───▼─────────────────────────────┐
@@ -280,7 +279,7 @@ routing below differs by tier.
 ### 3a — Matches (auto-merge tier only)
 
 - **Contract:** `contracts.Matches` (`strict=True`; empty frames skip validation).
-- **Location:** `data/matches/matches_*.parquet`
+- **Location:** `data/auto_merge/matches_*.parquet`
 - **Grain:** one row per pair confirmed by an **auto-merge-tier** rule
   (`contracts.AUTO_MERGE_RULE_NAMES` = `SSN_DOB`, `NAME_DOB_EMAIL`,
   `NAME_DOB_PHONE`). **`NAME_DOB_SEX` and `NAME_DOB_ADDRESS` never appear
@@ -323,7 +322,7 @@ routing below differs by tier.
 ### 3c — Rejects (terminal, audit-only)
 
 - **Contract:** `contracts.Rejects` (subclasses `CandidatePairs`; `strict=True`).
-- **Location:** `data/rejects/rejects_*.parquet`
+- **Location:** `data/no_match/rejects_*.parquet`
 - **Grain:** unconfirmed pairs with **≥ 3** of {full SSN, first, last, DOB}
   strictly disagreeing (calibrated on real run `real_20260620`: 2 conflicts
   still carry ~10% true matches, 3 carry ~0%). **Dropped** from the pipeline —
@@ -371,7 +370,7 @@ union), keyed on `(PATID_A, PATID_B)`.
 ### 4a — ProbabilisticMatches (full audit frame)
 
 - **Contract:** `contracts.ProbabilisticMatches` (`strict=True`).
-- **Location:** `data/matches_model/matches_model_<run_id>.parquet`
+- **Location:** `data/fs_output/matches_model_<run_id>.parquet`
 - **Grain:** every scored `non_matches` pair, all tiers including `no_match`.
 - **Status:** audit frame; no downstream reader other than Stage 5's optional
   edge union (see below) when `settings.fs_feeds_clustering` is on.
@@ -391,8 +390,8 @@ union), keyed on `(PATID_A, PATID_B)`.
 - **Contract:** `contracts.FSFeatures` (`strict=False` — `gamma_<field>` /
   `bf_<field>` feature columns are dynamic extras, checked for presence by
   `validate_fs_features` rather than pandera's closed-schema mode).
-- **Location:** `data/FS_output/fs_features_<run_id>.parquet` (pipeline,
-  candidate-filtered) and `data/FS_output/fs_features_train_<version>.parquet`
+- **Location:** `data/fs_output/fs_features_<run_id>.parquet` (pipeline,
+  candidate-filtered) and `data/fs_output/fs_features_train_<version>.parquet`
   (train CLI, labeled).
 - **Grain:** candidates only — filtered to `match_probability >=
   settings.fs_review_floor` (0.40 default; doubles as the tier boundary *and*
@@ -440,7 +439,7 @@ union), keyed on `(PATID_A, PATID_B)`.
 
 - **Contract:** `contracts.ClassificationResults` (the same shared 5-column
   shape every classifier stage emits — see the Pipeline overview note).
-- **Location:** `data/matches_ml/matches_ml_<run_id>.parquet`
+- **Location:** `data/ml_output/matches_ml_<run_id>.parquet`
 - **Grain:** every scored `non_matches` pair, all tiers.
 - **Status:** audit frame; feeds Stage 5's optional edge union when
   `settings.ml_feeds_clustering` is on.
@@ -450,7 +449,7 @@ union), keyed on `(PATID_A, PATID_B)`.
 - **Contract:** `contracts.MLFeatures` (`strict=False` — BYOF means feature
   column names/count are the implementer's choice; only the pair key is
   validated by name, via `validate_ml_features`).
-- **Location:** `data/ML_output/ml_features_<run_id>.parquet`
+- **Location:** `data/ml_output/ml_features_<run_id>.parquet`
 - **Grain:** candidates only — filtered to `match_probability >=
   settings.ml_review_floor` (0.40 default).
 
@@ -773,13 +772,11 @@ whether that's by design.
 | `data/raw/` | (external upload) | Stage 1 (`clean.py`) | Active — pipeline input |
 | `data/processed/` | Stage 1 | Stage 2, Stage 3 (attribute join), `fs_matcher/train.py` | Active |
 | `data/blocking/` | Stage 2 (stacked, production) / standalone `run_blocking.py` (8-block-only, dev — see warning) | Stage 3, `fs_matcher/train.py` | Active |
-| `data/matches/` | Stage 3 (auto-merge tier) | `src/api/ingest/publish.py`, `src/evaluation/rule_eval.py` | Active |
+| `data/auto_merge/` | Stage 3 (auto-merge tier) | `src/api/ingest/publish.py`, `src/evaluation/rule_eval.py` | Active |
 | `data/non_matches/` | Stage 3 (`non_matches_*` + `review_evidence_*` companion) | Stage 4 (scores `non_matches`), `src/api/ingest/publish.py` (both files) | Active |
-| `data/rejects/` | Stage 3 | *(none)* | Terminal — audit only, no reader |
-| `data/matches_model/` | Stage 4 (`ProbabilisticMatches`) | *(none, unless `fs_feeds_clustering` is on)* | Audit by default; feeds Stage 5's edge union when explicitly turned on |
-| `data/FS_output/` | Stage 4 (pipeline candidates + `train.py` labeled training set) | Stage 4.5 (`fs_features` enrichment input, optional) | Active — a real consumer now exists |
-| `data/matches_ml/` | Stage 4.5 (`ClassificationResults`) | *(none, unless `ml_feeds_clustering` is on)* | Audit by default; feeds Stage 5's edge union when explicitly turned on |
-| `data/ML_output/` | Stage 4.5 (pipeline candidates) | *(none yet)* | Scaffold — no in-repo consumer until a real model is trained |
+| `data/no_match/` | Stage 3 | *(none)* | Terminal — audit only, no reader |
+| `data/fs_output/` | Stage 4 (`ProbabilisticMatches` audit frame + pipeline candidates + `train.py` labeled training set — merged folder, was `matches_model/`+`FS_output/`) | Stage 4.5 (`fs_features` enrichment input, optional); audit frame feeds Stage 5's edge union when `fs_feeds_clustering` is on | Active |
+| `data/ml_output/` | Stage 4.5 (`ClassificationResults` audit frame + pipeline candidates — merged folder, was `matches_ml/`+`ML_output/`) | *(none yet)*; audit frame feeds Stage 5's edge union when `ml_feeds_clustering` is on | Scaffold — no in-repo consumer until a real model is trained |
 | `data/clusters/` | Stage 5 | `src/api/ingest/publish.py` | Active |
 | `data/runs/` | `src/pipeline.py` (`RunManifest`) | `src/api/ingest/publish.py`, `fs_matcher/train.py` (input resolution), `scripts/build_eval_workbook.py` | Active |
 | `data/silver_labels/` | *(external, VM-only)* | `fs_matcher/train.py` | VM-only PHI input, gitignored |

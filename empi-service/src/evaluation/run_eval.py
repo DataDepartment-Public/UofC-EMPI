@@ -215,7 +215,7 @@ def _load_artifacts(
     cleaned = pd.read_parquet(
         settings.processed_dir / f"{settings.cleaned_stem}_{run_id}.parquet"
     )
-    matches = pd.read_parquet(settings.matches_dir / f"matches_{run_id}.parquet")
+    matches = pd.read_parquet(settings.auto_merge_dir / f"matches_{run_id}.parquet")
     nm_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches = pd.read_parquet(nm_path) if nm_path.exists() else None
     return cleaned, matches, non_matches

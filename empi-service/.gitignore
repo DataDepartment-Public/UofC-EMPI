@@ -19,23 +19,44 @@ dist/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
-# Data files (keep structure, ignore data)
+# Data files (keep structure + the per-folder SCHEMA.md docs; ignore data)
 data/raw/*
 data/processed/*
 data/blocking/*
-data/matches/*
+data/auto_merge/*
 data/non_matches/*
-data/rejects/*
+data/no_match/*
+data/fs_output/*
+data/ml_output/*
 data/clusters/*
 data/runs/*
+data/local_index/*
+data/silver_labels/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/blocking/.gitkeep
-!data/matches/.gitkeep
+!data/auto_merge/.gitkeep
 !data/non_matches/.gitkeep
-!data/rejects/.gitkeep
+!data/no_match/.gitkeep
+!data/fs_output/.gitkeep
+!data/ml_output/.gitkeep
 !data/clusters/.gitkeep
 !data/runs/.gitkeep
+!data/local_index/.gitkeep
+!data/silver_labels/.gitkeep
+!data/raw/SCHEMA.md
+!data/processed/SCHEMA.md
+!data/blocking/SCHEMA.md
+!data/auto_merge/SCHEMA.md
+!data/non_matches/SCHEMA.md
+!data/no_match/SCHEMA.md
+!data/fs_output/SCHEMA.md
+!data/ml_output/SCHEMA.md
+!data/clusters/SCHEMA.md
+!data/runs/SCHEMA.md
+!data/local_index/SCHEMA.md
+!data/silver_labels/SCHEMA.md
+!data/README.md
 *.csv
 *.parquet
 *.pkl
@@ -63,14 +84,6 @@ models/experiments/*
 # produced on the VM by `python -m src.models.fs_matcher.train`; runtime, not source.
 models/fs/*
 !models/fs/.gitkeep
-
-# FS matcher outputs — GBT feature parquet (data/FS_output) + the
-# ProbabilisticMatches audit frame (data/matches_model). (Parquet is already
-# globally ignored; keep the dirs on a fresh clone via .gitkeep.)
-data/FS_output/*
-!data/FS_output/.gitkeep
-data/matches_model/*
-!data/matches_model/.gitkeep
 
 # IDE
 .vscode/

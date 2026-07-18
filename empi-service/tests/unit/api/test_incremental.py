@@ -45,7 +45,7 @@ def settings(tmp_path):
     s = Settings(project_root=tmp_path)
     s.runs_dir = tmp_path / "data" / "runs"
     s.clusters_dir = tmp_path / "data" / "clusters"
-    s.matches_dir = tmp_path / "data" / "matches"
+    s.auto_merge_dir = tmp_path / "data" / "auto_merge"
     s.non_matches_dir = tmp_path / "data" / "non_matches"
     s.processed_dir = tmp_path / "data" / "processed"
     # No FS model on disk -> resolve_active_model() returns None cleanly;
@@ -86,7 +86,7 @@ def _seed_population(settings: Settings, conn) -> None:
         "high_fanout_ssn": [False], "cluster_id": [0],
         "source_blocks": ["B1"], "n_blocks": [1],
     })
-    matches_path = settings.matches_dir / "matches_r0.parquet"
+    matches_path = settings.auto_merge_dir / "matches_r0.parquet"
     matches.to_parquet(matches_path, index=False)
 
     non_matches = pd.DataFrame({

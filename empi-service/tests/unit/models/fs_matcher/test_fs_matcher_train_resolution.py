@@ -31,7 +31,7 @@ def _write_manifest(
         "raw_input": _artifact("data/raw/MDM_Population.csv"),
         "cleaned": _artifact(cleaned_path),
         "candidate_pairs": _artifact(pool_path),
-        "matches": _artifact("data/matches/matches_x.parquet"),
+        "matches": _artifact("data/auto_merge/matches_x.parquet"),
         "non_matches": _artifact("data/non_matches/non_matches_x.parquet"),
     }
     p = runs_dir / f"run_{run_id}.json"

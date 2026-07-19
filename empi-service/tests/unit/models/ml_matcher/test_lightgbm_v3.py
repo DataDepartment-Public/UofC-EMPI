@@ -14,12 +14,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.contracts import TIER_AUTO_MERGE, TIER_HUMAN_REVIEW, TIER_NO_MATCH
+from src.models.ml_matcher.base import ClassificationConfig
 from src.models.ml_matcher.lightgbm_v3 import (
     CATEGORICAL_FEATURES,
     FEATURE_COLS,
     MatchProbabilityAdapter,
     V3FeatureBuilder,
 )
+from src.models.ml_matcher.matcher import MLMatcher
 from src.models.ml_matcher.registry import load_model_artifact
 
 
@@ -130,6 +133,21 @@ def test_adapter_reorders_columns_to_training_order():
     X = pd.DataFrame({c: [1.0] for c in reversed(FEATURE_COLS)})
     proba = adapter.predict_proba(X)
     np.testing.assert_allclose(proba[:, 1], 0.8)
+
+
+# ─── 2-tier classify (review_floor = 0.0) ─────────────────────────────────────
+def test_classify_two_tier_when_review_floor_zero():
+    """With the FS gate removing non-matches upstream, the ML matcher runs with
+    review_floor=0.0 and must emit ONLY auto_merge / human_review (no no_match)."""
+    ml = MLMatcher(classification_config=ClassificationConfig(auto_merge_threshold=0.70, review_floor=0.0))
+    preds = pd.DataFrame({
+        "PATID_A": ["A", "C", "E", "G"],
+        "PATID_B": ["B", "D", "F", "H"],
+        "match_probability": [0.0, 0.40, 0.699, 0.95],
+    })
+    tiers = ml.classify(preds)["classification_tier"].tolist()
+    assert TIER_NO_MATCH not in tiers
+    assert tiers == [TIER_HUMAN_REVIEW, TIER_HUMAN_REVIEW, TIER_HUMAN_REVIEW, TIER_AUTO_MERGE]
 
 
 # ─── load_model_artifact round-trip ───────────────────────────────────────────

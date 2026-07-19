@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from src.api import incremental, publish
-from src.api.index_backend import build_index_backend
+from src.api.ingest import incremental, publish
+from src.api.backends.index_backend import build_index_backend
 from src.config import Settings
 from src.pipeline import run_pipeline
 
@@ -68,7 +68,7 @@ def all_in_flight() -> dict[str, dict]:
 def run_pipeline_job(run_id: str, raw_input: Path, settings: Settings) -> None:
     """Run clean→block→rules→cluster, then publish to whichever `IndexBackend`
     `settings.index_backend` selects (SQLite `empi.db` by default, or the
-    local Parquet index — see `src/api/index_backend.py`). Records status."""
+    local Parquet index — see `src/api/backends/index_backend.py`). Records status."""
     _touch(run_id, "running")
     backend = None
     try:
@@ -121,7 +121,7 @@ def score_records_job(run_id: str, records: list[dict], settings: Settings) -> N
 
     Storage is whichever `IndexBackend` `settings.index_backend` selects
     (`build_index_backend` — SQLite/`empi.db` by default, or local Parquet
-    files; see `src/api/index_backend.py`)."""
+    files; see `src/api/backends/index_backend.py`)."""
     _touch_score(run_id, "running")
     backend = None
     try:

@@ -15,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from src.api import jobs
 from src.api.deps import get_backend, get_settings
-from src.api.index_backend import IndexBackend
+from src.api.backends.index_backend import IndexBackend
 from src.api.schemas import (
     CandidatePatient,
     Entity,
@@ -24,6 +24,8 @@ from src.api.schemas import (
     RecordScoreOutcome,
     RecordsPage,
     ReviewCandidate,
+    ReviewQueueItem,
+    ReviewQueuePage,
     ScoreCreateResponse,
     ScoreRequest,
     ScoreResult,
@@ -42,6 +44,8 @@ def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict])
                 patid_a=rc["patid_a"], patid_b=rc["patid_b"],
                 match_rule=rc["match_rule"], confidence=rc["confidence"],
                 evidence=rc["evidence"], source_blocks=rc["source_blocks"],
+                fs_match_probability=rc.get("fs_match_probability"),
+                fs_classification_tier=rc.get("fs_classification_tier"),
                 patient_a=CandidatePatient(
                     patid=rc["patid_a"], first_name=rc["a_first_name"],
                     last_name=rc["a_last_name"], birth_date=rc["a_birth_date"],
@@ -89,6 +93,58 @@ def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict])
     )
 
 
+def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
+    return ReviewQueueItem(
+        patid_a=rc["patid_a"], patid_b=rc["patid_b"],
+        mid_a=rc["mid_a"], mid_b=rc["mid_b"],
+        member_count_a=rc["member_count_a"], member_count_b=rc["member_count_b"],
+        match_rule=rc["match_rule"], confidence=rc["confidence"],
+        evidence=rc["evidence"], source_blocks=rc["source_blocks"],
+        fs_match_probability=rc.get("fs_match_probability"),
+        fs_classification_tier=rc.get("fs_classification_tier"),
+        reviewed=bool(rc["reviewed"]),
+        patient_a=CandidatePatient(
+            patid=rc["patid_a"], first_name=rc["a_first_name"],
+            last_name=rc["a_last_name"], birth_date=rc["a_birth_date"],
+            ssn_last4=rc["a_ssn_last4"], email=rc["a_email"],
+            zip_code=rc["a_zip_code"], address1=rc["a_address1"],
+            sex=rc["a_sex"], phone=rc["a_phone"],
+        ),
+        patient_b=CandidatePatient(
+            patid=rc["patid_b"], first_name=rc["b_first_name"],
+            last_name=rc["b_last_name"], birth_date=rc["b_birth_date"],
+            ssn_last4=rc["b_ssn_last4"], email=rc["b_email"],
+            zip_code=rc["b_zip_code"], address1=rc["b_address1"],
+            sex=rc["b_sex"], phone=rc["b_phone"],
+        ),
+    )
+
+
+@router.get("/review-queue", response_model=ReviewQueuePage)
+def list_review_queue(
+    confidence_min: float | None = None,
+    confidence_max: float | None = None,
+    reviewed: bool | None = None,
+    search: str | None = None,
+    page: int = 1,
+    page_size: int | None = None,
+    backend: IndexBackend = Depends(get_backend),
+    settings: Settings = Depends(get_settings),
+) -> ReviewQueuePage:
+    """Candidate-grain review queue — one row per pending pair, independent
+    of which cluster it belongs to (docs/Dashboard-Guide.md's Review Queue
+    tab). `reviewed` unset returns every candidate; pass `reviewed=false` for
+    the default "Needs review" queue view, `reviewed=true` for "Already
+    reviewed"."""
+    page_size = page_size or settings.records_page_size
+    rows, total = backend.list_review_candidates(
+        confidence_min=confidence_min, confidence_max=confidence_max,
+        reviewed=reviewed, search=search, page=page, page_size=page_size,
+    )
+    items = [_to_review_queue_item(row) for row in rows]
+    return ReviewQueuePage(total=total, page=page, page_size=page_size, items=items)
+
+
 @router.get("/records", response_model=RecordsPage)
 def list_records(
     search: str | None = None,
@@ -98,6 +154,8 @@ def list_records(
     ssn_last4: str | None = None,
     updated_after: str | None = None,
     updated_before: str | None = None,
+    confidence_min: float | None = None,
+    confidence_max: float | None = None,
     page: int = 1,
     page_size: int | None = None,
     backend: IndexBackend = Depends(get_backend),
@@ -108,6 +166,7 @@ def list_records(
         search=search, origin=origin, is_merged=is_merged,
         birth_date=birth_date, ssn_last4=ssn_last4,
         updated_after=updated_after, updated_before=updated_before,
+        confidence_min=confidence_min, confidence_max=confidence_max,
         page=page, page_size=page_size,
     )
     items = []
@@ -143,7 +202,7 @@ def score_records(
 ) -> ScoreCreateResponse:
     """Score one or a batch of new records against the existing population
     without re-running the full pipeline — see `docs/API-Design.md` and
-    `src/api/incremental.py`. Always a background job (same 202 + poll
+    `src/api/ingest/incremental.py`. Always a background job (same 202 + poll
     pattern as `POST /runs`), regardless of batch size."""
     settings.ensure_dirs()
     run_id = jobs.new_run_id()

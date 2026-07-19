@@ -36,7 +36,7 @@ python -m src.pipeline --input data/raw/MDM_Population.csv
 
 Runs all five stages in process (`src/pipeline.py`), validates every boundary
 against `src/contracts.py`, and writes Parquet artifacts under
-`data/{processed,blocking,matches,non_matches,rejects,matches_model,FS_output,
+`data/{processed,blocking,auto_merge,non_matches,no_match,fs_output,ml_output,
 clusters}/` plus a `RunManifest` to `data/runs/run_<run_id>.json`. Stage 4 (the
 FS matcher) is skipped with a log line if no model is active yet — see
 [`docs/FS-Matcher-Production-Guide.md`](docs/FS-Matcher-Production-Guide.md)
@@ -57,13 +57,13 @@ background job. For a fully local workflow with no server running:
 
 ```bash
 python -m src.pipeline --input data/raw/MDM_Population.csv   # writes Parquet + manifest
-python -m src.api.publish_local --run-id <run_id>              # -> data/local_index/*.parquet
+python -m src.api.ingest.publish_local --run-id <run_id>              # -> data/local_index/*.parquet
 ```
 
-Storage is pluggable (`src/api/index_backend.py`, `EMPI_INDEX_BACKEND`):
+Storage is pluggable (`src/api/backends/index_backend.py`, `EMPI_INDEX_BACKEND`):
 **SQLite** (`data/empi.db`, the default) or a **local Parquet index**
 (`data/local_index/`, `EMPI_INDEX_BACKEND=parquet`) — the same FastAPI app,
-dashboard, and incremental-scoring CLI (`python -m src.api.local_score`) all
+dashboard, and incremental-scoring CLI (`python -m src.api.ingest.local_score`) all
 work identically against either. See
 [`docs/Data-Contract.md`](docs/Data-Contract.md)'s Stage 6 for the full schema
 and [`docs/API-Design.md`](docs/API-Design.md) for the route contract.
@@ -79,26 +79,39 @@ ruff check src/ tests/    # lint
 
 ```
 src/
-  pipeline.py           # orchestrator: clean -> block -> rules -> FS matcher -> cluster
-  contracts.py           # pandera/pydantic contracts for every stage boundary
-  config.py              # Settings (EMPI_-prefixed env vars) + logging setup
-  preprocessing/          # cleaning (clean.py, transformations.py) + blocking
+  pipeline.py             # orchestrator: clean -> block -> rules -> FS matcher
+                          # -> ML matcher -> cluster
+  contracts.py             # pandera/pydantic contracts for every stage boundary
+  config.py                # Settings (EMPI_-prefixed env vars) + logging setup
+  preprocessing/            # cleaning (clean.py, transformations.py) + blocking
                           # (blocking.py, qgram_blocking.py, meta_blocking.py,
                           #  stacked_blocking.py, run_blocking.py)
-  models/                 # deterministic_rules.py, run_rules.py, clustering.py,
-                          # fs_matcher/ (Fellegi-Sunter matcher — train/serve/registry)
-  evaluation/             # blocking + rule evaluation harnesses
-  api/                    # FastAPI app: main.py, deps.py, schemas.py, jobs.py,
-                          # store.py (SQLite) + parquet_backend.py (local mode),
-                          # index_backend.py (the pluggable-storage seam),
-                          # publish.py / publish_local.py (batch),
-                          # incremental.py / local_score.py (single/few-record),
-                          # routers/{health,runs,records,audit,dashboard}.py
-data/, models/, logs/     # pipeline inputs/outputs, gitignored (structure kept via .gitkeep)
-notebooks/                # exploratory analysis
-scripts/                  # research/eval CLIs (blocking recall, FS training research, ...)
-tests/                    # unit/, integration/, regression/
-docs/                     # see below
+  models/
+    base.py                 # PairClassifier — the shared interface every
+                          # classifier stage below satisfies
+    clustering.py            # connected-component clustering (terminal stage)
+    deterministic_rules/     # rules.py (rule engine), classifier.py (three-way
+                          # decision + the PairClassifier adapter)
+    run_rules.py             # dev/debug CLI for deterministic_rules
+    fs_matcher/               # Fellegi-Sunter matcher — train/serve/registry
+    ml_matcher/                # pluggable ML matcher (bring-your-own-model/
+                          # -features) — scaffold, see
+                          # docs/ML-Matcher-Integration-Guide.md
+  evaluation/               # blocking + rule evaluation harnesses
+  api/
+    main.py, deps.py, schemas.py, jobs.py   # FastAPI app wiring
+    backends/                 # index_backend.py (the pluggable-storage seam),
+                          # sql_backend.py (SQLite), parquet_backend.py (local mode)
+    ingest/                    # publish.py / publish_local.py (batch),
+                          # incremental.py / local_score.py (single/few-record)
+    routers/                   # health, runs, records, audit, dashboard
+data/, models/, logs/       # pipeline inputs/outputs, gitignored (structure kept via .gitkeep)
+notebooks/                  # exploratory analysis
+scripts/                    # operational eval/data CLIs (build_eval_workbook.py, eval_against_labels.py, ...)
+                          # research/ — concluded one-off investigations (blocking rounds, FS/splink rounds)
+tests/                      # unit/{api,models,preprocessing,evaluation}/, integration/, regression/
+                          # (unit/ subpackages mirror src/'s layout)
+docs/                       # see below
 ```
 
 ## Docs
@@ -116,6 +129,11 @@ docs/                     # see below
   matching rules, their tiers, and precision/recall evaluation.
 - [`FS-Matcher-Production-Guide.md`](docs/FS-Matcher-Production-Guide.md) — the
   Fellegi-Sunter matcher's train/promote/serve/swap lifecycle.
+- [`ML-Matcher-Integration-Guide.md`](docs/ML-Matcher-Integration-Guide.md) —
+  handoff spec for plugging a bring-your-own model into Stage 4.5
+  (`src/models/ml_matcher/`): the `FeatureBuilder`/`MLModel` extension points,
+  what's already built (registry, pipeline wiring, schema validation), and
+  what's still a stub.
 - [`API-Design.md`](docs/API-Design.md) — the FastAPI route contract.
 - [`Application-Architecture.md`](docs/Application-Architecture.md) — how the
   backend and `empi-dashboard/` fit together end to end.

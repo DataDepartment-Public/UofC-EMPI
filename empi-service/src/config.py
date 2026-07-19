@@ -47,10 +47,9 @@ class Settings(BaseSettings):
     raw_dir: Path = _DATA / "raw"
     processed_dir: Path = _DATA / "processed"
     blocking_dir: Path = _DATA / "blocking"
-    matches_dir: Path = _DATA / "matches"
-    matches_model_dir: Path = _DATA / "matches_model"
+    auto_merge_dir: Path = _DATA / "auto_merge"
     non_matches_dir: Path = _DATA / "non_matches"
-    rejects_dir: Path = _DATA / "rejects"
+    no_match_dir: Path = _DATA / "no_match"
     clusters_dir: Path = _DATA / "clusters"
     runs_dir: Path = _DATA / "runs"
     log_dir: Path = _PROJECT_ROOT / "logs"
@@ -154,9 +153,10 @@ class Settings(BaseSettings):
         "registry resolves the active pointer (or latest) in fs_model_dir.",
     )
     fs_output_dir: Path = Field(
-        default=_DATA / "FS_output",
-        description="Output dir for the GBT feature parquet — the pipeline's "
-        "per-run candidate set and the train CLI's labeled training set. Gitignored.",
+        default=_DATA / "fs_output",
+        description="Output dir for both the ProbabilisticMatches audit frame "
+        "and the GBT feature parquet — the pipeline's per-run candidate set "
+        "and the train CLI's labeled training set. Gitignored.",
     )
     fs_auto_merge_threshold: float = Field(
         default=0.95,
@@ -175,6 +175,68 @@ class Settings(BaseSettings):
         description="A retrained FS model may only be promoted to 'active' if "
         "its held-out precision/recall are within this margin of the current "
         "active model's (guards against deploying a degraded retrain).",
+    )
+    fs_feeds_clustering: bool = Field(
+        default=False,
+        description="When True, the FS matcher's auto_merge-tier "
+        "ClassificationResults union into Stage 5 clustering edges alongside "
+        "the deterministic rules' matches. Default OFF preserves today's "
+        "behavior (FS is audit-only) until a trained FS model is "
+        "deliberately promoted for production auto-merge.",
+    )
+
+    # ── Stage 4.5: pluggable ML matcher (src/models/ml_matcher/) ─────────────
+    # Bring-your-own-model / bring-your-own-features candidate + feature
+    # generator, structurally parallel to the FS matcher: loads a pre-trained
+    # model artifact (no per-run training) and scores the rules' `non_matches`
+    # pool, optionally enriched with the FS matcher's FSFeatures. Skipped
+    # entirely when no active model is resolvable, same as Stage 4.
+    ml_model_dir: Path = Field(
+        default=_MODELS / "ml",
+        description="Directory of trained ML model artifacts and the "
+        "'active' pointer. Gitignored — populated by "
+        "`python -m src.models.ml_matcher.train` once a real training "
+        "implementation is plugged in.",
+    )
+    ml_active_model: Path | None = Field(
+        default=None,
+        description="Explicit active ML model artifact to serve. When None, "
+        "the registry resolves the active pointer (or latest) in "
+        "ml_model_dir.",
+    )
+    ml_output_dir: Path = Field(
+        default=_DATA / "ml_output",
+        description="Output dir for both the ML matcher's full "
+        "ClassificationResults audit frame and its feature parquet — the "
+        "pipeline's per-run candidate set and the train CLI's labeled "
+        "training set. Gitignored.",
+    )
+    ml_auto_merge_threshold: float = Field(
+        default=0.95,
+        description="Match-probability at/above which a scored pair is "
+        "tiered 'auto_merge'. Informational only unless ml_feeds_clustering "
+        "is on.",
+    )
+    ml_review_floor: float = Field(
+        default=0.40,
+        description="Match-probability at/above which a pair is tiered "
+        "'human_review'. Doubles as the CANDIDATE CUTOFF: only pairs at/above "
+        "this land in the MLFeatures candidate parquet.",
+    )
+    ml_deploy_gate_margin: float = Field(
+        default=0.02,
+        description="A retrained ML model may only be promoted to 'active' "
+        "if its held-out precision/recall are within this margin of the "
+        "current active model's (guards against deploying a degraded "
+        "retrain).",
+    )
+    ml_feeds_clustering: bool = Field(
+        default=False,
+        description="When True, the ML matcher's auto_merge-tier "
+        "ClassificationResults union into Stage 5 clustering edges alongside "
+        "the deterministic rules' matches. Independent of "
+        "fs_feeds_clustering. Default OFF preserves clustering-on-"
+        "deterministic-edges-only as the out-of-the-box behavior.",
     )
 
     # ── Logging (see configure_logging below) ────────────────────────────────
@@ -238,14 +300,15 @@ class Settings(BaseSettings):
             self.raw_dir,
             self.processed_dir,
             self.blocking_dir,
-            self.matches_dir,
+            self.auto_merge_dir,
             self.non_matches_dir,
-            self.rejects_dir,
+            self.no_match_dir,
             self.clusters_dir,
             self.runs_dir,
-            self.matches_model_dir,
             self.fs_model_dir,
             self.fs_output_dir,
+            self.ml_model_dir,
+            self.ml_output_dir,
             self.db_path.parent,
             self.local_index_dir,
         ):

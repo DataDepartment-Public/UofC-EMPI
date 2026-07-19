@@ -155,11 +155,13 @@ empi-dashboard/src/
     page.tsx                    # Dashboard tab (KPIs, charts)
     dataset/page.tsx            # Dataset tab (records, clusters, merge/unmerge)
     dataset/[mid]/explain/      # Model Explanation sub-page
+    review/page.tsx             # Review-queue tab (candidate review, manual match)
     api/                        # ── BFF: Route Handlers proxy to FastAPI ──
       runs/route.ts, runs/[runId]/route.ts
       records/route.ts, records/[patid]/raw/route.ts
       clusters/[mid]/route.ts
-      audit/route.ts, audit/merge/route.ts, audit/unmerge/route.ts
+      review-queue/route.ts
+      audit/route.ts, audit/merge/route.ts, audit/unmerge/route.ts, audit/dismiss/route.ts
       dashboard/summary/route.ts
       health/route.ts
   lib/
@@ -168,10 +170,13 @@ empi-dashboard/src/
     schemas.ts                   # zod models mirroring src/api/schemas.py
     hooks.ts                     # TanStack Query hooks
     compare.ts, explain.ts, format.ts
-  components/
-    TopNav.tsx  KpiCard.tsx  MatchStatusChart.tsx  TrendChart.tsx
-    DatasetFilters.tsx  DatasetRow.tsx  MergeModal.tsx  StatusBadge.tsx
-    RawDataDrawer.tsx  FeatureComparisonTable.tsx  ModelInfoPanel.tsx  Toast.tsx
+  components/                    # grouped by feature area, not flat
+    dataset/    DatasetFilters.tsx  DatasetRow.tsx  UnmergeModal.tsx
+    dashboard/  KpiCard.tsx  MatchStatusChart.tsx  ModelInfoPanel.tsx  TrendChart.tsx
+    review/     ManualMatchModal.tsx  MergeModal.tsx  PipelineTrail.tsx
+                ReviewCandidateDetail.tsx  ReviewQueueList.tsx
+    shared/     FeatureComparisonTable.tsx  RawDataDrawer.tsx  SsnReveal.tsx
+                Toast.tsx  TopNav.tsx
 ```
 
 ### Responsibilities by layer

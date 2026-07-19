@@ -18,7 +18,7 @@ raw → src/preprocessing/clean.py → cleaned dataset (PATID + *_clean fields)
     → src/preprocessing/stacked_blocking.py
           8-block (blocking.py)  ∪  q-gram (qgram_blocking.py)  →  CNP prune (meta_blocking.py)
         → candidate pairs (PATID_A, PATID_B, source_blocks, n_blocks)
-    → src/models/deterministic_rules.py → match / review / reject
+    → src/models/deterministic_rules/ → match / review / reject
 ```
 
 Blocking decides **which pairs are even compared**. A pair the rules would
@@ -167,7 +167,7 @@ To prevent runaway blocks and false-positive clusters:
   set) for one record, factored out of `run_inference_blocking` so it's also
   the single source of truth for `POST /records/score`'s SQL-backed lookup
   (`store.lookup_block_candidates` against the persisted `block_key` table —
-  see `docs/API-Design.md` §2/§3 and `src/api/incremental.py`). That table is
+  see `docs/API-Design.md` §2/§3 and `src/api/ingest/incremental.py`). That table is
   the on-disk equivalent of `BlockingIndex`, rebuilt by every full publish and
   incrementally appended to between publishes, so incremental scoring never
   rebuilds an in-memory index from the whole population.

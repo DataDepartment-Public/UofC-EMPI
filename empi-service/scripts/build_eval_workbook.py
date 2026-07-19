@@ -8,7 +8,7 @@ each match against every available field.
 USAGE:
     python scripts/build_eval_workbook.py
     python scripts/build_eval_workbook.py --input data/raw/MDM_Population.csv \
-        --output data/matches/match_eval.xlsx --n 100 --seed 42
+        --output data/auto_merge/match_eval.xlsx --n 100 --seed 42
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ def main() -> None:
     cleaned = pd.read_parquet(root / manifest.cleaned.path)
     matches = pd.read_parquet(root / manifest.matches.path)
 
-    output = args.output or (root / "data" / "matches" / f"match_eval_{manifest.run_id}.xlsx")
+    output = args.output or (root / "data" / "auto_merge" / f"match_eval_{manifest.run_id}.xlsx")
     output.parent.mkdir(parents=True, exist_ok=True)
     attr_cols = _attr_columns(cleaned)
 

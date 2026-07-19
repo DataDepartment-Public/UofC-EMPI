@@ -10,8 +10,8 @@ from collections.abc import Iterator
 
 from fastapi import Depends, Header, HTTPException
 
-from src.api import store
-from src.api.index_backend import IndexBackend, build_index_backend
+from src.api.backends import sql_backend
+from src.api.backends.index_backend import IndexBackend, build_index_backend
 from src.config import Settings, settings as default_settings
 
 #: Serializes Parquet-backend requests within one process. `ParquetIndexBackend`
@@ -41,7 +41,7 @@ def get_db(settings: Settings = Depends(get_settings)) -> Iterator:
     SQL should depend on this directly — `get_backend` below is the
     backend-agnostic dependency everything else should use.
     """
-    conn = store.get_connection(settings.db_path)
+    conn = sql_backend.get_connection(settings.db_path)
     try:
         yield conn
     finally:
@@ -50,7 +50,7 @@ def get_db(settings: Settings = Depends(get_settings)) -> Iterator:
 
 def get_backend(settings: Settings = Depends(get_settings)) -> Iterator[IndexBackend]:
     """Yield one `IndexBackend` (SQLite or Parquet local mode, per
-    `settings.index_backend` — see `src/api/index_backend.py`) for the
+    `settings.index_backend` — see `src/api/backends/index_backend.py`) for the
     request's lifetime, then close it. The read routes (`records.py`,
     `dashboard.py`, `audit.py`) depend on this instead of `get_db` so they
     work identically against either backend.

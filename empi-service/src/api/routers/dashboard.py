@@ -22,7 +22,7 @@ import json
 from fastapi import APIRouter, Depends
 
 from src.api.deps import get_backend, get_settings
-from src.api.index_backend import IndexBackend
+from src.api.backends.index_backend import IndexBackend
 from src.api.schemas import DashboardSummary, MatchStatusCounts
 from src.config import Settings
 from src.contracts import RunManifest

@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import jobs
-from src.api.index_backend import build_index_backend
+from src.api.backends.index_backend import build_index_backend
 from src.api.main import app
 from src.config import Settings, settings as real_settings
 from src.contracts import ArtifactRef, RunManifest
@@ -31,9 +31,9 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(real_settings, "raw_dir", tmp_path / "data" / "raw")
     monkeypatch.setattr(real_settings, "processed_dir", tmp_path / "data" / "processed")
     monkeypatch.setattr(real_settings, "blocking_dir", tmp_path / "data" / "blocking")
-    monkeypatch.setattr(real_settings, "matches_dir", tmp_path / "data" / "matches")
+    monkeypatch.setattr(real_settings, "auto_merge_dir", tmp_path / "data" / "auto_merge")
     monkeypatch.setattr(real_settings, "non_matches_dir", tmp_path / "data" / "non_matches")
-    monkeypatch.setattr(real_settings, "rejects_dir", tmp_path / "data" / "rejects")
+    monkeypatch.setattr(real_settings, "no_match_dir", tmp_path / "data" / "no_match")
     monkeypatch.setattr(real_settings, "clusters_dir", tmp_path / "data" / "clusters")
     monkeypatch.setattr(real_settings, "runs_dir", tmp_path / "data" / "runs")
     monkeypatch.setattr(real_settings, "db_path", tmp_path / "empi.db")
@@ -68,7 +68,7 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
     P1<->P2 auto-merge (SSN_DOB); P3 true singleton; P4<->P5 review-tier
     candidate (NAME_DOB_SEX) — exercises the review-queue/raw-data routes too.
     """
-    from src.api import publish
+    from src.api.ingest import publish
 
     cleaned = pd.DataFrame({
         "PATID": ["P1", "P2", "P3", "P4", "P5"],
@@ -98,7 +98,7 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
         "high_fanout_ssn": [False], "cluster_id": [0],
         "source_blocks": ["B1"], "n_blocks": [1],
     })
-    matches_path = settings.matches_dir / f"matches_{run_id}.parquet"
+    matches_path = settings.auto_merge_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
 
     non_matches = pd.DataFrame({
@@ -266,8 +266,8 @@ def _incoming(patid, first, last, birth, sex=None):
 
 class TestRecordsScore:
     """POST /records/score end-to-end: the HTTP layer around
-    `src/api/incremental.py` (already unit-tested in isolation in
-    `tests/unit/test_incremental.py`) — background job, polling, and that the
+    `src/api/ingest/incremental.py` (already unit-tested in isolation in
+    `tests/unit/api/test_incremental.py`) — background job, polling, and that the
     outcome is visible through the normal read routes."""
 
     def test_review_tier_match_visible_through_normal_routes(
@@ -299,7 +299,7 @@ class TestRecordsScore:
         assert len(body["outcomes"]) == 1
         outcome = body["outcomes"][0]
         assert outcome["patid"] == "P6"
-        assert outcome["tier"] == "review"
+        assert outcome["tier"] == "human_review"
         mid = outcome["mid"]
 
         entity = client.get(f"/clusters/{mid}").json()
@@ -395,7 +395,7 @@ class TestAudit:
             headers={"X-Reviewer-Id": "reviewer.jclark"},
         )
 
-        from src.api import publish
+        from src.api.ingest import publish
 
         backend = build_index_backend(test_settings)
         try:
@@ -598,7 +598,7 @@ class TestAuditAgainstParquetBackend:
             headers={"X-Reviewer-Id": "reviewer.jclark"},
         )
 
-        from src.api import publish
+        from src.api.ingest import publish
 
         backend = build_index_backend(parquet_test_settings)
         try:

@@ -1,16 +1,46 @@
 "use client";
 
 import { Suspense, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, RecordsFilters } from "@/lib/api-client";
-import { useMergeMutation, useRecords, useUnmergeMutation } from "@/lib/hooks";
-import { DatasetFilters } from "@/components/DatasetFilters";
-import { DatasetRow } from "@/components/DatasetRow";
-import { MergeModal } from "@/components/MergeModal";
-import { RawDataDrawer } from "@/components/RawDataDrawer";
-import { Toast } from "@/components/Toast";
+import { useRecords, useUnmergeMutation } from "@/lib/hooks";
+import { DatasetFilters } from "@/components/dataset/DatasetFilters";
+import { DatasetRow } from "@/components/dataset/DatasetRow";
+import { UnmergeModal } from "@/components/dataset/UnmergeModal";
+import { RawDataDrawer } from "@/components/shared/RawDataDrawer";
+import { Toast } from "@/components/shared/Toast";
 
 const PAGE_SIZE = 25;
+
+// The registry shows only resolved, final clusters — auto-matched,
+// manually merged, or standalone with nothing pending. Anything still
+// awaiting a decision (`origin: "review"`) belongs on the Review Queue tab,
+// not here.
+const FINAL_ORIGINS = "deterministic,merge,none";
+
+/** Filters live in the URL (not just component state) so that navigating
+ * away — e.g. to a patient's Model Explanation page — and back with the
+ * browser's own back button, or a plain page refresh, lands on the exact
+ * same search/filter/page a reviewer had open, instead of a freshly reset
+ * Patient Registry. */
+function filtersFromSearchParams(searchParams: URLSearchParams): RecordsFilters {
+  return {
+    page: Number(searchParams.get("page")) || 1,
+    page_size: PAGE_SIZE,
+    search: searchParams.get("search") ?? undefined,
+    birth_date: searchParams.get("birth_date") ?? undefined,
+    ssn_last4: searchParams.get("ssn_last4") ?? undefined,
+  };
+}
+
+function filtersToSearch(filters: RecordsFilters): string {
+  const params = new URLSearchParams();
+  if (filters.search) params.set("search", filters.search);
+  if (filters.birth_date) params.set("birth_date", filters.birth_date);
+  if (filters.ssn_last4) params.set("ssn_last4", filters.ssn_last4);
+  if (filters.page && filters.page !== 1) params.set("page", String(filters.page));
+  return params.toString();
+}
 
 export default function DatasetPage() {
   return (
@@ -21,21 +51,35 @@ export default function DatasetPage() {
 }
 
 function DatasetPageContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
-  const [filters, setFilters] = useState<RecordsFilters>({
-    page: 1,
-    page_size: PAGE_SIZE,
-    search: searchParams.get("search") ?? undefined,
-  });
+  const [filters, setFiltersState] = useState<RecordsFilters>(() =>
+    filtersFromSearchParams(searchParams),
+  );
+
+  const setFilters = (
+    next: RecordsFilters | ((prev: RecordsFilters) => RecordsFilters),
+  ) => {
+    setFiltersState((prev) => {
+      const resolved = typeof next === "function" ? next(prev) : next;
+      const qs = filtersToSearch(resolved);
+      router.replace(qs ? `/dataset?${qs}` : "/dataset", { scroll: false });
+      return resolved;
+    });
+  };
+
   const [rawPatid, setRawPatid] = useState<string | null>(null);
-  const [pendingMerge, setPendingMerge] = useState<{
+  const [pendingUnmerge, setPendingUnmerge] = useState<{
     mid: string;
-    patids: string[];
+    patid: string;
+    patientName: string;
   } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  const { data, isLoading, isError } = useRecords(filters);
-  const mergeMutation = useMergeMutation();
+  const { data, isLoading, isError } = useRecords({
+    ...filters,
+    origin: FINAL_ORIGINS,
+  });
   const unmergeMutation = useUnmergeMutation();
 
   const flash = (msg: string) => {
@@ -43,26 +87,19 @@ function DatasetPageContent() {
     setTimeout(() => setToast(null), 3200);
   };
 
-  const confirmMerge = () => {
-    if (!pendingMerge) return;
-    mergeMutation.mutate(pendingMerge, {
-      onSuccess: () => {
-        flash(`Merged into ${pendingMerge.mid}.`);
-        setPendingMerge(null);
-      },
-      onError: (err) => {
-        flash(err instanceof ApiError ? err.message : "Merge failed.");
-      },
-    });
-  };
-
-  const handleUnmerge = (mid: string, patid: string) => {
+  const confirmUnmerge = () => {
+    if (!pendingUnmerge) return;
+    const { mid, patid } = pendingUnmerge;
     unmergeMutation.mutate(
       { mid, patid },
       {
-        onSuccess: (res) => flash(`${patid} split into ${res.new_mid}.`),
-        onError: (err) =>
-          flash(err instanceof ApiError ? err.message : "Unmerge failed."),
+        onSuccess: (res) => {
+          flash(`${patid} split into ${res.new_mid}.`);
+          setPendingUnmerge(null);
+        },
+        onError: (err) => {
+          flash(err instanceof ApiError ? err.message : "Unmerge failed.");
+        },
       },
     );
   };
@@ -73,11 +110,10 @@ function DatasetPageContent() {
   return (
     <div>
       <div className="mb-5">
-        <h2 className="text-[22px] font-extrabold text-ink-2">Dataset</h2>
+        <h2 className="text-[22px] font-extrabold text-ink-2">Patient Registry</h2>
         <p className="mt-1 text-[13px] text-gray">
-          Every master patient record — automatically matched, manually
-          reviewed, manually merged, or unmatched. Expand a row to review
-          candidates and take action.
+          The final, resolved patient list — one row per distinct patient.
+          Records still awaiting a match decision live on the Review Queue tab.
         </p>
       </div>
 
@@ -94,7 +130,7 @@ function DatasetPageContent() {
         <>
           <div className="mb-2 flex items-center justify-between text-xs text-gray">
             <span>
-              {data.total.toLocaleString()} record{data.total === 1 ? "" : "s"}
+              {data.total.toLocaleString()} patient{data.total === 1 ? "" : "s"}
             </span>
             <span>
               Page {page} of {totalPages}
@@ -107,22 +143,21 @@ function DatasetPageContent() {
             </p>
           ) : (
             <>
-              <div className="mb-1.5 grid grid-cols-[20px_1.4fr_1fr_0.9fr_0.9fr_1fr_1.3fr_1fr] gap-3 px-4 text-[10px] font-bold tracking-wide text-gray uppercase">
+              <div className="mb-1.5 grid grid-cols-[20px_1.7fr_1fr_1fr_0.8fr_1fr] gap-3 px-4 text-[10px] font-bold tracking-wide text-gray uppercase">
                 <span />
                 <span>Patient name</span>
-                <span>Master patient ID</span>
                 <span>Masked SSN</span>
                 <span>Birthdate</span>
-                <span>Match status</span>
-                <span>Key matching features</span>
+                <span># of entries</span>
                 <span>Last updated</span>
               </div>
               {data.items.map((entity) => (
                 <DatasetRow
                   key={entity.mid}
                   entity={entity}
-                  onMerge={(mid, patids) => setPendingMerge({ mid, patids })}
-                  onUnmerge={handleUnmerge}
+                  onUnmerge={(mid, patid, patientName) =>
+                    setPendingUnmerge({ mid, patid, patientName })
+                  }
                   onViewRaw={setRawPatid}
                 />
               ))}
@@ -150,13 +185,14 @@ function DatasetPageContent() {
 
       <RawDataDrawer patid={rawPatid} onClose={() => setRawPatid(null)} />
 
-      {pendingMerge && (
-        <MergeModal
-          targetMid={pendingMerge.mid}
-          patids={pendingMerge.patids}
-          pending={mergeMutation.isPending}
-          onConfirm={confirmMerge}
-          onCancel={() => setPendingMerge(null)}
+      {pendingUnmerge && (
+        <UnmergeModal
+          mid={pendingUnmerge.mid}
+          patid={pendingUnmerge.patid}
+          patientName={pendingUnmerge.patientName}
+          pending={unmergeMutation.isPending}
+          onConfirm={confirmUnmerge}
+          onCancel={() => setPendingUnmerge(null)}
         />
       )}
 

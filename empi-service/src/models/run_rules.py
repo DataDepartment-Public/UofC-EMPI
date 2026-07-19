@@ -16,7 +16,7 @@ USAGE:
         python src/models/run_rules.py \
             --clean   data/processed/MDM_Population_cleaned_v1_2026_05_24.parquet \
             --pairs   data/blocking/candidate_pairs_v1_2026_05_24.parquet \
-            --output  data/matches/
+            --output  data/auto_merge/
 
 What the script does:
     1. Resolves the project root so imports work from any working directory
@@ -66,6 +66,9 @@ from src.contracts import (  # noqa: E402
     Matches,
     NonMatches,
     Rejects,
+    TIER_AUTO_MERGE,
+    TIER_HUMAN_REVIEW,
+    TIER_NO_MATCH,
     assert_patid_coverage,
     validate,
 )
@@ -86,7 +89,7 @@ from src.config import settings  # noqa: E402
 DEFAULT_CLEAN_DIR = settings.processed_dir
 DEFAULT_CLEAN_STEM = settings.cleaned_stem
 DEFAULT_PAIRS_DIR = settings.blocking_dir
-DEFAULT_OUTPUT_DIR = settings.matches_dir
+DEFAULT_OUTPUT_DIR = settings.auto_merge_dir
 DEFAULT_NON_MATCH_DIR = settings.non_matches_dir
 
 
@@ -154,9 +157,9 @@ def _print_report(stats: dict, version: str) -> None:
     dist = stats.get("decision_distribution")
     if dist:
         print("\n  THREE-WAY ROUTING")
-        print(f"    {'auto-merge':<18} {dist['match']:>10,}")
-        print(f"    {'review':<18} {dist['review']:>10,}")
-        print(f"    {'reject':<18} {dist['reject']:>10,}")
+        print(f"    {'auto-merge':<18} {dist[TIER_AUTO_MERGE]:>10,}")
+        print(f"    {'review':<18} {dist[TIER_HUMAN_REVIEW]:>10,}")
+        print(f"    {'reject':<18} {dist[TIER_NO_MATCH]:>10,}")
 
     print("\n  COVERAGE")
     print(f"    Patients matched:         {stats['patients_matched']:>12,}")
@@ -248,7 +251,7 @@ def main(
     matches.to_parquet(output_path, index=False)
     logger.info("Matches saved to %s (%d rows)", output_path, len(matches))
 
-    rejects = decided[decided["decision"] == "reject"].reset_index(drop=True)
+    rejects = decided[decided["decision"] == TIER_NO_MATCH].reset_index(drop=True)
     validate(rejects, Rejects)  # contract: rejects output
     pair_cols = list(candidate_pairs.columns)
 
@@ -256,7 +259,7 @@ def main(
     non_matches = pd.concat(
         [
             review_confirmed[pair_cols],
-            decided[decided["decision"] == "review"][pair_cols],
+            decided[decided["decision"] == TIER_HUMAN_REVIEW][pair_cols],
         ]
     ).reset_index(drop=True)
     validate(non_matches, NonMatches)  # contract: non-matches (review) output
@@ -269,9 +272,9 @@ def main(
         len(non_matches),
     )
 
-    settings.rejects_dir.mkdir(parents=True, exist_ok=True)
-    rj_version = _next_version(settings.rejects_dir, stem="rejects")
-    reject_path = settings.rejects_dir / f"rejects_{rj_version}_{date_tag}.parquet"
+    settings.no_match_dir.mkdir(parents=True, exist_ok=True)
+    rj_version = _next_version(settings.no_match_dir, stem="rejects")
+    reject_path = settings.no_match_dir / f"rejects_{rj_version}_{date_tag}.parquet"
     rejects.to_parquet(reject_path, index=False)
     logger.info(
         "Rejected (confident non-match) pairs saved to %s (%d rows); not routed "

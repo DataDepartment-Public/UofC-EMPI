@@ -2,7 +2,7 @@
 
 Responses reuse `src.contracts.RunManifest` where the doc says to; everything
 else (entities, members, audit rows) is modeled here against the SQLite shape
-in `src/api/store.py`.
+in `src/api/backends/sql_backend.py`.
 
 Deviation from the doc's literal request body for `POST /audit/*`: `user` is
 NOT accepted in the body. Identity comes from the trusted `X-Reviewer-Id`
@@ -77,7 +77,7 @@ class CandidatePatient(RecordAttrs):
 
 class ReviewCandidate(BaseModel):
     """An unresolved candidate pair from the review queue — not a confirmed
-    membership. See `src/api/store.py` `review_candidate` table."""
+    membership. See `src/api/backends/sql_backend.py` `review_candidate` table."""
 
     patid_a: str
     patid_b: str
@@ -87,6 +87,12 @@ class ReviewCandidate(BaseModel):
     source_blocks: str | None
     patient_a: CandidatePatient
     patient_b: CandidatePatient
+    #: Audit-only FS matcher signal (docs/FS-Matcher-Production-Guide.md) — feeds
+    #: a future GBT, not a scored decision on this pair. Populated only for
+    #: candidates scored via the incremental path (src/api/ingest/incremental.py); null
+    #: for candidates from a full batch publish, which doesn't run FS yet.
+    fs_match_probability: float | None = None
+    fs_classification_tier: str | None = None
 
 
 class Entity(BaseModel):
@@ -107,6 +113,43 @@ class RecordsPage(BaseModel):
     page: int
     page_size: int
     items: list[Entity]
+
+
+class ReviewQueueItem(BaseModel):
+    """One candidate-grain row of `GET /review-queue` — a pending pair, not a
+    cluster. See `src/api/backends/sql_backend.py` `list_review_candidates`."""
+
+    patid_a: str
+    patid_b: str
+    mid_a: str
+    mid_b: str
+    member_count_a: int
+    member_count_b: int
+    match_rule: str | None
+    confidence: float | None
+    evidence: str | None
+    source_blocks: str | None
+    fs_match_probability: float | None = None
+    fs_classification_tier: str | None = None
+    reviewed: bool
+    patient_a: CandidatePatient
+    patient_b: CandidatePatient
+
+
+class ReviewQueuePage(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    items: list[ReviewQueueItem]
+
+
+class DismissRequest(BaseModel):
+    patid_a: str
+    patid_b: str
+
+
+class DismissResponse(BaseModel):
+    audit_id: int
 
 
 class RawRecord(BaseModel):
@@ -210,11 +253,13 @@ class ScoreCreateResponse(BaseModel):
     status: RunStatus
 
 
-ScoreTier = Literal["auto_merge", "review", "no_match", "invalid"]
+#: "invalid" (failed cleaning validity checks) is not a pair-classification
+#: decision, so it's not in `contracts.CLASSIFICATION_TIERS` — added here only.
+ScoreTier = Literal["auto_merge", "human_review", "no_match", "invalid"]
 
 
 class RecordScoreOutcome(BaseModel):
-    """One submitted record's result — see `src/api/incremental.py`."""
+    """One submitted record's result — see `src/api/ingest/incremental.py`."""
 
     patid: str
     tier: ScoreTier
@@ -237,7 +282,7 @@ class AuditLogRow(BaseModel):
     id: int
     ts_utc: str
     user: str
-    action: Literal["merge", "unmerge", "split"]
+    action: Literal["merge", "unmerge", "split", "dismiss"]
     patids: str
     mid: str
     prev_state: str
@@ -258,6 +303,10 @@ __all__ = [
     "ReviewCandidate",
     "Entity",
     "RecordsPage",
+    "ReviewQueueItem",
+    "ReviewQueuePage",
+    "DismissRequest",
+    "DismissResponse",
     "RawRecord",
     "MatchStatusCounts",
     "DashboardSummary",

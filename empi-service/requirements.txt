@@ -29,3 +29,10 @@ fastapi
 uvicorn[standard]
 python-multipart
 httpx
+# src/api/backends/postgres_backend.py — EMPI_INDEX_BACKEND=postgres (Azure
+# deployment only; SQLite/Parquet need neither). psycopg[binary] bundles libpq,
+# no system Postgres client library needed. azure-identity provides
+# DefaultAzureCredential for the AAD-token auth that backend uses instead of a
+# stored password.
+psycopg[binary]
+azure-identity

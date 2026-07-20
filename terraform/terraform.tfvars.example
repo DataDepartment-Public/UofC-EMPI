@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars (gitignored) and adjust. Every value here already
+# has a workable default in variables.tf — this file only needs to override
+# what's actually different for your subscription.
+
+# project_name = "empi"
+# environment  = "prod"
+# location     = "canadacentral"
+
+# github_repository    = "DataDepartment-Public/UofC-EMPI"
+# github_oidc_subjects = ["ref:refs/heads/main"]
+
+# app_service_sku = "B1"

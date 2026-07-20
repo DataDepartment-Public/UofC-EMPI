@@ -1,0 +1,51 @@
+# Manual trigger only, deliberately not on every push to main: the identity
+# this workflow assumes (github_oidc.tf) has Owner on the eMPI resource group,
+# and the subscription is owned by someone outside this repo's day-to-day
+# contributors. Auto-applying infra changes on merge would mean anyone who can
+# merge a PR can silently change/delete cloud resources in someone else's
+# subscription. Run this by hand (Actions tab -> Terraform apply -> Run
+# workflow) after reviewing the plan comment on the PR that touched
+# terraform/**. Flip the trigger to `push: branches: [main], paths:
+# [terraform/**]` later if/when that tradeoff is no longer the right one.
+name: Terraform apply
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write # required for azure/login OIDC
+  contents: read
+
+defaults:
+  run:
+    working-directory: terraform
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: production # add required reviewers on this GitHub Environment for a manual approval gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}"
+
+      - name: Terraform apply
+        run: terraform apply -auto-approve -input=false

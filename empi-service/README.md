@@ -75,6 +75,19 @@ pytest tests/            # unit + integration + regression
 ruff check src/ tests/    # lint
 ```
 
+`tests/integration/test_postgres_backend.py` (the `EMPI_INDEX_BACKEND=postgres`
+store — see `src/api/backends/postgres_backend.py`) additionally needs a real
+Postgres reachable via `EMPI_TEST_POSTGRES_DSN`; it skips itself otherwise. A
+local one for this alone:
+
+```bash
+initdb -D /tmp/empi_pg_test/data -U postgres -A trust --encoding=UTF8
+pg_ctl -D /tmp/empi_pg_test/data -l /tmp/empi_pg_test/server.log -o "-p 55432 -k /tmp/empi_pg_test" start
+createdb -h /tmp/empi_pg_test -p 55432 -U postgres empi_test
+EMPI_TEST_POSTGRES_DSN="host=/tmp/empi_pg_test port=55432 dbname=empi_test user=postgres" \
+  pytest tests/integration/test_postgres_backend.py
+```
+
 ## Project layout
 
 ```

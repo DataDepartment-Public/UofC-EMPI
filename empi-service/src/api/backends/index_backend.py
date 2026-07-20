@@ -303,7 +303,10 @@ class SqlIndexBackend:
 def build_index_backend(settings: Any) -> IndexBackend:
     """Construct the backend `settings.index_backend` selects
     (`"sqlite"` -> `SqlIndexBackend` over `sql_backend.py` / `settings.db_path`,
-    `"parquet"` -> `ParquetIndexBackend` over `settings.local_index_dir`).
+    `"parquet"` -> `ParquetIndexBackend` over `settings.local_index_dir`,
+    `"postgres"` -> `SqlIndexBackend` over `postgres_backend.py` /
+    `settings.postgres_*`, e.g. Azure Database for PostgreSQL — see
+    terraform/postgres.tf).
     Caller owns the returned backend's lifecycle — always `close()` it.
     """
     backend_name = getattr(settings, "index_backend", "sqlite")
@@ -311,6 +314,23 @@ def build_index_backend(settings: Any) -> IndexBackend:
         from src.api.backends.parquet_backend import ParquetIndexBackend
 
         return ParquetIndexBackend(settings.local_index_dir)
+
+    if backend_name == "postgres":
+        from src.api.backends import postgres_backend
+
+        if not settings.postgres_host or not settings.postgres_user:
+            raise RuntimeError(
+                "index_backend='postgres' requires EMPI_POSTGRES_HOST and "
+                "EMPI_POSTGRES_USER to be set."
+            )
+        pg_conn = postgres_backend.get_connection(
+            settings.postgres_host,
+            settings.postgres_port,
+            settings.postgres_db,
+            settings.postgres_user,
+        )
+        postgres_backend.init_db(pg_conn)
+        return SqlIndexBackend(pg_conn, store_module=postgres_backend)
 
     from src.api.backends import sql_backend
 

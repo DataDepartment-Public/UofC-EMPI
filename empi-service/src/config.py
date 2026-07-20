@@ -77,14 +77,37 @@ class Settings(BaseSettings):
         default="sqlite",
         description="Storage backend for incremental scoring (POST "
         "/records/score, src/api/incremental.py): 'sqlite' (empi.db, the "
-        "live service) or 'parquet' (local_index_dir, no DB required — see "
-        "src/api/local_score.py). Swap point: src/api/index_backend.py.",
+        "live service), 'parquet' (local_index_dir, no DB required — see "
+        "src/api/local_score.py), or 'postgres' (Azure Database for "
+        "PostgreSQL — see postgres_* settings below and "
+        "src/api/backends/postgres_backend.py). Swap point: "
+        "src/api/backends/index_backend.py.",
     )
     local_index_dir: Path = Field(
         default=_DATA / "local_index",
         description="Parquet files for the 'parquet' index_backend "
         "(block_key/cleaned_attrs/entity/entity_member/review_candidate/"
         "entity_suggestion) — local-mode incremental scoring, no empi.db.",
+    )
+    postgres_host: str | None = Field(
+        default=None,
+        description="Postgres server hostname for the 'postgres' index_backend "
+        "(e.g. Azure Database for PostgreSQL's *.postgres.database.azure.com "
+        "FQDN — see terraform/postgres.tf). Required when index_backend='postgres'.",
+    )
+    postgres_port: int = Field(default=5432)
+    postgres_db: str = Field(
+        default="empi",
+        description="Database name for the 'postgres' index_backend.",
+    )
+    postgres_user: str | None = Field(
+        default=None,
+        description="Postgres user for the 'postgres' index_backend — this "
+        "app's own Azure AD identity (its App Service name), registered as "
+        "the server's AAD administrator by terraform/postgres.tf. There is "
+        "deliberately no postgres_password setting: "
+        "src/api/backends/postgres_backend.py authenticates with a token "
+        "from DefaultAzureCredential, never a stored secret.",
     )
 
     # ── Defaults ────────────────────────────────────────────────────────────

@@ -84,6 +84,18 @@ def test_score_is_deterministic_across_two_load_and_score_passes(trained):
     assert (merged["classification_tier_1"] == merged["classification_tier_2"]).all()
 
 
+def test_scores_exactly_the_candidate_pairs(trained):
+    """The driven-from-candidate_pairs blocking rule
+    (FSModel._install_candidate_pairs_blocking) must score EXACTLY the input
+    candidate pairs — no cross-product leakage, none dropped."""
+    serve = FSMatcher(classification_config=_CFG)
+    scored = serve.score_with_model_path(trained["cp"], trained["df_clean"], trained["model_path"])
+    scored_pairs = set(zip(scored["PATID_A"], scored["PATID_B"]))
+    cp_pairs = set(zip(trained["cp"]["PATID_A"], trained["cp"]["PATID_B"]))
+    assert scored_pairs == cp_pairs
+    assert len(scored) == len(trained["cp"])
+
+
 def test_true_duplicates_auto_merge(trained):
     serve = FSMatcher(classification_config=_CFG)
     scored = serve.score_with_model_path(trained["cp"], trained["df_clean"], trained["model_path"])

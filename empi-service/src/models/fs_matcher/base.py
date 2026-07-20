@@ -373,6 +373,8 @@ class FSModel(ABC):
     training: TrainingStrategy
 
     candidate_pairs_table_name: str = "candidate_pairs"
+    cp_a_col: str = "PATID_A"
+    cp_b_col: str = "PATID_B"
     unique_id_column: str = "PATID"
 
     eval_schema_columns: tuple[str, ...] = (
@@ -417,11 +419,48 @@ class FSModel(ABC):
         logger.info("FSModel[%s]: training complete", self.model_name)
         return linker
 
+    def _install_candidate_pairs_blocking(self, linker: Any) -> None:
+        """Force Splink to generate blocked pairs by driving FROM the registered
+        `candidate_pairs` table, instead of filtering the record cross-product.
+
+        The settings' `CANDIDATE_PAIRS_BLOCKING_RULE` (an `EXISTS` semi-join)
+        is correct but **O(records²)**: some DuckDB versions don't decorrelate
+        it, so `predict()` scans the full pairwise space (≈13B comparisons on
+        the 163k cohort) and effectively hangs. This rule emits the blocked
+        pairs directly from `candidate_pairs` (`join_key_l/​r = PATID_A/B`),
+        making scoring **O(candidate_pairs)** — the two attribute look-ups are
+        hash joins Splink already does downstream. Swapped onto the linker at
+        predict time so it survives the model's JSON round-trip (the stored
+        `EXISTS` rule stays as a correct, if slow, fallback).
+        """
+        from splink.internals.blocking import BlockingRule
+
+        table, a_col, b_col = self.candidate_pairs_table_name, self.cp_a_col, self.cp_b_col
+
+        class _CandidatePairsBlockingRule(BlockingRule):
+            def __init__(self) -> None:
+                super().__init__("1=1", "duckdb")
+
+            def create_blocked_pairs_sql(
+                self, *, source_dataset_input_column, unique_id_input_column,
+                input_tablename_l, input_tablename_r, where_condition,
+            ) -> str:
+                return (
+                    f"select '{self.match_key}' as match_key, "
+                    f'cp."{a_col}" as join_key_l, cp."{b_col}" as join_key_r '
+                    f"from {table} as cp"
+                )
+
+        linker._settings_obj._blocking_rules_to_generate_predictions = [
+            _CandidatePairsBlockingRule()
+        ]
+
     def predict(
         self,
         linker: Any,
         candidate_pairs_df: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
+        self._install_candidate_pairs_blocking(linker)
         df = linker.inference.predict().as_pandas_dataframe()
         # Canonical PATID_A / PATID_B from Splink's _l / _r columns.
         l_col, r_col = f"{self.unique_id_column}_l", f"{self.unique_id_column}_r"

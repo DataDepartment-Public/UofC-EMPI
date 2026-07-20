@@ -32,6 +32,7 @@ data/clusters/*
 data/runs/*
 data/local_index/*
 data/silver_labels/*
+data/gold_labels?*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/blocking/.gitkeep

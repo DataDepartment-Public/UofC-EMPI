@@ -332,7 +332,7 @@ def run_pipeline(
         # non-matches). Only the plausible survivors reach Stage 4.5.
         ml_input_pool = _fs_plausible_pool(non_matches, eval_frame_fs)
         logger.info(
-            "[4/6] MODEL(FS) — gate: %d/%d pairs plausible, dropped %d low-confidence non-matches",
+            "[4/6] MODEL(FS) — gate: %d/%d pairs plausible, dropped %d confident non-matches",
             len(ml_input_pool), len(non_matches), len(non_matches) - len(ml_input_pool),
         )
 

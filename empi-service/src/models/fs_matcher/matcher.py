@@ -59,8 +59,12 @@ CANDIDATE_PAIRS_TABLE = "candidate_pairs"
 CP_PATID_A = "PATID_A"
 CP_PATID_B = "PATID_B"
 
-# Single-equi candidate-pairs blocking rule (DuckDB decorrelates to a HASH_JOIN
-# keyed on (PATID_A, PATID_B)) — Splink scores only the pre-blocked pairs.
+# Candidate-pairs restriction as an EXISTS semi-join. Correct, but O(records²):
+# some DuckDB versions don't decorrelate it, so predict() scans the full pairwise
+# space and hangs on large cohorts. At serve/predict time FSModel.predict swaps
+# in an O(candidate_pairs) rule that drives FROM this table instead
+# (FSModel._install_candidate_pairs_blocking); this string stays in the saved
+# settings as a correct, if slow, fallback and to bind Splink's column harvesting.
 CANDIDATE_PAIRS_BLOCKING_RULE = f"""
 EXISTS (
     SELECT 1 FROM {CANDIDATE_PAIRS_TABLE} cp

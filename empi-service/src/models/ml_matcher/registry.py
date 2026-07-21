@@ -6,11 +6,10 @@ separate copy rather than a shared generic module — lower risk for this
 change (zero touch to FS's tested registry), and a reasonable "rule of
 three" refactor once a third model family needs the same pattern.
 
-A future `python -m src.models.ml_matcher.train` CLI writes trained model
-artifacts here:
+Trained model artifacts live here:
 
-    ml_model_<ts>.json        # however the implementer serializes a fitted
-                               # model (format is their choice — see
+    ml_model_<ts>.pkl         # joblib dump of the served model (the LightGBM
+                               # v3 MatchProbabilityAdapter — see
                                # docs/ML-Matcher-Integration-Guide.md)
     ml_model_<ts>.meta.json   # provenance + held-out test metrics (this
                                # module reads it)
@@ -58,11 +57,12 @@ def load_model_meta(model_path: Path) -> dict | None:
 
 
 def _model_candidates(model_dir: Path) -> list[Path]:
-    """All `ml_model_*.json` artifacts (excluding the `.meta.json` sidecars)."""
+    """All `ml_model_*.pkl` artifacts (the `.meta.json` sidecars are `.json`,
+    so no exclusion is needed)."""
     if not model_dir.is_dir():
         return []
     return sorted(
-        (p for p in model_dir.glob("ml_model_*.json") if not p.name.endswith(".meta.json")),
+        model_dir.glob("ml_model_*.pkl"),
         key=lambda p: p.stat().st_mtime,
     )
 
@@ -109,22 +109,18 @@ def active_model_meta(settings: Any) -> dict | None:
 
 def load_model_artifact(model_path: Path) -> Any:
     """Load a serialized model from `model_path` into an `MLModel`-compatible
-    object (`fit`/`predict_proba`). STUB — scaffolding only.
+    object (`fit`/`predict_proba`).
 
-    Unlike the FS matcher (whose Splink model always serializes to JSON via
-    `save_model_to_json`), a generic BYOM model has no single canonical
-    serialization format (pickle, joblib, ONNX, ...). Which format
-    `model_path` is in — and how to deserialize it — is the implementer's
-    choice; see `docs/ML-Matcher-Integration-Guide.md`. This function is the
-    pipeline's one call site for "load whatever `active.json` points at," so
-    implementing it here is the only change needed to make Stage 4.5 usable.
+    The active ML model is the LightGBM v3 classifier, serialized with joblib
+    as a `ml_model_<ts>.pkl` artifact whose payload is a
+    `src.models.ml_matcher.lightgbm_v3.MatchProbabilityAdapter` (which wraps
+    the fitted estimator and exposes the inverted `predict_proba`). This
+    function is the pipeline's one call site for "load whatever `active.json`
+    points at." See `docs/ML-Matcher-Integration-Guide.md`.
     """
-    raise NotImplementedError(
-        f"ml_matcher has no model-loading implementation yet (tried to load "
-        f"{model_path}). Implement registry.load_model_artifact for whatever "
-        "serialization format MLMatcher.train() writes. See "
-        "docs/ML-Matcher-Integration-Guide.md."
-    )
+    import joblib
+
+    return joblib.load(Path(model_path))
 
 
 def _pointer_model_path(settings: Any) -> Path | None:

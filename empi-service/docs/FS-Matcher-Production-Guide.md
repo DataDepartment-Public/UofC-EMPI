@@ -18,11 +18,13 @@ raw → 1. clean → 2. blocking → 3. deterministic rules ─┬─► matches
                                                               ▼
                                             4. FS matcher  (this component)
                                               • scores the non-matches
-                                              • surfaces likely-match CANDIDATES
+                                              • GATES the pool: discards its
+                                                no_match tier (confident non-matches)
                                               • emits per-pair FEATURES
                                               │
-                                              ▼  (optionally enriches Stage 4.5)
-                                     4.5. ML matcher (src/models/ml_matcher/, pluggable)
+                                              ▼  the FS-plausible survivors only
+                                     4.5. ML matcher (src/models/ml_matcher/, LightGBM v3)
+                                              • classifies survivors: match vs ambiguous
                                               │
                                               ▼  (both feed clustering only if their
                                                    *_feeds_clustering toggle is on)
@@ -31,11 +33,22 @@ raw → 1. clean → 2. blocking → 3. deterministic rules ─┬─► matches
 ```
 
 The deterministic rules (Stage 3) confidently **auto-merge** the easy pairs and
-send everything uncertain to the **non-matches** pool. The FS matcher's job is to
-comb that pool and **surface additional candidate pairs** — pairs that look like
-the same patient — together with a rich set of **features**, for a downstream
-model (in-repo today: the pluggable ML matcher, Stage 4.5 — see
-`docs/ML-Matcher-Integration-Guide.md`) to make the final call.
+send everything uncertain to the **non-matches** pool. The FS matcher combs that
+pool and does two jobs: it **gates** the pool — discarding the pairs it ranks
+`no_match` (score `< fs_review_floor`, the confident non-matches) so only the
+*plausible* survivors flow onward — and it emits a rich set of per-pair
+**features**. The surviving plausible pairs go to the downstream model (the
+LightGBM v3 ML matcher, Stage 4.5 — see `docs/ML-Matcher-Integration-Guide.md`
+and `docs/ML-Model-LightGBM-v3.md`), which makes the final call: confident match
+(`auto_merge`) vs ambiguous (`human_review`).
+
+> **The FS gate is what makes the ML matcher a clean 2-tier classifier.** The ML
+> model was trained only on *plausible* pairs (match ∪ ambiguous) and has no
+> "true non-match" class; the FS gate removes the confident non-matches upstream
+> so the ML model never has to reason about them. If **no** FS model is active,
+> Stage 4 is skipped and the ML matcher falls back to scoring the full
+> non-matches pool with a warning — so promoting an FS model is what turns the
+> gate on. See §7 (Bootstrapping).
 
 **The FS matcher, the ML matcher, and the deterministic-rules engine all
 implement the same shared interface** (`src.models.base.PairClassifier`) and
@@ -156,18 +169,31 @@ Every setting is overridable via an `EMPI_`-prefixed environment variable (see
 
 | Setting | Env var | Default | Meaning |
 |---|---|---|---|
-| `fs_review_floor` | `EMPI_FS_REVIEW_FLOOR` | `0.40` | **The candidate cutoff.** Pairs scoring at/above this are the candidates written to the GBT feature file. Also the boundary of the `human_review` tier. |
+| `fs_review_floor` | `EMPI_FS_REVIEW_FLOOR` | `0.40` | **The gate boundary + candidate cutoff.** Pairs scoring **below** this are the FS `no_match` tier — discarded, and never seen by the ML matcher. Pairs at/above are the plausible survivors (also the candidates written to the feature file, and the boundary of the `human_review` tier). |
 | `fs_auto_merge_threshold` | `EMPI_FS_AUTO_MERGE_THRESHOLD` | `0.95` | Labels the `auto_merge` tier. **Informational only** — the FS matcher merges nothing; this just tags high-confidence pairs. |
 | `fs_deploy_gate_margin` | `EMPI_FS_DEPLOY_GATE_MARGIN` | `0.02` | How much held-out precision/recall a retrain may drop before promotion is refused. |
 | `fs_active_model` | `EMPI_FS_ACTIVE_MODEL` | `None` | Explicit model file to serve (overrides `active.json`). |
 | `fs_model_dir` | `EMPI_FS_MODEL_DIR` | `models/fs` | Model store (trained JSON + meta + `active.json`). |
 | `fs_output_dir` | `EMPI_FS_OUTPUT_DIR` | `data/fs_output` | Where both the GBT feature files and the audit frame are written. |
 
-> **One knob to widen/narrow the candidate net:** lower `EMPI_FS_REVIEW_FLOOR`
-> to surface more (lower-confidence) candidates to the GBT; raise it to surface
-> fewer, higher-confidence ones. Because the GBT only ever sees pairs above this
-> floor, the floor sets the **maximum recall** the GBT can achieve — set it with
-> that trade-off in mind.
+> **One knob to widen/narrow the gate:** lower `EMPI_FS_REVIEW_FLOOR` to let
+> more (lower-confidence) pairs through to the ML matcher; raise it to discard
+> more aggressively. Because the ML matcher only ever sees pairs above this
+> floor, the floor sets the **maximum recall** the downstream can achieve — set
+> it with that trade-off in mind. On a run, the `[4/6] MODEL(FS) — gate: K/N
+> pairs plausible, dropped …` log line tells you how much the gate is removing.
+
+### Scoring is O(candidate_pairs), not O(records²)
+
+The FS matcher scores **only** the candidate pairs it is handed, never the full
+record cross-product. At `predict()` time it installs a blocking rule that
+generates the scored pairs by driving **from** the registered `candidate_pairs`
+table (`FSModel._install_candidate_pairs_blocking`), so scoring cost scales with
+the number of candidate pairs (~10⁵), not with records² (~10¹⁰ on the full
+cohort). The model's saved settings still carry the original `EXISTS` semi-join
+rule as a correct — but slow — fallback; predict swaps in the fast rule. (The
+`EXISTS` form is not reliably decorrelated by every DuckDB version, which is why
+driving from the pair table is the served path.) No configuration is involved.
 
 ---
 

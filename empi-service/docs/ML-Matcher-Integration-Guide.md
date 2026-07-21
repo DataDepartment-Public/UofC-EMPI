@@ -43,17 +43,22 @@
 The deterministic rules stage already splits every candidate pair into three
 buckets: pairs it's confident enough about get **auto-merged** directly into
 clustering; everything else falls into a `non_matches` pool. The FS matcher
-(Splink, Stage 4) scores that pool and produces a candidate/feature file, but
-its output is **audit-only today** — it does not feed clustering. Your model
-scores that same `non_matches` pool (optionally enriched with FS's features)
-and is likewise a scored classifier, not an automatic merger — whether its
-`auto_merge`-tier output feeds clustering is already a config toggle today
-(`settings.ml_feeds_clustering`, off by default — see §4), not something your
-code needs to worry about. Flip it once your model's validated enough to
-trust for auto-merge.
+(Splink, Stage 4) scores that pool and **gates it** — the pairs FS ranks
+`no_match` (FS `match_probability < fs_review_floor`) are discarded as confident
+non-matches, and only the *plausible* survivors reach your model
+(`_fs_plausible_pool` in `src/pipeline.py`). Your model scores that FS-plausible
+subset (optionally enriched with FS's features) and is a scored classifier, not
+an automatic merger — whether its `auto_merge`-tier output feeds clustering is a
+config toggle (`settings.ml_feeds_clustering`, off by default — see §4).
+
+Because the non-matches are gated out upstream, the served LightGBM v3 model
+runs as a **2-tier** classifier (`ml_review_floor = 0.0`): confident match →
+`auto_merge`, ambiguous → `human_review`; it does not emit `no_match`. A model
+that *does* need to distinguish non-matches can still emit all three tiers by
+setting a non-zero `ml_review_floor` — the `classify()` machinery supports it.
 
 **Your job is exactly this:** given a pool of candidate patient-record pairs,
-produce a calibrated match probability and a three-way tier for each pair.
+produce a calibrated match probability and a tier for each pair.
 
 ## 2. What already exists today that you can use as input
 

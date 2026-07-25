@@ -24,6 +24,11 @@ scikit-learn
 # and its training CLI. Uses Splink's DuckDB backend (splink.DuckDBAPI) — duckdb is
 # pulled in transitively, so it is deliberately NOT pinned separately here.
 splink>=4.0.16,<5.0.0
+# LightGBM: the pluggable ML matcher (Stage 4.5, src/models/ml_matcher/) serves the
+# v3 pair classifier. joblib (transitive via scikit-learn) is pinned explicitly
+# because registry.load_model_artifact calls it directly to load the .pkl artifact.
+lightgbm
+joblib
 # FastAPI service (src/api/) — docs/API-Design.md. SQLite (empi.db) is stdlib.
 fastapi
 uvicorn[standard]

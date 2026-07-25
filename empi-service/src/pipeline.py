@@ -147,6 +147,27 @@ def _artifact_ref(path: Path, df: pd.DataFrame, root: Path) -> ArtifactRef:
     return ArtifactRef(path=_rel(path, root), rows=len(df), sha256=_file_sha256(path))
 
 
+def _fs_plausible_pool(non_matches: pd.DataFrame, eval_frame_fs: pd.DataFrame) -> pd.DataFrame:
+    """Gate the ML input pool with the FS matcher: keep only the `non_matches`
+    rows FS did NOT rank `no_match` — i.e. FS `match_probability >=
+    settings.fs_review_floor`.
+
+    In the pipeline the FS matcher acts as the non-match gate: the pairs it
+    discards (its `no_match` tier) are the confident non-matches, so they never
+    reach the ML matcher. The survivors are the *plausible* pairs — the same
+    population the ML model was trained on (match ∪ ambiguous) — which the ML
+    matcher then classifies as confident match (`auto_merge`) vs ambiguous
+    (`human_review`). Passthrough columns (`source_blocks`/`n_blocks`) are
+    preserved because the result comes from `non_matches`, not the FS frame.
+    """
+    plausible = eval_frame_fs.loc[
+        eval_frame_fs["predicted_tier"] != TIER_NO_MATCH, ["PATID_A", "PATID_B"]
+    ]
+    return non_matches.merge(
+        plausible, on=["PATID_A", "PATID_B"], how="inner"
+    ).reset_index(drop=True)
+
+
 # ── Orchestration ────────────────────────────────────────────────────────────
 def run_pipeline(
     raw_input: Path | None = None,
@@ -257,6 +278,10 @@ def run_pipeline(
     matches_model_path: Path | None = None
     fs_features_path: Path | None = None
     eval_frame_fs: pd.DataFrame | None = None
+    # The pool the ML matcher (Stage 4.5) scores. FS gates it below: only the
+    # pairs FS deems plausible survive. Falls back to the full non_matches pool
+    # if FS is skipped (no active model / empty pool).
+    ml_input_pool: pd.DataFrame = non_matches
     active_fs_model = resolve_active_fs_model(settings)
     if active_fs_model is None:
         logger.info(
@@ -303,11 +328,22 @@ def run_pipeline(
             tier_counts, len(fs_features), _rel(fs_features_path, settings.project_root),
         )
 
+        # Gate the ML input pool: drop the pairs FS ranks no_match (confident
+        # non-matches). Only the plausible survivors reach Stage 4.5.
+        ml_input_pool = _fs_plausible_pool(non_matches, eval_frame_fs)
+        logger.info(
+            "[4/6] MODEL(FS) — gate: %d/%d pairs plausible, dropped %d confident non-matches",
+            len(ml_input_pool), len(non_matches), len(non_matches) - len(ml_input_pool),
+        )
+
     # ── Stage 4.5: pluggable ML matcher (candidate/feature generator) ──────
-    # Structurally identical to Stage 4 (src.models.base.PairClassifier):
-    # scores the same non_matches pool, optionally enriched with Stage 4's
-    # FSFeatures. Feeds clustering only when settings.ml_feeds_clustering is
-    # on. Skipped when no active model is resolvable or non_matches is empty.
+    # Scores the FS-gated pool (ml_input_pool = the pairs FS deemed plausible),
+    # optionally enriched with Stage 4's FSFeatures. With the FS gate removing
+    # confident non-matches upstream, this stage is a 2-tier classifier —
+    # confident match (auto_merge) vs ambiguous (human_review); no_match is not
+    # emitted (settings.ml_review_floor = 0.0). Feeds clustering only when
+    # settings.ml_feeds_clustering is on. Skipped when no active model resolves
+    # or the pool is empty.
     matches_ml_path: Path | None = None
     ml_features_path: Path | None = None
     eval_frame_ml: pd.DataFrame | None = None
@@ -317,12 +353,17 @@ def run_pipeline(
             "[5/6] MODEL(ML) — skipped (no active ML model; train + promote one "
             "with `python -m src.models.ml_matcher.train --promote`)"
         )
-    elif non_matches.empty:
-        logger.info("[5/6] MODEL(ML) — skipped (no non-match pairs to score)")
+    elif ml_input_pool.empty:
+        logger.info("[5/6] MODEL(ML) — skipped (no pairs to score)")
     else:
+        if eval_frame_fs is None:
+            logger.warning(
+                "[5/6] MODEL(ML) — FS gate did not run (no active FS model); scoring the "
+                "full non_matches pool, which may still contain true non-matches"
+            )
         logger.info(
-            "[5/6] MODEL(ML) — scoring %d non-match pairs with ML model %s...",
-            len(non_matches), active_ml_model.name,
+            "[5/6] MODEL(ML) — scoring %d FS-plausible pairs with ML model %s...",
+            len(ml_input_pool), active_ml_model.name,
         )
         # Lazy import mirrors Stage 4 — keeps whatever the implementer's model
         # framework needs (torch/xgboost/...) out of the import path when
@@ -330,20 +371,23 @@ def run_pipeline(
         from src.models.ml_matcher.base import ClassificationConfig as MLClassificationConfig
         from src.models.ml_matcher.matcher import MLMatcher
         # BYOM artifact loading is the implementer's extension point — see
-        # docs/ML-Matcher-Integration-Guide.md. load_model_artifact is a
-        # deliberate stub that raises until a real one is plugged in, so this
-        # branch only executes once a model file + a real loader both exist.
+        # docs/ML-Matcher-Integration-Guide.md. load_model_artifact deserializes
+        # whatever active.json points at; V3FeatureBuilder is the matching BYOF
+        # implementation for the served LightGBM v3 model. Both are imported
+        # lazily so Stage 4.5's deps stay off the import path when it's skipped.
+        from src.models.ml_matcher.lightgbm_v3 import V3FeatureBuilder
         from src.models.ml_matcher.registry import load_model_artifact
 
         _ml_model = MLMatcher(
             model=load_model_artifact(active_ml_model),
+            feature_builder=V3FeatureBuilder(),
             classification_config=MLClassificationConfig(
                 auto_merge_threshold=settings.ml_auto_merge_threshold,
                 review_floor=settings.ml_review_floor,
             ),
         )
         classified_ml = _ml_model.score(
-            non_matches, cleaned,
+            ml_input_pool, cleaned,
             fs_features=fs_features if fs_features_path is not None else None,
         )
 

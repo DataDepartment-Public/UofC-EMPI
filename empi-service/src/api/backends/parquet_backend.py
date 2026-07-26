@@ -54,7 +54,7 @@ _SCHEMAS: dict[str, list[str]] = {
     "record_raw": ["patid", "raw_json", "run_id"],
     "audit_log": [
         "id", "ts_utc", "user", "action", "patids", "mid",
-        "prev_state", "next_state", "run_id",
+        "prev_state", "next_state", "run_id", "related_patids",
     ],
 }
 
@@ -549,6 +549,7 @@ class ParquetIndexBackend:
         prev_state: str,
         next_state: str,
         run_id: str | None,
+        related_patids: str | None = None,
     ) -> int:
         """Append-only insert. `id` is a synthetic auto-increment (scan
         existing max + 1) — same convention as `next_mid()` — since Parquet
@@ -559,6 +560,7 @@ class ParquetIndexBackend:
             "id": next_id, "ts_utc": ts_utc, "user": user, "action": action,
             "patids": patids, "mid": mid, "prev_state": prev_state,
             "next_state": next_state, "run_id": run_id,
+            "related_patids": related_patids,
         }], columns=_SCHEMAS["audit_log"])
         self._tables["audit_log"] = pd.concat([df, new], ignore_index=True)
         return next_id

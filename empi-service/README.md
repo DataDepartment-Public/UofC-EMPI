@@ -49,8 +49,17 @@ or dashboard.
 ## Running the API + publishing a run
 
 ```bash
+python scripts/init_db.py            # once per environment — creates the schema; see its own docstring
 uvicorn src.api.main:app --reload --port 8000
 ```
+
+The app only ever *connects* to the database — it doesn't create or alter
+its schema on startup or per-request anymore. Run `scripts/init_db.py`
+once for a new environment (a fresh local SQLite file, or a new Azure
+Postgres instance) and again whenever a code change adds a new column to
+`_COLUMN_MIGRATIONS` (`src/api/backends/sql_backend.py`/
+`postgres_backend.py`). If you skip it, the app still starts, but logs a
+loud, clear error instead of silently creating the schema for you.
 
 `POST /runs` triggers a pipeline run and publishes it automatically in one
 background job. For a fully local workflow with no server running:

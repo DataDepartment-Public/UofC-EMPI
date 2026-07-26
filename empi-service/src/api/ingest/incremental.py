@@ -76,6 +76,7 @@ from src.contracts import (
     ZIP_BASE,
 )
 from src.api.backends.index_backend import IndexBackend
+from src.models import model_cache
 from src.models.deterministic_rules import (
     AUTO_MERGE_RULES,
     apply_rules,
@@ -335,10 +336,13 @@ def _persist_review_candidates(
     if active_model is not None and mini_clean is not None:
         # Lazy import — keeps splink/duckdb out of the path when no model is
         # active or there is nothing to score, mirroring src/pipeline.py Stage 4.
-        from src.models.fs_matcher.matcher import FSMatcher, classification_config_from_settings
+        from src.models.fs_matcher.matcher import (
+            FSMatcher,
+            classification_config_from_settings,
+        )
 
         model = FSMatcher(classification_config=classification_config_from_settings(settings))
-        trained = FSMatcher.load_settings(active_model)
+        trained = model_cache.get_or_load("fs_matcher", active_model, FSMatcher.load_settings)
         classified = model.score(non_matches, mini_clean, trained)
         prob_matches = model.to_probabilistic_matches(classified)
         for a, b, score, tier in zip(

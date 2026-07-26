@@ -15,12 +15,23 @@ resource "azurerm_service_plan" "main" {
 # jobs.py), so a second replica or worker would silently return 404s for runs
 # it didn't start. Do not add autoscale/instance-count > 1 without first
 # replacing that registry with a shared store (e.g. Redis).
+#
+# public_network_access_enabled = false + virtual_network_subnet_id together:
+# no public ingress at all (only reachable via the inbound Private Endpoint
+# in networking.tf, e.g. from the dashboard's own VNet integration below),
+# and outbound traffic to Postgres/Storage routes over the VNet to their
+# private endpoints instead of the public internet. See to-do.md A4 --
+# this also means GitHub Actions' post-deploy health check can no longer
+# curl this app's public URL directly (see deploy-backend.yml).
 
 resource "azurerm_linux_web_app" "backend" {
   name                = local.backend_app_name
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_service_plan.main.location
   service_plan_id     = azurerm_service_plan.main.id
+
+  public_network_access_enabled = false
+  virtual_network_subnet_id     = azurerm_subnet.app.id
 
   identity {
     type = "SystemAssigned"
@@ -59,6 +70,8 @@ resource "azurerm_linux_web_app" "backend" {
     EMPI_POSTGRES_HOST = azurerm_postgresql_flexible_server.main.fqdn
     EMPI_POSTGRES_DB   = azurerm_postgresql_flexible_server_database.main.name
     EMPI_POSTGRES_USER = local.backend_app_name
+
+    APPLICATIONINSIGHTS_CONNECTION_STRING = azurerm_application_insights.main.connection_string
   }
 
   storage_account {
@@ -99,12 +112,21 @@ resource "azurerm_linux_web_app" "backend" {
 #
 # Stateless BFF — no storage mount. Only configured input is the backend's
 # address (src/lib/server-api.ts's EMPI_API_URL).
+#
+# Stays publicly reachable (browsers need to reach it) -- but does get
+# outbound VNet Integration into the same subnet as the backend, which is
+# what lets its calls to https://<backend-hostname> (unchanged, still the
+# public-looking *.azurewebsites.net URL) resolve to the backend's private
+# IP instead of failing now that the backend has no public ingress. No code
+# change needed on the dashboard side for this.
 
 resource "azurerm_linux_web_app" "dashboard" {
   name                = local.dashboard_app_name
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_service_plan.main.location
   service_plan_id     = azurerm_service_plan.main.id
+
+  virtual_network_subnet_id = azurerm_subnet.app.id
 
   identity {
     type = "SystemAssigned"
@@ -124,6 +146,33 @@ resource "azurerm_linux_web_app" "dashboard" {
   app_settings = {
     WEBSITES_PORT = "3000"
     EMPI_API_URL  = "https://${local.backend_hostname}"
+
+    APPLICATIONINSIGHTS_CONNECTION_STRING = azurerm_application_insights.main.connection_string
+
+    # Read by auth_settings_v2.active_directory_v2.client_secret_setting_name
+    # below -- Easy Auth's documented convention is to read the provider
+    # secret from an app setting by name, not accept it as a plan-visible
+    # attribute directly.
+    MICROSOFT_PROVIDER_AUTHENTICATION_SECRET = azuread_application_password.dashboard.value
+  }
+
+  # Entra ID SSO (auth.tf) -- see that file's header comment for why this is
+  # on the dashboard only, not the backend.
+  auth_settings_v2 {
+    auth_enabled           = true
+    default_provider       = "azureactivedirectory"
+    unauthenticated_action = "RedirectToLoginPage"
+    require_authentication = true
+
+    active_directory_v2 {
+      client_id                  = azuread_application.dashboard.client_id
+      client_secret_setting_name = "MICROSOFT_PROVIDER_AUTHENTICATION_SECRET"
+      tenant_auth_endpoint       = "https://login.microsoftonline.com/${data.azurerm_client_config.current.tenant_id}/v2.0"
+    }
+
+    login {
+      token_store_enabled = true
+    }
   }
 
   tags = local.tags

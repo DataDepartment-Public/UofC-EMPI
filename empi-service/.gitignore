@@ -33,6 +33,7 @@ data/runs/*
 data/local_index/*
 data/silver_labels/*
 data/gold_labels?*
+data/reviewer_labels/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/blocking/.gitkeep
@@ -45,6 +46,7 @@ data/gold_labels?*
 !data/runs/.gitkeep
 !data/local_index/.gitkeep
 !data/silver_labels/.gitkeep
+!data/reviewer_labels/.gitkeep
 !data/raw/SCHEMA.md
 !data/processed/SCHEMA.md
 !data/blocking/SCHEMA.md
@@ -57,6 +59,7 @@ data/gold_labels?*
 !data/runs/SCHEMA.md
 !data/local_index/SCHEMA.md
 !data/silver_labels/SCHEMA.md
+!data/reviewer_labels/SCHEMA.md
 !data/README.md
 *.csv
 *.parquet

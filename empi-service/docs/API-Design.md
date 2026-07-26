@@ -106,21 +106,23 @@ CREATE TABLE entity_member (
 
 -- Append-only audit trail. Never updated or deleted.
 CREATE TABLE audit_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts_utc       TEXT NOT NULL,
-    user         TEXT NOT NULL,         -- reviewer identity (see §5 auth)
-    action       TEXT NOT NULL,         -- 'merge' | 'unmerge' | 'split'
-    patids       TEXT NOT NULL,         -- comma-separated PATIDs acted on
-    mid          TEXT NOT NULL,         -- entity affected (or created)
-    prev_state   TEXT NOT NULL,         -- human-readable, e.g. "Needs review"
-    next_state   TEXT NOT NULL,         -- e.g. "Merged"
-    run_id       TEXT                   -- run the entity belonged to when edited
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc         TEXT NOT NULL,
+    user           TEXT NOT NULL,         -- reviewer identity (see §5 auth)
+    action         TEXT NOT NULL,         -- 'merge' | 'unmerge' | 'dismiss' | 'split'
+    patids         TEXT NOT NULL,         -- comma-separated PATIDs acted on
+    mid            TEXT NOT NULL,         -- entity affected (or created)
+    prev_state     TEXT NOT NULL,         -- human-readable, e.g. "Needs review"
+    next_state     TEXT NOT NULL,         -- e.g. "Merged"
+    run_id         TEXT,                  -- run the entity belonged to when edited
+    related_patids TEXT                   -- snapshot for retraining-label export; see Data-Contract.md §6e
 );
 ```
 
 `audit_log` maps 1:1 onto the demo's `AUDIT` array
 (`{user, ts, ids, prev, next, mid}`), so the dashboard's audit table renders with no
-shape change.
+shape change. `related_patids` is additive — not part of that original shape,
+consumed only by `scripts/export_reviewer_labels.py`.
 
 **Incremental-scoring index** (`src/api/backends/sql_backend.py`, feeds `POST
 /records/score` — see §3): two more tables, rebuilt wholesale by every full
@@ -309,6 +311,33 @@ insert the `audit_log` row. Either both land or neither does — the audit
 trail can never disagree with the stored output. `merge` collapses members
 into one `mid`; `unmerge` detaches a `patid` into a fresh standalone `mid`.
 
+### Admin (model hot-swap)
+
+```
+POST /admin/models/reload
+  → 200 {"invalidated": ["fs_matcher", "ml_matcher"], "fs_active_model": {...} | null,
+         "ml_active_model": {...} | null}
+
+GET /admin/models/status
+  → 200 {"cached": {"fs_matcher": {"path": "...", "mtime": ...}, ...},
+         "fs_active_model": {...} | null, "ml_active_model": {...} | null}
+```
+
+Not reviewer-facing — no dashboard route calls these. `src/models/model_cache.py`
+caches the FS matcher's trained settings (`FSMatcher.load_settings`) and the ML
+matcher's artifact (`registry.load_model_artifact`) in memory, keyed by
+`(path, mtime)`, so `src/pipeline.py` and `src/api/ingest/incremental.py` stop
+re-reading/re-deserializing the same file on every single pipeline run and
+every incremental `/records/score` call. The cache key already self-invalidates
+on file change — a promoted model (new `active.json` pointer) gets picked up
+automatically the next time anything asks for it, no restart required. `POST
+/admin/models/reload` just makes that moment immediate, synchronous, and
+observable instead of implicit and whenever-the-next-request-happens: call it
+right after copying a promoted artifact into place to confirm the swap
+succeeded (the response echoes the newly-resolved active model meta) before
+considering the promotion complete. No new auth — protected the same way
+every other route here is, by the backend having no public ingress at all.
+
 ---
 
 ## 4. Code layout
@@ -328,7 +357,11 @@ src/api/
   incremental.py       # one/few new records -> IndexBackend, no full pipeline re-run
   local_score.py       # incremental.py's path with no FastAPI/uvicorn — Parquet only
   routers/
-    health.py  runs.py  records.py  audit.py  dashboard.py
+    health.py  runs.py  records.py  audit.py  dashboard.py  admin.py
+
+src/models/
+  model_cache.py         # mtime-keyed in-memory cache for the FS/ML matcher
+                         #   artifacts -- see "Admin (model hot-swap)" above
 ```
 
 `run_pipeline()` itself is **not modified** by any of this — the service calls it
@@ -355,6 +388,16 @@ as-is. `assign_clusters` is reused to seed initial entities on publish.
 - **Idempotency** — `POST /audit/*` should be safe to retry; dedupe on
   `(action, sorted(patids), mid)` within a short window, or have the client send an
   idempotency key.
+- **Schema management is decoupled from the app lifecycle** — `lifespan`
+  (`main.py`) and `build_index_backend()` (`index_backend.py`) used to call
+  `init_db()` on every boot and on every request that resolved a backend
+  respectively. Neither does anymore; the app only ever connects to an
+  already-correct database and logs a loud error (without crashing) if the
+  expected schema isn't there. `scripts/init_db.py` is the explicit,
+  deliberate way to create or update it — run once per environment, and
+  again whenever `_COLUMN_MIGRATIONS` gains a new entry. Not a versioned
+  migration framework (that's a separate decision for infra/code owners) —
+  the same schema-setup logic that always existed, just no longer implicit.
 
 ---
 

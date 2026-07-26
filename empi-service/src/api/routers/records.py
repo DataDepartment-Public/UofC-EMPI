@@ -206,7 +206,7 @@ def score_records(
     pattern as `POST /runs`), regardless of batch size."""
     settings.ensure_dirs()
     run_id = jobs.new_run_id()
-    jobs.mark_score_queued(run_id)
+    jobs.mark_score_queued(run_id, settings)
     background_tasks.add_task(
         jobs.score_records_job,
         run_id,
@@ -217,8 +217,8 @@ def score_records(
 
 
 @router.get("/records/score/{run_id}", response_model=ScoreResult)
-def get_score_result(run_id: str) -> ScoreResult:
-    status = jobs.get_score_status(run_id)
+def get_score_result(run_id: str, settings: Settings = Depends(get_settings)) -> ScoreResult:
+    status = jobs.get_score_status(run_id) or jobs.read_score_status_file(run_id, settings)
     if status is None:
         raise HTTPException(
             status_code=404, detail=f"Unknown score run_id: {run_id}"

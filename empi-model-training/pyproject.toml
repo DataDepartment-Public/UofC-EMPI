@@ -1,0 +1,60 @@
+[project]
+name = "empi-model-training"
+version = "0.1.0"
+description = "Azure ML training pipeline for the eMPI record-matching models (Fellegi-Sunter + LightGBM pair classifier)."
+readme = "README.md"
+authors = [
+    { name = "jason12102", email = "jason12102@uchicago.edu" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "azure-ai-ml>=1.34.1",
+    "azure-identity>=1.25.3",
+    "jellyfish>=1.2.1",
+    "joblib>=1.5.3",
+    "lightgbm>=4.7.0",
+    "mlflow>=3.14.0",
+    "numpy>=2.4.6",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.9.0",
+    "splink>=4.0.16,<5.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.17,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "ruff>=0.16.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+# Splink/pandas/lightgbm/sklearn have no type stubs -- their APIs are the
+# majority of what this repo calls, so this one strict-mode check would
+# otherwise flag most of the codebase for no actionable benefit. Argument
+# types, return types, and everything else strict enables stay on.
+disallow_untyped_calls = false
+
+# No published type stubs for these -- untyped-call/import-untyped noise from
+# their internals isn't actionable here.
+[[tool.mypy.overrides]]
+module = ["pandas.*", "sklearn.*", "joblib.*", "splink.*", "jellyfish.*", "lightgbm.*"]
+ignore_missing_imports = true
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

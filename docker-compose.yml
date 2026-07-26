@@ -16,6 +16,10 @@ services:
       - empi-models:/app/models
       - empi-logs:/app/logs
     restart: unless-stopped
+    # First run against a fresh empi-data volume: the app connects to the
+    # database but no longer creates its schema itself (empi-service/
+    # scripts/init_db.py's docstring explains why) — once per new volume:
+    #   docker compose exec empi-service python scripts/init_db.py
 
   empi-dashboard:
     build:

@@ -66,16 +66,24 @@ CREATE TABLE IF NOT EXISTS entity_member (
 );
 CREATE INDEX IF NOT EXISTS idx_entity_member_mid ON entity_member(mid);
 
+-- related_patids is a comma-joined snapshot, captured at write time, of the
+-- *other* patids relevant to reconstructing this event's implied pairs --
+-- NULL for 'dismiss' (patids already holds both sides). For 'merge' it's the
+-- entity's members immediately before this merge; for 'unmerge' it's who
+-- stayed behind in the original entity. Exists so a later export (e.g. for
+-- retraining labels) never has to reconstruct past membership from
+-- entity_member's current-state-only table -- see src/api/routers/audit.py.
 CREATE TABLE IF NOT EXISTS audit_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts_utc       TEXT NOT NULL,
-    user         TEXT NOT NULL,
-    action       TEXT NOT NULL,
-    patids       TEXT NOT NULL,
-    mid          TEXT NOT NULL,
-    prev_state   TEXT NOT NULL,
-    next_state   TEXT NOT NULL,
-    run_id       TEXT
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc         TEXT NOT NULL,
+    user           TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    patids         TEXT NOT NULL,
+    mid            TEXT NOT NULL,
+    prev_state     TEXT NOT NULL,
+    next_state     TEXT NOT NULL,
+    run_id         TEXT,
+    related_patids TEXT
 );
 
 CREATE TABLE IF NOT EXISTS record_attrs (
@@ -788,14 +796,15 @@ def insert_audit_log(
     prev_state: str,
     next_state: str,
     run_id: str | None,
+    related_patids: str | None = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO audit_log
-            (ts_utc, user, action, patids, mid, prev_state, next_state, run_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (ts_utc, user, action, patids, mid, prev_state, next_state, run_id, related_patids)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id),
+        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id, related_patids),
     )
     return int(cur.lastrowid)
 

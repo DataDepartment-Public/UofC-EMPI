@@ -138,6 +138,7 @@ class IndexBackend(Protocol):
         prev_state: str,
         next_state: str,
         run_id: str | None,
+        related_patids: str | None = None,
     ) -> int: ...
 
     def list_audit_log(
@@ -290,10 +291,12 @@ class SqlIndexBackend:
 
     def insert_audit_log(
         self, *, ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
+        related_patids=None,
     ) -> int:
         return self._store.insert_audit_log(
             self.conn, ts_utc=ts_utc, user=user, action=action, patids=patids,
             mid=mid, prev_state=prev_state, next_state=next_state, run_id=run_id,
+            related_patids=related_patids,
         )
 
     def list_audit_log(self, *, limit: int = 100, since: str | None = None) -> list[dict]:
@@ -308,6 +311,13 @@ def build_index_backend(settings: Any) -> IndexBackend:
     `settings.postgres_*`, e.g. Azure Database for PostgreSQL — see
     terraform/postgres.tf).
     Caller owns the returned backend's lifecycle — always `close()` it.
+
+    Assumes the schema already exists — this function only connects, it
+    never creates or alters tables. Run `python scripts/init_db.py` once
+    per environment (a new local DB, a new Azure Postgres instance, or
+    after a code change adds a column to `_COLUMN_MIGRATIONS`) instead of
+    relying on this to fix it implicitly; it used to, on every single call
+    here, which meant on nearly every request. See docs/API-Design.md.
     """
     backend_name = getattr(settings, "index_backend", "sqlite")
     if backend_name == "parquet":
@@ -329,13 +339,11 @@ def build_index_backend(settings: Any) -> IndexBackend:
             settings.postgres_db,
             settings.postgres_user,
         )
-        postgres_backend.init_db(pg_conn)
         return SqlIndexBackend(pg_conn, store_module=postgres_backend)
 
     from src.api.backends import sql_backend
 
     conn = sql_backend.get_connection(settings.db_path)
-    sql_backend.init_db(conn)
     return SqlIndexBackend(conn, store_module=sql_backend)
 
 

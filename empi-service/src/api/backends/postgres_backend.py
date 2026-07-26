@@ -63,16 +63,19 @@ CREATE TABLE IF NOT EXISTS entity_member (
 );
 CREATE INDEX IF NOT EXISTS idx_entity_member_mid ON entity_member(mid);
 
+-- related_patids: see sql_backend.py's audit_log DDL comment -- same column,
+-- same meaning, kept identical across both backends.
 CREATE TABLE IF NOT EXISTS audit_log (
-    id           INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    ts_utc       TEXT NOT NULL,
-    "user"       TEXT NOT NULL,
-    action       TEXT NOT NULL,
-    patids       TEXT NOT NULL,
-    mid          TEXT NOT NULL,
-    prev_state   TEXT NOT NULL,
-    next_state   TEXT NOT NULL,
-    run_id       TEXT
+    id             INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts_utc         TEXT NOT NULL,
+    "user"         TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    patids         TEXT NOT NULL,
+    mid            TEXT NOT NULL,
+    prev_state     TEXT NOT NULL,
+    next_state     TEXT NOT NULL,
+    run_id         TEXT,
+    related_patids TEXT
 );
 
 CREATE TABLE IF NOT EXISTS record_attrs (
@@ -729,17 +732,18 @@ def insert_audit_log(
     prev_state: str,
     next_state: str,
     run_id: str | None,
+    related_patids: str | None = None,
 ) -> int:
     """`RETURNING id` + `fetchone()` stands in for sqlite3's `cur.lastrowid`
     — psycopg/Postgres has no equivalent cursor attribute."""
     row = conn.execute(
         """
         INSERT INTO audit_log
-            (ts_utc, "user", action, patids, mid, prev_state, next_state, run_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (ts_utc, "user", action, patids, mid, prev_state, next_state, run_id, related_patids)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id),
+        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id, related_patids),
     ).fetchone()
     assert row is not None
     return int(row["id"])

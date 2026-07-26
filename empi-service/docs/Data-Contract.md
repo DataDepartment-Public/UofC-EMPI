@@ -693,20 +693,24 @@ semantics as `record_attrs`.
 
 ### 6e — Reviewer audit log
 
-`audit_log` — append-only record of every manual `/audit/merge` or
-`/audit/unmerge` action. Also the source of truth for which PATIDs are
-reviewer-**locked** (see the sticky-unmerge invariant above).
+`audit_log` — append-only record of every manual `/audit/merge`,
+`/audit/unmerge`, or `/audit/dismiss` action. Also the source of truth for
+which PATIDs are reviewer-**locked** (see the sticky-unmerge invariant
+above), and — via `related_patids` — the input to
+`scripts/export_reviewer_labels.py` (retraining labels derived from
+reviewer-confirmed matches; see `empi-model-training/README.md`).
 
 | Column | Dtype | Nullable | Notes |
 |---|---|---|---|
 | `id` | int64 | no (key) | SQLite: native `AUTOINCREMENT`. Parquet: scan existing max `id` + 1 (no autoincrement primitive) — same convention as `mid` minting. |
 | `ts_utc` | string (ISO-8601) | no | |
 | `user` | string | no | Reviewer id from the trusted `X-Reviewer-Id` header. |
-| `action` | string ∈ {`merge`, `unmerge`, `split`} | no | `split` is reserved — not yet emitted by any route. |
+| `action` | string ∈ {`merge`, `unmerge`, `dismiss`, `split`} | no | `split` is reserved — not yet emitted by any route. |
 | `patids` | string | no | Comma-joined. |
 | `mid` | string | no | |
 | `prev_state`, `next_state` | string | no | Human-readable state labels (e.g. `"Merged"`, `"Needs review"`). |
 | `run_id` | string | yes | |
+| `related_patids` | string | yes | Comma-joined snapshot, captured at write time, of the *other* patids relevant to reconstructing this event's implied pairs. `merge`: the entity's members immediately before this merge. `unmerge`: who stayed behind. `dismiss`: `NULL` (`patids` already holds both sides). Exists so a later export never has to reconstruct past membership from `entity_member`, which only ever holds current state — see `src/api/routers/audit.py`. Rows written before this column existed have it `NULL`; `export_reviewer_labels.py` skips unmerge rows in that state rather than guessing. |
 
 Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED
 (`ParquetIndexBackend.insert_audit_log`/`list_audit_log`).

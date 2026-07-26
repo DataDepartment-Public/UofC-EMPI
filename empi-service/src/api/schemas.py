@@ -48,6 +48,32 @@ class ReadyResponse(BaseModel):
     checks: ReadyChecks
 
 
+class ActiveModelInfo(BaseModel):
+    """Meta of one matcher's currently-resolved active model, or None if
+    neither an override nor active.json nor any model file resolves."""
+
+    model_config = ConfigDict(extra="allow")
+
+    model_file: str | None = None
+
+
+class CachedModelInfo(BaseModel):
+    path: str
+    mtime: float
+
+
+class ModelReloadResponse(BaseModel):
+    invalidated: list[str]
+    fs_active_model: ActiveModelInfo | None
+    ml_active_model: ActiveModelInfo | None
+
+
+class ModelStatusResponse(BaseModel):
+    cached: dict[str, CachedModelInfo]
+    fs_active_model: ActiveModelInfo | None
+    ml_active_model: ActiveModelInfo | None
+
+
 class RecordAttrs(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
@@ -288,6 +314,7 @@ class AuditLogRow(BaseModel):
     prev_state: str
     next_state: str
     run_id: str | None
+    related_patids: str | None = None
 
 
 __all__ = [
@@ -321,4 +348,8 @@ __all__ = [
     "ScoreTier",
     "RecordScoreOutcome",
     "ScoreResult",
+    "ActiveModelInfo",
+    "CachedModelInfo",
+    "ModelReloadResponse",
+    "ModelStatusResponse",
 ]

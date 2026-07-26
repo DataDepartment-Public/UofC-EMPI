@@ -9,4 +9,10 @@
 # github_repository    = "DataDepartment-Public/UofC-EMPI"
 # github_oidc_subjects = ["ref:refs/heads/main"]
 
-# app_service_sku = "B1"
+# app_service_sku = "P0v3"  # bump to P1v3/P2v3 if the memory/CPU alerts trip
+
+# log_retention_days        = 30
+# alert_notification_emails = ["ops@example.com"]  # empty by default -- alerts have nowhere to go until this is set
+
+# postgres_backup_retention_days = 35
+# postgres_geo_redundant_backup  = true  # cannot change after server creation without recreating it

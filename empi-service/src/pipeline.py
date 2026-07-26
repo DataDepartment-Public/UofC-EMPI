@@ -99,6 +99,7 @@ from src.models.deterministic_rules import (  # noqa: E402
     classify_non_matches,
     get_match_stats,
 )
+from src.models import model_cache  # noqa: E402
 # Both registries' resolve_active_model import no heavy deps (json/pathlib
 # only); the FS matcher (which pulls splink) and the ML matcher (whose model
 # format is up to its implementer) are lazy-imported inside their stages.
@@ -302,7 +303,7 @@ def run_pipeline(
             classification_config_from_settings,
         )
         _model = FSMatcher(classification_config=classification_config_from_settings(settings))
-        _trained = FSMatcher.load_settings(active_fs_model)
+        _trained = model_cache.get_or_load("fs_matcher", active_fs_model, FSMatcher.load_settings)
         classified = _model.score(non_matches, cleaned, _trained)
 
         # Uniform 5-col shape (src.contracts.ClassificationResults), shared with
@@ -379,7 +380,7 @@ def run_pipeline(
         from src.models.ml_matcher.registry import load_model_artifact
 
         _ml_model = MLMatcher(
-            model=load_model_artifact(active_ml_model),
+            model=model_cache.get_or_load("ml_matcher", active_ml_model, load_model_artifact),
             feature_builder=V3FeatureBuilder(),
             classification_config=MLClassificationConfig(
                 auto_merge_threshold=settings.ml_auto_merge_threshold,

@@ -9,6 +9,12 @@
 # storage account key, not a managed identity — that key ends up in Terraform
 # state as a result. Make sure the backend (backend.hcl) points at a storage
 # account with encryption-at-rest and restrict who can read this state.
+#
+# Public network access is off -- reachable only via the Private Endpoint in
+# networking.tf (pe-*-storage-file), from the backend's VNet-integrated
+# outbound path (app_service.tf). Account-key auth for the SMB mount is
+# unaffected by this; it's independent of which network path reaches the
+# endpoint.
 
 resource "azurerm_storage_account" "main" {
   name                = "st${var.project_name}${var.environment}${local.suffix}"
@@ -19,6 +25,27 @@ resource "azurerm_storage_account" "main" {
   account_replication_type   = "LRS"
   min_tls_version            = "TLS1_2"
   https_traffic_only_enabled = true
+
+  public_network_access_enabled = false
+
+  network_rules {
+    default_action = "Deny"
+    bypass         = ["AzureServices"]
+  }
+
+  # Customer-managed key (keyvault.tf) via the shared CMK identity -- using a
+  # user-assigned identity here (not this resource's own system-assigned
+  # one) is what avoids a chicken-and-egg dependency between the key vault
+  # role grant and the storage account's own identity; see keyvault.tf.
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.cmk.id]
+  }
+
+  customer_managed_key {
+    key_vault_key_id          = azurerm_key_vault_key.storage.id
+    user_assigned_identity_id = azurerm_user_assigned_identity.cmk.id
+  }
 
   tags = local.tags
 }

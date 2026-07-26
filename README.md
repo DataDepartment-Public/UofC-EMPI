@@ -13,6 +13,8 @@ empi-dashboard/    Next.js frontend — reviewer dashboard
 
 ## Architecture at a glance
 
+> Full Azure deployment topology + entity-resolution pipeline diagrams (Mermaid, presentation-ready): [`docs/Architecture-Diagram.md`](docs/Architecture-Diagram.md).
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  Browser                                                            │

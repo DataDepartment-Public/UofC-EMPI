@@ -1,0 +1,34 @@
+{
+  "model_name": "ml_matcher",
+  "model_file": "ml_model_20260721T163138Z.pkl",
+  "created_utc": "2026-07-21T16:31:38.837491+00:00",
+  "notes": "LightGBM v4 classifier, serve-only. score = 1 - P(class 1); class 1 = ambiguous \u222a confident non-match (v4 folds non-matches into the ambiguous side). Trained on the whole pool, not the plausible-only subset.",
+  "feature_cols": [
+    "sound_first",
+    "sound_last",
+    "cmp_street_num",
+    "sim_jw_first",
+    "sim_jw_last",
+    "sim_jw_middle",
+    "sim_lev_email",
+    "sim_lev_address1",
+    "addr_token_jaccard",
+    "ssn_digit_frac",
+    "sim_dob",
+    "sim_phones"
+  ],
+  "thresholds": {
+    "auto_merge": 0.7,
+    "review_floor": 0.4
+  },
+  "test_metrics": {
+    "n_test": 40961,
+    "metrics_auto_merge": {
+      "precision": 0.9067,
+      "recall": 0.9819,
+      "tp": 6787,
+      "fp": 698,
+      "fn": 125
+    }
+  }
+}

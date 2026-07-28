@@ -19,6 +19,10 @@ dist/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
+# One-time confusion-matrix render (script + figures, never committed)
+notebooks/fellegi_sunter/figures/
+notebooks/fellegi_sunter/plot_fs_confusion_matrix.py
+
 # Data files (keep structure + the per-folder SCHEMA.md docs; ignore data)
 data/raw/*
 data/processed/*

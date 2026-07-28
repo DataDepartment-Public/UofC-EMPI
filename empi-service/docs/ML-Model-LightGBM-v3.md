@@ -4,7 +4,7 @@ This doc explains **which** machine-learning model the eMPI pipeline serves at
 Stage 4.5, **what** it decides, **how** it was built, and **how** it is wired
 into the pipeline. It is the model-specific companion to
 `docs/ML-Matcher-Integration-Guide.md` (the generic pluggable-matcher contract)
-and `docs/FS-Matcher-Production-Guide.md` (the FS gate that feeds it).
+and `docs/Nonmatch-Gate-Guide.md` (the gate that feeds it).
 
 ---
 
@@ -47,8 +47,11 @@ misleadingly confident scores. The pipeline is built so it never has to (§3).
 3. deterministic rules ──► non-matches pool (uncertain pairs)
         │
         ▼
-4. FS matcher  ── GATE: drop the pairs FS ranks no_match (score < fs_review_floor)
-        │          → only the FS-plausible survivors continue
+4. FS matcher  ── audit-only: scores + features, routes nothing
+        │
+        ▼
+4.25 non-match GATE ── drop P(plausible) < gate_threshold
+        │                 → only the plausible survivors continue
         ▼
 4.5 ML matcher (THIS MODEL)
         │  score = P(confident match) = 1 − P(ambiguous)
@@ -60,19 +63,22 @@ misleadingly confident scores. The pipeline is built so it never has to (§3).
 
 Two design decisions make this coherent:
 
-1. **The FS matcher is the non-match gate.** Because the ML model can't judge
-   true non-matches, the Fellegi-Sunter matcher (Stage 4) discards them first —
-   it drops its `no_match` tier and passes only the *plausible* survivors to the
-   ML model. The ML model therefore sees roughly the same population it was
-   trained on. (If no FS model is active, the ML matcher falls back to the full
-   non-matches pool with a warning — promote an FS model to arm the gate.)
+1. **A dedicated model is the non-match gate.** Because the ML model can't
+   judge true non-matches, Stage 4.25 (`src/models/nonmatch_gate/`, see
+   `docs/Nonmatch-Gate-Guide.md`) discards them first — it drops everything
+   scoring below `P(plausible) = 0.30` and passes only the plausible survivors
+   to the ML model, which therefore sees roughly the population it was trained
+   on. The gate shares this model's `V3FeatureBuilder`, so both stages see
+   identical features. (The FS matcher held this role before and remains the
+   fallback when no gate model is active; with neither, the ML matcher scores
+   the full non-matches pool with a warning.)
 
 2. **The ML model runs as a 2-tier classifier.** With non-matches gated out
    upstream, the ML matcher never needs a `no_match` tier. It is configured with
    `ml_review_floor = 0.0`, so every scored pair lands in exactly one of two
    tiers: `auto_merge` (confident match) or `human_review` (ambiguous). The
    effective three pipeline tiers are produced across stages:
-   **rules-reject + FS-discard = `no_match`; ML = `auto_merge` / `human_review`.**
+   **rules-reject + gate-discard = `no_match`; ML = `auto_merge` / `human_review`.**
 
 **Score direction.** The notebook model's class 1 is *ambiguous*, but the
 pipeline maps a **high** score to `auto_merge`. So at serve time the score is
@@ -83,7 +89,7 @@ score = confident match = auto_merge; a low score = ambiguous = human_review.
 it flags ambiguous at `P(ambiguous) ≥ 0.30`, i.e. confident match at
 `1 − P(ambiguous) ≥ 0.70`.
 
-**Clustering.** `ml_feeds_clustering` is `False` (audit-only). The FS gate makes
+**Clustering.** `ml_feeds_clustering` is `False` (audit-only). The gate makes
 the ML `auto_merge` tier more defensible, but it should be validated against true
 non-matches before being unioned into clustering.
 
@@ -160,7 +166,8 @@ Set in `empi-service/.env` (see `.env.example`); all overridable via
 | `ml_auto_merge_threshold` | **0.70** | `score ≥ this` → `auto_merge` (the notebook operating point). |
 | `ml_review_floor` | **0.0** | Removes the `no_match` tier → 2-tier classifier. Also the candidate-parquet cutoff (0.0 keeps every survivor). |
 | `ml_feeds_clustering` | `False` | Audit-only; keep off until validated against true non-matches. |
-| `fs_review_floor` | `0.40` | The **FS gate** boundary — pairs FS scores below this are discarded before the ML model (in `EMPI_FS_REVIEW_FLOOR`). |
+| `gate_threshold` | `0.30` | The **non-match gate** boundary — pairs scoring below `P(plausible) = this` are discarded before the ML model (`EMPI_GATE_THRESHOLD`). |
+| `fs_review_floor` | `0.40` | The FS candidate cutoff; the gate boundary **only** on the FS fallback path (`EMPI_FS_REVIEW_FLOOR`). |
 
 ---
 
@@ -176,7 +183,7 @@ The notebook's final **export cell** (§11) produces and promotes the artifact:
 
 Run the notebook top-to-bottom (it needs `model`, `proba_test`, `y_test`,
 `idx_test`), then run the pipeline — Stage 4.5 will resolve and serve the
-promoted model. Confirm with the `[5/6] MODEL(ML) — tiers {auto_merge, human_review}`
+promoted model. Confirm with the `[6/7] MODEL(ML) — tiers {auto_merge, human_review}`
 log line (no `no_match` key) and `data/ml_output/ml_features_<run>.parquet`.
 
 ---
@@ -195,12 +202,14 @@ Per run, Stage 4.5 writes to `data/ml_output/`:
 
 ## 9. Known limitations / next steps
 
-- **No true-non-match class.** The model relies entirely on the FS gate to
-  remove non-matches. If the gate is off (no FS model), its scores on the raw
-  pool are not trustworthy — hence the fallback warning.
+- **No true-non-match class.** The model relies entirely on the Stage-4.25
+  gate to remove non-matches. With no gate at all (no gate model *and* no FS
+  model), its scores on the raw pool are not trustworthy — hence the fallback
+  warning.
 - **Training population ≠ serving population exactly.** It trained on
-  gold-plausible pairs; at serve time it scores the *FS*-plausible pool. These
-  overlap heavily but are not identical.
+  gold-plausible pairs; at serve time it scores the *gate*-plausible pool.
+  These overlap heavily but are not identical — the gate misses ~0.1% of true
+  plausible pairs at its operating point.
 - **Serve-only.** Reproducible retraining via `MLMatcher.train()` + the `train`
   CLI is a documented extension point (see the integration guide), not yet
   implemented.

@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.backends import sql_backend
-from src.api.routers import audit, dashboard, health, records, runs
+from src.api.routers import audit, dashboard, explanations, health, records, runs
 from src.config import configure_logging, settings
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ app.include_router(runs.router)
 app.include_router(records.router)
 app.include_router(audit.router)
 app.include_router(dashboard.router)
+app.include_router(explanations.router)
 
 
 __all__ = ["app"]

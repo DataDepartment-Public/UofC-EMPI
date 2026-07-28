@@ -283,6 +283,26 @@ class Settings(BaseSettings):
         "deterministic-edges-only as the out-of-the-box behavior.",
     )
 
+    # ── Per-pair SHAP explanations (src/models/explanations.py) ──────────────
+    # The gate and the ML matcher each emit a per-pair contribution frame
+    # alongside their scores, served read-only by GET /explanations/... .
+    # Computed at score time (not on demand) so an explanation always
+    # describes the model and feature vector that produced the recorded
+    # decision — see the module docstring.
+    explanations_enabled: bool = Field(
+        default=True,
+        description="Emit per-pair SHAP explanations from the non-match gate "
+        "and the ML matcher. Exact TreeSHAP via LightGBM's pred_contrib; adds "
+        "roughly 20us/pair/model to a run. Turn off to skip the artifacts "
+        "entirely (the explanation endpoint then 404s for that run).",
+    )
+    explanation_top_n: int = Field(
+        default=8,
+        description="How many features the explanation endpoint suggests "
+        "showing in a waterfall (a hint the UI may ignore; every feature is "
+        "always returned, ranked by |contribution|).",
+    )
+
     # ── Logging (see configure_logging below) ────────────────────────────────
     log_level: str = Field(
         default="INFO",

@@ -118,6 +118,27 @@ def test_run_passes_fs_features_through_to_builder():
     assert seen["fs_features"] is fs_feats
 
 
+def test_predict_carries_feature_columns_through():
+    """MLFeatures (docs/Data-Contract.md §4.5b) specifies the candidate parquet
+    as pair keys + score + tier + EVERY feature column. `to_ml_features` can
+    only pass through what `predict` hands it, so the features have to survive
+    scoring — they were previously dropped here, and the tests below missed it
+    by hand-building a frame that already had them."""
+    features = pd.DataFrame(
+        {"PATID_A": ["A"], "PATID_B": ["B"], "feat1": [1.0], "feat2": [2.0]}
+    )
+    out = MLMatcher(model=_FakeModel(0.9)).predict(features)
+    assert {"feat1", "feat2"} <= set(out.columns)
+
+
+def test_score_output_reaches_to_ml_features_with_features_intact():
+    """The end-to-end version of the above: the real path from score() to the
+    candidate parquet must retain the feature columns."""
+    matcher = MLMatcher(model=_FakeModel(0.9), feature_builder=_FakeFeatureBuilder())
+    classified = matcher.score(_pairs(), _clean())
+    assert "feat1" in matcher.to_ml_features(classified).columns
+
+
 # ─── to_ml_features() ───────────────────────────────────────────────────────────
 def _classified() -> pd.DataFrame:
     return pd.DataFrame({

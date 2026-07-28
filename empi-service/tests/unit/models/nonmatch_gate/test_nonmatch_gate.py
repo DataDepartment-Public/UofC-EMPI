@@ -119,30 +119,34 @@ def test_to_evaluation_schema_rejects_a_non_classified_frame():
 
 # ─── apply() — the pipeline's one call ────────────────────────────────────────
 def test_apply_returns_survivors_and_a_full_audit_frame():
-    survivors, ev = _gate([0.9, 0.1, 0.5]).apply(_pairs(), _clean())
-    assert list(zip(survivors["PATID_A"], survivors["PATID_B"])) == [("A", "B"), ("E", "F")]
+    result = _gate([0.9, 0.1, 0.5]).apply(_pairs(), _clean())
+    assert list(zip(result.survivors["PATID_A"], result.survivors["PATID_B"])) == [
+        ("A", "B"), ("E", "F"),
+    ]
     # The audit frame covers EVERY scored pair, not just the survivors.
-    assert len(ev) == 3
+    assert len(result.evaluation) == 3
+    # Explanations are opt-in — a caller that doesn't ask pays nothing.
+    assert result.explanations is None
 
 
 def test_apply_preserves_passthrough_columns():
     """Survivors are rows of the INPUT frame, so `source_blocks`/`n_blocks`
     survive the gate — the ML matcher and the review UI still see them."""
-    survivors, _ = _gate([0.9, 0.1, 0.5]).apply(_pairs(), _clean())
+    survivors = _gate([0.9, 0.1, 0.5]).apply(_pairs(), _clean()).survivors
     assert list(survivors.columns) == list(_pairs().columns)
     assert list(survivors["source_blocks"]) == ["B1|B3", "B8"]
 
 
 def test_apply_can_drop_everything():
-    survivors, ev = _gate([0.01, 0.02, 0.03]).apply(_pairs(), _clean())
-    assert survivors.empty
-    assert (ev["predicted_tier"] == TIER_NO_MATCH).all()
+    result = _gate([0.01, 0.02, 0.03]).apply(_pairs(), _clean())
+    assert result.survivors.empty
+    assert (result.evaluation["predicted_tier"] == TIER_NO_MATCH).all()
 
 
 def test_apply_on_an_empty_pool_is_a_no_op():
     empty = _pairs().iloc[:0]
-    survivors, ev = _gate([]).apply(empty, _clean())
-    assert survivors.empty and ev.empty
+    result = _gate([]).apply(empty, _clean())
+    assert result.survivors.empty and result.evaluation.empty
 
 
 # ─── feature-order alignment ──────────────────────────────────────────────────

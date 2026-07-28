@@ -45,4 +45,15 @@ Empty until a model is trained; see `docs/ML-Matcher-Integration-Guide.md`.
 - **Grain:** candidates only — filtered to `match_probability >=
   settings.ml_review_floor` (0.40 default)
 
+## 4.5c — ml_explanations (per-pair SHAP)
+
+- **Contract:** `contracts.PairExplanations` (`validate_pair_explanations`)
+- **File:** `ml_explanations_<run_id>.parquet`
+- **Grain:** every pair the ML matcher scored
+- **Note:** contributions are sign-normalized to the **served** score
+  (`P(confident match)`), not the underlying model's `P(ambiguous)` — positive
+  always pushes toward `auto_merge`.
+- **Consumer:** `GET /explanations/ml_matcher/{a}/{b}`. See
+  `docs/Explanations-Guide.md`.
+
 Full detail: `docs/Data-Contract.md`.

@@ -282,12 +282,19 @@ class Settings(BaseSettings):
         "retrain).",
     )
     ml_feeds_clustering: bool = Field(
-        default=False,
+        default=True,
         description="When True, the ML matcher's auto_merge-tier "
         "ClassificationResults union into Stage 5 clustering edges alongside "
-        "the deterministic rules' matches. Independent of "
-        "fs_feeds_clustering. Default OFF preserves clustering-on-"
-        "deterministic-edges-only as the out-of-the-box behavior.",
+        "the deterministic rules' matches. Independent of fs_feeds_clustering. "
+        "Default ON: Stage 4.5 is a decision stage, not an audit stage — a "
+        "model whose verdict reaches nothing cannot raise recall. Two "
+        "consequences to know: (1) merge precision is now bounded by the "
+        "served model's, so tune ml_auto_merge_threshold against a held-out "
+        "precision target rather than leaving it at the training notebook's "
+        "operating point; (2) the served model was fit on gold, so the "
+        "end-to-end headline is no longer leakage-free at --holdout none — "
+        "use --holdout strict. Set EMPI_ML_FEEDS_CLUSTERING=false to restore "
+        "deterministic-edges-only clustering.",
     )
 
     # ── Per-pair SHAP explanations (src/models/explanations.py) ──────────────

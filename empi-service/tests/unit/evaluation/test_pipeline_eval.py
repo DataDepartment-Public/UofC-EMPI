@@ -317,3 +317,37 @@ def test_load_manifest_missing_run_is_explicit(run):
     _manifest, settings, _ = run
     with pytest.raises(FileNotFoundError, match="No run manifest"):
         load_manifest("NOPE", settings)
+
+
+# ── leakage note follows the run's configuration ─────────────────────────────
+def test_ml_matcher_feeds_clustering_by_default():
+    """Stage 4.5 is a decision stage. If this flips back to False the matcher
+    silently stops affecting output while still scoring and explaining, which
+    is the exact failure this default was changed to prevent."""
+    from src.config import Settings
+    assert Settings().ml_feeds_clustering is True
+
+
+def test_headline_is_flagged_as_leaky_when_a_gold_trained_stage_merges(run, labeled):
+    """With ml_feeds_clustering on, --holdout none memorizes the HEADLINE, not
+    just the ML rows. Saying only 'the ML rows are optimistic' understates it."""
+    manifest, settings, _ = run
+    s = settings.model_copy(update={"ml_feeds_clustering": True})
+    r = evaluate_run(manifest, labeled, "label", settings=s, holdout_name="none")
+    assert r.leakage["gold_trained_stage_feeds_clustering"] is True
+    assert "HEADLINE is memorized" in r.leakage["note"]
+
+
+def test_headline_is_flagged_as_clean_when_no_gold_trained_stage_merges(run, labeled):
+    manifest, settings, _ = run
+    s = settings.model_copy(update={"ml_feeds_clustering": False,
+                                    "fs_feeds_clustering": False})
+    r = evaluate_run(manifest, labeled, "label", settings=s, holdout_name="none")
+    assert r.leakage["gold_trained_stage_feeds_clustering"] is False
+    assert "headline itself is clean" in r.leakage["note"]
+
+
+def test_a_holdout_run_carries_no_leakage_note(run, labeled):
+    from src.evaluation.cluster_eval import pair_keys
+    r = _report(run, labeled, holdout=set(pair_keys(labeled)), holdout_name="strict")
+    assert r.leakage["note"] is None

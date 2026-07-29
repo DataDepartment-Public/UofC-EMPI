@@ -129,21 +129,30 @@ ML-stage numbers are memorization.
 Stages **not** fit on gold — blocking and the deterministic rules — are clean at
 any holdout setting.
 
-**Which means the HEADLINE is leakage-free even at `--holdout none`, as long as
-`fs_feeds_clustering` and `ml_feeds_clustering` are both off.** With both off,
-clustering unions only the deterministic auto-merge edges, so nothing that
-touched gold during training influences the final clusters. Only the `gate_pass`
-and `ml_auto_merge` rows need the holdout.
+**Whether the HEADLINE needs the holdout depends on the run's configuration**,
+and this is the single easiest thing to get wrong here.
 
-That makes the recommended reading:
+`ml_feeds_clustering` defaults to **True**, so the gold-trained Stage-4.5 matcher
+forms merge edges. Its training labels therefore shape the clusters themselves,
+and `--holdout none` reports a headline that is partly a memorized reconstruction
+of the gold file. **Under the default configuration, `strict` is the only honest
+headline.**
 
-| Question | Run |
-|---|---|
-| How good is the clustering? | `--holdout none` — 8× more labeled positives, so a tighter estimate |
-| How good are the gate / ML matcher? | `--holdout strict` |
+Turn both feed toggles off (`EMPI_ML_FEEDS_CLUSTERING=false`) and clustering
+unions only the deterministic auto-merge edges — never fit on gold — which makes
+`none` clean again, and preferable for having 8x the labeled positives.
 
-`strict` is still the safe default because it is correct under *every*
-configuration, including someone turning a feed toggle on. But `strict` keeps
+| Configuration | Headline | Gate / ML rows |
+|---|---|---|
+| default (`ml_feeds_clustering=True`) | `--holdout strict` | `--holdout strict` |
+| both feed toggles off | `--holdout none` (tighter) | `--holdout strict` |
+
+Each report's `leakage` block carries `gold_trained_stage_feeds_clustering` and
+spells the consequence out in its `note`, so a stored number can always be read
+back correctly without knowing what the config was that day.
+
+`strict` is the safe default because it is correct under *every* configuration.
+But `strict` keeps
 only the ~20% of plausible pairs the matcher held out, so it is heavily depleted
 of positives (~2.5k of ~62.5k) and enriched in easy confident non-matches — fine
 for recall, mildly optimistic for precision. Cross-check against `--holdout
@@ -264,6 +273,16 @@ gold this is the recall number to quote; the binary headline above it is the
 precision number to quote. They answer different questions and neither replaces
 the other.
 
+**STAGE FLOW** — counts, not rates: what each stage received and how much of it
+it merged, rejected, or passed on. Read this *before* the per-stage rates below.
+`false positive` means "kept this pair alive" at a filter (blocking, the gate)
+and "wrongly merged two patients" at the output — same word, incomparable
+consequences, and reading a recall-first funnel as if it were the output is the
+single most common misreading of this report. `true_lost` is the column that
+matters: true matches discarded where no later stage can recover them. A `*` on
+a merged count marks an **advisory** tier — scored and then wired to nothing
+because `ml_feeds_clustering` / `fs_feeds_clustering` are off.
+
 **PER-STAGE** — each stage's own decision, so a bad headline can be attributed
 instead of guessed at. Each stage is scored **only on the pairs it actually
 saw**: the gate sees just the rules' `non_matches` pool, and the ML matcher just
@@ -313,7 +332,7 @@ history** — the notebook only reads them (`src/evaluation/report_io.py`), so
 comparing past sessions needs no re-running, which matters because a past run's
 artifacts may no longer exist.
 
-Sections: what results exist → one report in detail (**triage**, per-stage,
+Sections: what results exist → one report in detail (**triage**, **stage flow**, per-stage,
 funnel, loss attribution, transitivity, cluster-level) → trend across sessions →
 gold vs. synthetic side by side. §1 optionally shells out to `evaluate_all.py`
 to add a new session; everything else works offline.

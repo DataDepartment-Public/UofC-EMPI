@@ -17,11 +17,16 @@ the x-axis.
 
 **Why gold is evaluated at both holdouts.** The Stage-4.25 gate and the
 Stage-4.5 matcher were trained on the gold labels, so their per-stage numbers
-are only honest under `strict`. But clustering uses deterministic-rule edges
-only (while `fs_feeds_clustering` / `ml_feeds_clustering` are off), and the
-rules were never fit on gold — so the *clustering headline* is leakage-free at
-`none`, where 8x more labeled positives make it a tighter estimate. You want
-both, so this runs both.
+are only honest under `strict`.
+
+Whether the *headline* also needs `strict` depends on configuration. With
+`ml_feeds_clustering` ON (the default) the gold-trained matcher forms merge
+edges, so the clusters are partly memorized and **`strict` is the only honest
+headline**. Turn both feed toggles off and clustering unions deterministic-rule
+edges alone — never fit on gold — and `none` becomes the better headline, with
+8x more labeled positives for a tighter estimate. Each report's `leakage` block
+records which case it was written under, so the number is never read without it.
+Both holdouts run either way.
 
 Usage:
     # the whole thing

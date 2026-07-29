@@ -8,6 +8,7 @@ likely to quietly break.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -17,6 +18,7 @@ from src.evaluation.triage import (
     classification_report,
     confusion_matrix,
     expected_route,
+    stage_flow,
     system_route,
     triage_evaluation,
 )
@@ -214,3 +216,103 @@ def test_support_totals_always_equal_the_labeled_pairs(n):
                               partition={}, candidates=set())
     assert sum(block["per_class"][r]["support"] for r in ROUTES) == n
     assert block["n_pairs"] == n
+
+
+# ── stage flow ───────────────────────────────────────────────────────────────
+def _flow_setup():
+    """4 labeled pairs, 2 of them true matches."""
+    keys = _keys([("1", "2"), ("3", "4"), ("5", "6"), ("7", "8")])
+    y = np.array([True, True, False, False])
+    return keys, y
+
+
+def test_flow_rows_follow_pipeline_order():
+    keys, y = _flow_setup()
+    rows = stage_flow(keys, y, candidates=set(keys), matches=set(), rejects=set(),
+                      gate_scored=set(keys), gate_drop=set(),
+                      ml_scored=set(keys), partition={})
+    assert [r["stage"] for r in rows] == [
+        "blocking", "deterministic rules", "non-match gate", "ml matcher",
+        "clustering", "-> human review queue"]
+
+
+def test_stages_that_did_not_run_are_absent_not_zeroed():
+    """A zero row for a stage that never ran reads as 'it dropped nothing',
+    which is a different claim from 'it was not in this pipeline'."""
+    keys, y = _flow_setup()
+    rows = stage_flow(keys, y, candidates=set(keys), matches=set(), rejects=set(),
+                      partition={})
+    assert "non-match gate" not in {r["stage"] for r in rows}
+    assert "ml matcher" not in {r["stage"] for r in rows}
+
+
+def test_each_stage_conserves_its_input():
+    """merged + rejected + passed on must equal what the stage saw, or a pair
+    has silently vanished from the accounting."""
+    keys, y = _flow_setup()
+    rows = stage_flow(keys, y, candidates=set(keys[:3]), matches={keys[0]},
+                      rejects={keys[2]}, gate_scored={keys[1]}, gate_drop=set(),
+                      partition={})
+    for r in rows:
+        if r["stage"] in ("clustering", "-> human review queue"):
+            continue
+        assert r["auto_merge"] + r["no_match"] + r["to_next"] == r["saw"], r["stage"]
+
+
+def test_true_lost_counts_only_unrecoverable_drops():
+    keys, y = _flow_setup()
+    rows = {r["stage"]: r for r in stage_flow(
+        keys, y, candidates=set(keys), matches=set(),
+        rejects={keys[0]},                    # a true match, rejected by rules
+        gate_scored=set(keys[1:]), gate_drop={keys[1]},   # another, gate-dropped
+        partition={})}
+    assert rows["deterministic rules"]["true_lost"] == 1
+    assert rows["non-match gate"]["true_lost"] == 1
+    assert rows["blocking"]["true_lost"] == 0
+
+
+def test_a_pair_that_never_blocked_is_lost_at_blocking():
+    keys, y = _flow_setup()
+    rows = {r["stage"]: r for r in stage_flow(
+        keys, y, candidates=set(keys[1:]), matches=set(), rejects=set(), partition={})}
+    assert rows["blocking"]["no_match"] == 1
+    assert rows["blocking"]["true_lost"] == 1
+
+
+def test_advisory_ml_tier_is_flagged_and_loses_nothing():
+    """With ml_feeds_clustering off the matcher's verdict changes no output, so
+    it must not be credited with merges nor blamed for losses."""
+    keys, y = _flow_setup()
+    rows = {r["stage"]: r for r in stage_flow(
+        keys, y, candidates=set(keys), matches=set(), rejects=set(),
+        ml_scored=set(keys), ml_auto={keys[0]}, ml_reject={keys[1]},
+        partition={}, ml_binding=False)}
+    ml = rows["ml matcher"]
+    assert ml["binding"] is False and ml["auto_merge"] == 1
+    assert ml["true_lost"] == 0
+    assert "ADVISORY" in ml["note"]
+
+
+def test_binding_ml_tier_is_blamed_for_its_rejects():
+    keys, y = _flow_setup()
+    rows = {r["stage"]: r for r in stage_flow(
+        keys, y, candidates=set(keys), matches=set(), rejects=set(),
+        ml_scored=set(keys), ml_reject={keys[0]}, partition={}, ml_binding=True)}
+    assert rows["ml matcher"]["true_lost"] == 1
+
+
+def test_clustering_row_counts_the_shipped_merges():
+    keys, y = _flow_setup()
+    rows = {r["stage"]: r for r in stage_flow(
+        keys, y, candidates=set(keys), matches=set(), rejects=set(),
+        partition={"1": 1, "2": 1, "3": 2, "4": 3})}
+    assert rows["clustering"]["auto_merge"] == 1
+    assert rows["clustering"]["auto_merge_true"] == 1
+
+
+def test_review_queue_is_whatever_the_last_filter_passed_on():
+    keys, y = _flow_setup()
+    rows = {r["stage"]: r for r in stage_flow(
+        keys, y, candidates=set(keys), matches={keys[0]}, rejects={keys[2]},
+        partition={})}
+    assert rows["-> human review queue"]["saw"] == rows["deterministic rules"]["to_next"] == 2

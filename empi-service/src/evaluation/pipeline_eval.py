@@ -64,7 +64,7 @@ from src.evaluation.cluster_eval import (
     size_distribution,
     truth_clusters_from_pairs,
 )
-from src.evaluation.triage import ROUTES, triage_evaluation
+from src.evaluation.triage import ROUTES, stage_flow, triage_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +149,11 @@ class EndToEndReport:
     #: fair recall view — `clustering` above scores an ambiguous pair routed to
     #: review as a miss, when routing it there is the correct behavior.
     triage: dict
+    #: Per stage: what came in and what the stage did with it (merged /
+    #: rejected / passed on). Counts, not rates — the P/R view below is
+    #: routinely misread because "false positive" means "kept this pair alive"
+    #: at a filter stage and "wrongly merged two patients" at the output.
+    stage_flow: list
     stage_pairwise: dict
     funnel: dict
     loss_attribution: dict
@@ -232,6 +237,35 @@ class EndToEndReport:
                              f"{fmt(m['recall']):>10}{fmt(m['f1']):>10}")
             lines.append(f"  {'accuracy':<22}{fmt(t['accuracy']):>12}"
                          f"{'':>20}{t['n_pairs']:>12,}")
+
+        if self.stage_flow:
+            hdr("STAGE FLOW — what each stage did with the pairs it received")
+            lines.append(f"  {'stage':<22}{'saw':>9}{'merged':>9}{'rejected':>10}"
+                         f"{'passed on':>11}{'true lost':>11}")
+            def cell(n: int) -> str:
+                return f"{n:,}" if n else "-"
+
+            for r in self.stage_flow:
+                merged = cell(r["auto_merge"])
+                if r["auto_merge"] and not r["binding"]:
+                    merged += "*"      # scored but wired to nothing
+                lines.append(
+                    f"  {r['stage']:<22}{r['saw']:>9,}{merged:>9}"
+                    f"{cell(r['no_match']):>10}{cell(r['to_next']):>11}"
+                    f"{r['true_lost']:>11,}"
+                )
+            lines.append("")
+            lines.append("  of which true matches:")
+            for r in self.stage_flow:
+                lines.append(f"    {r['stage']:<22}saw {r['saw_true']:>7,}   "
+                             f"merged {r['auto_merge_true']:>7,}   "
+                             f"passed on {r['to_next_true']:>7,}")
+            lines.append("")
+            for r in self.stage_flow:
+                if r.get("note"):
+                    lines.append(f"  {r['stage']:<22}{r['note']}")
+            if any(r["auto_merge"] and not r["binding"] for r in self.stage_flow):
+                lines.append("  * advisory — this tier feeds nothing downstream")
 
         hdr("PER-STAGE — each stage's own decision, on the pairs it actually saw")
         for name, m in self.stage_pairwise.items():
@@ -414,6 +448,14 @@ def evaluate_run(
         rejects=rejects,
         gate_drop=gate_drop,
         ml_reject=ml_reject,
+    )
+
+    flow = stage_flow(
+        keys, y_true,
+        candidates=candidates, matches=matches, rejects=rejects,
+        gate_scored=_keyset(gate_df), gate_drop=gate_drop,
+        ml_scored=_keyset(ml_df), ml_auto=ml_auto, ml_reject=ml_reject,
+        partition=partition, ml_binding=settings.ml_feeds_clustering,
     )
 
     # ── per-stage pairwise ───────────────────────────────────────────────────
@@ -608,15 +650,30 @@ def evaluate_run(
 
     # `restriction` stays short — it is the series label in every comparison
     # table and chart legend. Explanations belong in `note`.
-    default_note = (
-        "NO holdout applied — if these are gold labels, the Stage-4.25 gate and "
-        "the Stage-4.5 matcher were trained on ~80% of them and their numbers "
-        "are optimistic. Re-run with --holdout strict."
-        if holdout_name == "none" else None
-    )
+    # Whether the *headline* is leakage-free at --holdout none depends on the
+    # run's configuration, not just on the holdout: it is clean only while no
+    # gold-trained stage feeds clustering. With a feed toggle on, the clusters
+    # themselves are partly a memorized reconstruction of the training labels,
+    # and saying only "the ML-stage rows are optimistic" would understate it.
+    gold_trained_feeds = settings.ml_feeds_clustering or settings.fs_feeds_clustering
+    if holdout_name == "none":
+        default_note = (
+            "NO holdout applied — the Stage-4.25 gate and the Stage-4.5 matcher "
+            "were trained on ~80% of the gold pairs, so their rows are optimistic."
+        )
+        default_note += (
+            " ml/fs_feeds_clustering is ON, so a gold-trained stage forms clusters "
+            "and the HEADLINE is memorized too. Use --holdout strict."
+            if gold_trained_feeds else
+            " The headline itself is clean: with both feed toggles off, clustering "
+            "unions only deterministic-rule edges, which were never fit on gold."
+        )
+    else:
+        default_note = None
     leakage = {
         "restriction": holdout_name,
         "note": leakage_note if leakage_note is not None else default_note,
+        "gold_trained_stage_feeds_clustering": bool(gold_trained_feeds),
     }
 
     return EndToEndReport(
@@ -634,6 +691,7 @@ def evaluate_run(
         },
         clustering=clustering,
         triage=triage,
+        stage_flow=flow,
         stage_pairwise=stage_pairwise,
         funnel=funnel,
         loss_attribution=loss_attribution,

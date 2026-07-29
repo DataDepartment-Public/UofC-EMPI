@@ -47,6 +47,7 @@ __all__ = [
     "triage_matrix",
     "triage_report",
     "triage_history",
+    "flow_frame",
     "stage_frame",
     "funnel_frame",
     "loss_frame",
@@ -246,6 +247,23 @@ def triage_history(reports: Iterable[dict], metric: str = "recall") -> pd.DataFr
     if not df.empty:
         df = df.sort_values(["series", "evaluated_utc"], ignore_index=True)
     return df
+
+
+def flow_frame(report: dict) -> pd.DataFrame:
+    """Per stage: pairs in, and what the stage did with them.
+
+    Counts rather than rates, and the counts a person asks for first — merged,
+    rejected, passed on — plus `true_lost`, the only column where a number
+    above zero is unambiguously bad. `binding` says whether the stage's
+    auto_merge tier actually reaches the output or is scored and discarded.
+    """
+    rows = report.get("stage_flow") or []
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    cols = ["stage", "saw", "auto_merge", "no_match", "to_next", "true_lost",
+            "saw_true", "auto_merge_true", "to_next_true", "binding", "note"]
+    return df[[c for c in cols if c in df.columns]]
 
 
 def stage_frame(report: dict) -> pd.DataFrame:

@@ -522,7 +522,8 @@ singleton-inclusive assignment is `clustering.build_cluster_assignments`'s
 output, written to `data/clusters/`.
 
 **Configurable edge union:** `settings.fs_feeds_clustering` /
-`settings.ml_feeds_clustering` (both default `False`) independently control
+`settings.ml_feeds_clustering` (`fs` defaults `False`, **`ml` defaults `True`**)
+independently control
 whether Stage 4's / Stage 4.5's `auto_merge`-tier `ClassificationResults` rows
 (projected to `contracts.Edges` via `src.models.base.to_edges`) union into the
 edge set clustering runs union-find over. With both off — the out-of-the-box
@@ -553,8 +554,9 @@ A uniform edge schema (`PATID_A`, `PATID_B`, `confidence`, `match_source`,
 deterministic+probabilistic/ML frame. Produced by `src.models.base.to_edges`,
 projecting the `auto_merge`-tier rows of any `ClassificationResults` frame.
 Unioned into Stage 5's clustering input only when `fs_feeds_clustering` /
-`ml_feeds_clustering` is on (see above) — with both off, no stage produces an
-`Edges` frame and clustering behaves exactly as it always has.
+`ml_feeds_clustering` is on (see above). `ml_feeds_clustering` is on by default,
+so Stage 4.5 normally does produce an `Edges` frame; with both toggles off no
+stage does, and clustering consumes deterministic `matches` alone.
 
 ---
 

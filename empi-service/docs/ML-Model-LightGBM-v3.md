@@ -58,7 +58,7 @@ misleadingly confident scores. The pipeline is built so it never has to (§3).
         │  score ≥ 0.70 → auto_merge (confident match)
         │  score <  0.70 → human_review (ambiguous)
         ▼
-6. clustering  (ML output is audit-only unless ml_feeds_clustering=True)
+6. clustering  (ML auto_merge edges union in — ml_feeds_clustering=True by default)
 ```
 
 Two design decisions make this coherent:
@@ -89,7 +89,7 @@ score = confident match = auto_merge; a low score = ambiguous = human_review.
 it flags ambiguous at `P(ambiguous) ≥ 0.30`, i.e. confident match at
 `1 − P(ambiguous) ≥ 0.70`.
 
-**Clustering.** `ml_feeds_clustering` is `False` (audit-only). The gate makes
+**Clustering.** `ml_feeds_clustering` is `True` — this model's `auto_merge` tier forms merge edges. The gate makes
 the ML `auto_merge` tier more defensible, but it should be validated against true
 non-matches before being unioned into clustering.
 

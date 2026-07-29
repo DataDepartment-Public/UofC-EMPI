@@ -101,10 +101,23 @@ def _keyset(df: pd.DataFrame | None) -> set[PairKey]:
     return set(pair_keys(df)) if df is not None and len(df) else set()
 
 
+#: The tier column is named differently by different producers: the shared
+#: `ClassificationResults` shape (gate, ML matcher) calls it `predicted_tier`,
+#: while the FS matcher's persisted `ProbabilisticMatches` artifact calls it
+#: `classification_tier`. The tier *vocabulary* is the same either way.
+_TIER_COLUMNS = ("predicted_tier", "classification_tier")
+
+
 def _tier_keys(df: pd.DataFrame | None, tier: str) -> set[PairKey]:
     if df is None or not len(df):
         return set()
-    return set(pair_keys(df[df["predicted_tier"] == tier]))
+    for col in _TIER_COLUMNS:
+        if col in df.columns:
+            return set(pair_keys(df[df[col] == tier]))
+    raise KeyError(
+        f"No tier column in the scored frame (looked for {list(_TIER_COLUMNS)}; "
+        f"found {list(df.columns)})."
+    )
 
 
 # ── Report ───────────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ from src.config import Settings
 from src.contracts import (
     ArtifactRef,
     RunManifest,
+    TIER_AUTO_MERGE,
     TIER_HUMAN_REVIEW,
     TIER_NO_MATCH,
 )
@@ -40,10 +41,20 @@ def _pairs(rows) -> pd.DataFrame:
 
 
 def _results(rows) -> pd.DataFrame:
-    """`ClassificationResults`-shaped frame."""
+    """`ClassificationResults`-shaped frame (gate / ML matcher)."""
     return pd.DataFrame(
         [(a, b, "m", 0.5, tier) for a, b, tier in rows],
         columns=["PATID_A", "PATID_B", "model_name", "score", "predicted_tier"],
+    )
+
+
+def _fs_results(rows) -> pd.DataFrame:
+    """`ProbabilisticMatches`-shaped frame — the FS matcher names its tier
+    column `classification_tier`, not `predicted_tier`."""
+    return pd.DataFrame(
+        [(a, b, "model", 0.5, 1.0, tier) for a, b, tier in rows],
+        columns=["PATID_A", "PATID_B", "match_source", "score", "match_weight",
+                 "classification_tier"],
     )
 
 
@@ -107,6 +118,27 @@ def test_rules_stage_is_scored_separately_from_clustering(run, labeled):
     r = _report(run, labeled)
     rules = r.stage_pairwise["rules_auto_merge"]
     assert rules["TP"] == 1 and rules["FN"] == 1
+
+
+def test_fs_artifact_tier_column_is_read_despite_its_different_name(run, labeled):
+    """`ProbabilisticMatches` calls the tier `classification_tier` while every
+    other stage calls it `predicted_tier` — reading FS must not crash."""
+    manifest, settings, tmp_path = run
+    manifest.matches_model = _write(
+        _fs_results([("p1", "p2", TIER_AUTO_MERGE), ("p3", "p4", TIER_NO_MATCH)]),
+        tmp_path, "data/fs_output/fs.parquet")
+    r = evaluate_run(manifest, labeled, "label", settings=settings)
+
+    fs = r.stage_pairwise["fs_auto_merge (audit-only)"]
+    assert fs["TP"] == 1 and fs["FP"] == 0
+
+
+def test_scored_frame_without_any_tier_column_fails_loudly(run, labeled):
+    manifest, settings, tmp_path = run
+    manifest.matches_ml = _write(_pairs([("p3", "p4")]),
+                                 tmp_path, "data/ml_output/bad.parquet")
+    with pytest.raises(KeyError, match="No tier column"):
+        evaluate_run(manifest, labeled, "label", settings=settings)
 
 
 def test_skipped_stages_are_reported_as_absent(run, labeled):

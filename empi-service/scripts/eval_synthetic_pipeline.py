@@ -51,7 +51,7 @@ from src.pipeline import run_pipeline  # noqa: E402
 logger = logging.getLogger(__name__)
 _ROOT = Path(__file__).resolve().parents[1]
 
-DEFAULT_SYNTHETIC = _ROOT / "data" / "synthetic labels" / "synthetic_test_v3.csv"
+DEFAULT_SYNTHETIC = _ROOT / "data" / "synthetic_data" / "synthetic_test_v3.csv"
 
 #: Columns stored space-delimited in the CSV that the pipeline expects as
 #: collections (`contracts._is_listlike_or_null`).

@@ -654,8 +654,7 @@ def main() -> None:
         "--cleaned", type=Path, default=None,
         help="Start from an already-cleaned Parquet frame, skipping Stage 1. "
              "For evaluation harnesses feeding pre-cleaned records (see "
-             "scripts/eval_synthetic_pipeline.py); mutually exclusive with "
-             "--input.",
+             "src/evaluation/synthetic.py); mutually exclusive with --input.",
     )
     parser.add_argument(
         "--log-level", type=str, default=None,

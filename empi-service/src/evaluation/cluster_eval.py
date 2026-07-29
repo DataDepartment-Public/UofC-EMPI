@@ -1,7 +1,7 @@
 """Cluster-quality metrics — the bridge from *pair* labels to *cluster* output.
 
 The label sets in this project (`data/gold_labels/`, `data/silver_labels/`,
-`data/synthetic labels/`) are all **pairwise**: one row per candidate pair with
+`data/synthetic_data/`) are all **pairwise**: one row per candidate pair with
 a True/False adjudication. Stage 5 (`src/models/clustering.py`) emits
 **clusters**: one `cluster_id` per record. Scoring the pipeline end to end means
 reconciling those two shapes, and there are exactly two defensible ways to do

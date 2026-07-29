@@ -34,8 +34,10 @@ PHI / HIPAA: counts and metrics only — no PATIDs, no field values, no examples
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -65,7 +67,7 @@ from src.evaluation.cluster_eval import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["EndToEndReport", "evaluate_run", "load_manifest"]
+__all__ = ["EndToEndReport", "evaluate_run", "load_manifest", "write_report"]
 
 #: Ordered stage gates a labeled pair passes through. Order is load-bearing:
 #: `loss_attribution` credits the FIRST stage that dropped a pair, so a pair
@@ -123,7 +125,19 @@ def _tier_keys(df: pd.DataFrame | None, tier: str) -> set[PairKey]:
 # ── Report ───────────────────────────────────────────────────────────────────
 @dataclass
 class EndToEndReport:
+    #: Groups every report produced by one `scripts/evaluate_all.py` invocation.
+    #: This — not `run_id` — is the unit of comparison over time: one session
+    #: evaluates the real-data run AND the synthetic run, which necessarily have
+    #: different run ids, and putting them on the same timeline point is the
+    #: whole reason the field exists.
+    session_id: str
     run_id: str
+    #: When this evaluation ran, and the code state the *pipeline run* was
+    #: produced at. Both exist so a stored report can be placed on a timeline
+    #: and tied back to a commit — comparing two reports is meaningless if you
+    #: can't tell whether the pipeline or only the labels changed.
+    evaluated_utc: str
+    git_sha: str | None
     label_source: str
     label_col: str
     leakage: dict
@@ -173,14 +187,19 @@ class EndToEndReport:
                      f"{cov['uncovered_positives']} of them true matches)")
         prf("  (uncovered as non-merge)", self.clustering["uncovered_as_negative"])
 
-        hdr("PER-STAGE — same labeled pairs, each stage's own decision")
+        hdr("PER-STAGE — each stage's own decision, on the pairs it actually saw")
         for name, m in self.stage_pairwise.items():
             if m.get("skipped"):
                 lines.append(f"  {name:<26} (stage not present in this run)")
                 continue
             prf(name, m)
-            if m.get("target"):
-                lines.append(f"  {'':<26} target = {m['target']}")
+            detail = f"target = {m['target']}" if m.get("target") else ""
+            scored, total = m.get("scored_pairs"), m.get("labeled_pairs")
+            if scored is not None and total is not None and scored < total:
+                detail += (f"   |   scored on {scored}/{total} labeled pairs "
+                           f"(the rest never reached this stage)")
+            if detail:
+                lines.append(f"  {'':<26} {detail}")
 
         hdr("FUNNEL — labeled pairs surviving each stage")
         lines.append(f"  {'stage':<16}{'positives':>12}{'negatives':>12}{'total':>10}")
@@ -250,6 +269,8 @@ def evaluate_run(
     label_source: str = "labels",
     holdout: set[PairKey] | None = None,
     holdout_name: str = "none",
+    leakage_note: str | None = None,
+    session_id: str | None = None,
     plausible_col: str | None = None,
     confident_match_col: str | None = None,
     truth_partition: Mapping[str, object] | None = None,
@@ -330,12 +351,27 @@ def evaluate_run(
 
     # ── per-stage pairwise ───────────────────────────────────────────────────
     def _stage(pred_keys: set[PairKey], target: np.ndarray, target_name: str,
-               present: bool = True) -> dict:
+               present: bool = True, scored: set[PairKey] | None = None) -> dict:
+        """Metrics for one stage's decision.
+
+        `scored` is the stage's actual input population. It matters: the gate
+        only sees the rules' `non_matches` pool and the ML matcher only sees
+        the gate's survivors, so a true pair the rules already auto-merged
+        never reaches either. Scoring it against the full labeled set would
+        count those as stage misses and understate recall by exactly the
+        number of pairs the previous stage resolved — which is most of them.
+        """
         if not present:
             return {"skipped": True}
+        if scored is None:
+            mask = np.ones(len(keys), dtype=bool)
+        else:
+            mask = np.array([k in scored for k in keys], dtype=bool)
         pred = np.array([k in pred_keys for k in keys], dtype=bool)
-        m = binary_metrics(target, pred)
+        m = binary_metrics(target[mask], pred[mask])
         m["target"] = target_name
+        m["scored_pairs"] = int(mask.sum())
+        m["labeled_pairs"] = int(len(keys))
         return m
 
     def _col(name: str | None) -> np.ndarray | None:
@@ -355,20 +391,32 @@ def evaluate_run(
             y_plausible if y_plausible is not None else y_true,
             plausible_col if y_plausible is not None else label_col,
             present=gate_df is not None,
+            scored=_keyset(gate_df),
         ),
         "ml_auto_merge": _stage(
             ml_auto,
             y_confident if y_confident is not None else y_true,
             confident_match_col if y_confident is not None else label_col,
             present=ml_df is not None,
+            scored=_keyset(ml_df),
         ),
         "clustering": {**{k: v for k, v in clustering.items()
                           if k not in ("coverage", "uncovered_as_negative")},
                        "target": label_col},
     }
+    if ml_df is not None and y_confident is not None:
+        # The decision-relevant view for `ml_feeds_clustering`. Scored against
+        # the *match* label rather than `confident_match`: merging a pair that
+        # is a true match but was labeled ambiguous is a correct merge, and
+        # counting it as a false positive (as the row above does) understates
+        # what turning the toggle on would actually cost.
+        stage_pairwise["ml_auto_merge (vs match label)"] = _stage(
+            ml_auto, y_true, label_col, scored=_keyset(ml_df)
+        )
     if fs_df is not None:
         stage_pairwise["fs_auto_merge (audit-only)"] = _stage(
-            _tier_keys(fs_df, TIER_AUTO_MERGE), y_true, label_col
+            _tier_keys(fs_df, TIER_AUTO_MERGE), y_true, label_col,
+            scored=_keyset(fs_df),
         )
 
     # ── funnel ───────────────────────────────────────────────────────────────
@@ -491,16 +539,24 @@ def evaluate_run(
                             if k != "size_histogram"},
     }
 
-    leakage = {
-        "restriction": holdout_name,
-        "note": None if holdout_name != "none" else
+    # `restriction` stays short — it is the series label in every comparison
+    # table and chart legend. Explanations belong in `note`.
+    default_note = (
         "NO holdout applied — if these are gold labels, the Stage-4.25 gate and "
         "the Stage-4.5 matcher were trained on ~80% of them and their numbers "
-        "are optimistic. Re-run with --holdout strict.",
+        "are optimistic. Re-run with --holdout strict."
+        if holdout_name == "none" else None
+    )
+    leakage = {
+        "restriction": holdout_name,
+        "note": leakage_note if leakage_note is not None else default_note,
     }
 
     return EndToEndReport(
+        session_id=session_id or manifest.run_id,
         run_id=manifest.run_id,
+        evaluated_utc=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        git_sha=manifest.git_sha,
         label_source=label_source,
         label_col=label_col,
         leakage=leakage,
@@ -517,3 +573,33 @@ def evaluate_run(
         cluster_level=cluster_level,
         counts=dict(manifest.counts),
     )
+
+
+# ── Persistence ──────────────────────────────────────────────────────────────
+def write_report(
+    report: EndToEndReport,
+    settings: Settings = default_settings,
+    out: Path | None = None,
+) -> Path:
+    """Persist a report as JSON (+ a human-readable .txt sibling).
+
+    Reports live in `settings.evaluations_dir`, deliberately NOT in `runs_dir`:
+    that directory holds pipeline `RunManifest`s — immutable per-run lineage —
+    while these are measurements *about* runs and accumulate on their own
+    timeline. Mixing them makes both harder to glob.
+
+    The filename is keyed on (session, source, holdout), so re-evaluating the
+    same session under the same settings overwrites rather than accumulating —
+    that is the same measurement, and keeping both would put a duplicate point
+    on every trend.
+    """
+    holdout = report.leakage.get("restriction", "none").replace("/", "-")
+    out = out or (
+        settings.evaluations_dir
+        / f"eval_{report.session_id}__{report.label_source}__{holdout}.json"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report.as_dict(), indent=2, default=str))
+    out.with_suffix(".txt").write_text(report.to_text())
+    logger.info("Wrote evaluation report → %s", out)
+    return out

@@ -23,7 +23,7 @@ ml_model/
 ## Inference notebooks
 
 Both load a `.pkl` you choose and evaluate it on a **pairs** test set
-(`data/synthetic labels/synthetic_test_v3.csv` by default — `label`: 1 = match,
+(`data/synthetic_data/synthetic_test_v3.csv` by default — `label`: 1 = match,
 0 = not-match; there is **no ambiguous column**, so evaluation collapses to
 match vs. not-match).
 

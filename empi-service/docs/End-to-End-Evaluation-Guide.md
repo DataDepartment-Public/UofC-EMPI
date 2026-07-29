@@ -13,8 +13,11 @@ covers the modules that close that gap.
 | `src/evaluation/cluster_eval.py` | Metric core — pair labels ↔ clusters. No I/O. |
 | `src/evaluation/pipeline_eval.py` | Scores one run's `RunManifest` against a label set. |
 | `src/evaluation/holdout.py` | Reproduces the training notebooks' test folds (leakage control). |
-| `scripts/eval_end_to_end.py` | CLI for gold / silver against a completed run. |
-| `scripts/eval_synthetic_pipeline.py` | Runs the pipeline over the synthetic set and scores it. |
+| `src/evaluation/synthetic.py` | Rebuilds a record population from the synthetic *pair* file. |
+| `src/evaluation/report_io.py` | Reads stored reports back into tidy frames. |
+| **`scripts/evaluate_all.py`** | **The entry point — runs everything and scores it.** |
+| `scripts/eval_end_to_end.py` | Granular: one existing run, one label file, one holdout. |
+| `notebooks/evaluation/end_to_end_eval.ipynb` | Tables + trend charts over stored reports. |
 
 ---
 
@@ -85,6 +88,26 @@ ML-stage numbers are memorization.
 Stages **not** fit on gold — blocking and the deterministic rules — are clean at
 any holdout setting.
 
+**Which means the HEADLINE is leakage-free even at `--holdout none`, as long as
+`fs_feeds_clustering` and `ml_feeds_clustering` are both off.** With both off,
+clustering unions only the deterministic auto-merge edges, so nothing that
+touched gold during training influences the final clusters. Only the `gate_pass`
+and `ml_auto_merge` rows need the holdout.
+
+That makes the recommended reading:
+
+| Question | Run |
+|---|---|
+| How good is the clustering? | `--holdout none` — 8× more labeled positives, so a tighter estimate |
+| How good are the gate / ML matcher? | `--holdout strict` |
+
+`strict` is still the safe default because it is correct under *every*
+configuration, including someone turning a feed toggle on. But `strict` keeps
+only the ~20% of plausible pairs the matcher held out, so it is heavily depleted
+of positives (~2.5k of ~62.5k) and enriched in easy confident non-matches — fine
+for recall, mildly optimistic for precision. Cross-check against `--holdout
+none`.
+
 `tests/unit/evaluation/test_holdout.py` pins the fold sizes and class balances
 the notebooks printed. If a notebook's seed, ratios, stratification target, or
 row ordering changes, those tests fail rather than the folds silently drifting.
@@ -93,28 +116,43 @@ row ordering changes, those tests fail rather than the folds silently drifting.
 
 ## 3. Running it
 
-### Gold (real records, VM only)
+### The usual case — one command
 
 ```bash
-# leakage-safe headline
-python scripts/eval_end_to_end.py --run-id <run_id>
-
-# same run over every gold pair, for comparison only
-python scripts/eval_end_to_end.py --run-id <run_id> --holdout none
-
-# just the gate's fold, or just the matcher's
-python scripts/eval_end_to_end.py --run-id <run_id> --holdout gate
+python scripts/evaluate_all.py
 ```
 
-Gold's extra `ambiguous_pair` column lets each stage be scored against **its
-own** target rather than the match label — keeping an ambiguous non-match is
-correct behavior for the gate and would otherwise count as a false positive:
+One invocation is one **evaluation session**, and it does the whole thing:
 
-- gate → `plausible` = `final_gold_label | ambiguous_pair`
-- ML matcher → `confident_match` = `final_gold_label & ~ambiguous_pair`
-- rules, blocking, clustering → `final_gold_label`
+1. run the pipeline over the real input → score vs gold at `none` **and** `strict`
+2. run the pipeline over the synthetic set → score vs entity ground truth
 
-### Silver
+Every report lands in `data/evaluations/` under one `session_id`. That session —
+not a `run_id` — is the unit of comparison over time: the real-data run and the
+synthetic run are necessarily different pipeline runs, but they are one
+measurement of one state of the system, so they share a timeline point.
+
+```bash
+# name it when it is a baseline worth remembering
+python scripts/evaluate_all.py --session-id gate_v2_baseline
+
+# reuse an existing real-data run (the pipeline run is the slow part)
+python scripts/evaluate_all.py --reuse-real-run 20260728T191705Z
+
+# one half only
+python scripts/evaluate_all.py --skip-synthetic
+python scripts/evaluate_all.py --skip-real
+```
+
+The two halves run independently: a missing gold file or a failed real run does
+not cost you the synthetic result. Failures are reported at the end and set a
+non-zero exit code.
+
+### The granular tool
+
+`scripts/eval_end_to_end.py` scores **one existing run** against **one label
+file** at **one holdout** — for silver, a non-standard label path, or a single
+`--holdout gate` comparison:
 
 ```bash
 python scripts/eval_end_to_end.py --run-id <run_id> \
@@ -122,38 +160,37 @@ python scripts/eval_end_to_end.py --run-id <run_id> \
     --label-col silver_label --source silver --holdout none
 ```
 
-Silver has no `ambiguous_pair`, so every stage is scored against
-`silver_label`, and `--holdout` is ignored with a warning (the folds are not
-defined over it). Silver is also the FS matcher's training data — same leakage
-caveat, without a reconstructible fold.
+Silver has no `ambiguous_pair`, so every stage is scored against `silver_label`,
+and `--holdout` is ignored with a warning (the folds are not defined over it).
+Silver is also the FS matcher's training data — same leakage caveat, without a
+reconstructible fold.
 
-### Synthetic (leakage-free, exact cluster truth)
+### What gold's extra column buys
 
-```bash
-python scripts/eval_synthetic_pipeline.py
-python scripts/eval_synthetic_pipeline.py --reuse-run <run_id>   # score only
-```
+`ambiguous_pair` lets each stage be scored against **its own** target rather
+than the match label — keeping an ambiguous non-match is correct behavior for
+the gate and would otherwise count as a false positive:
 
-`data/synthetic labels/synthetic_test_v3.csv` is a *pair* file carrying
-already-cleaned `*_l`/`*_r` attributes, so it cannot be fed to `--input`. The
-script reconstructs a record frame from both sides, writes it as a cleaned
-Parquet, and runs the **real** pipeline over it through
-`run_pipeline(cleaned_input=...)` — Stages 2–5 exactly as production runs them,
-not a reimplementation.
+- gate → `plausible` = `final_gold_label | ambiguous_pair`
+- ML matcher → `confident_match` = `final_gold_label & ~ambiguous_pair`
+- rules, blocking, clustering → `final_gold_label`
 
-What that measures and what it doesn't:
+### What the synthetic half measures
+
+`data/synthetic_data/synthetic_test_v3.csv` is a *pair* file carrying
+already-cleaned `*_l`/`*_r` attributes, so it cannot be fed to `--input`.
+`src/evaluation/synthetic.py` reconstructs a record frame from both sides and
+runs the **real** pipeline over it through `run_pipeline(cleaned_input=...)` —
+Stages 2–5 exactly as production runs them, not a reimplementation.
 
 - **Stage 1 (cleaning) is skipped by construction** — the inputs are already
-  cleaned, and the planted corruptions live at the cleaned level. Re-running the
-  cleaning rules over them would be lossy.
+  cleaned, and the planted corruptions live at the cleaned level.
 - **Blocking recall here is real**, unlike gold/silver: the positives were built
   independently of blocking, whereas the gold/silver label universe *is* a
-  blocking output (which is why their blocking recall is `N/A`).
-- The set has 10,000 pairs over 20,000 records / 18,000 entities, max true
-  cluster size 2 — so any predicted cluster larger than 2 is a visible false
-  merge.
-- It has no ambiguous class, so the gate and matcher collapse to match /
-  not-match.
+  blocking output.
+- 10,000 pairs over 20,000 records / 18,000 entities, max true cluster size 2 —
+  so any predicted cluster larger than 2 is a visible false merge.
+- No ambiguous class, so the gate and matcher collapse to match / not-match.
 
 ### `--cleaned` on the pipeline
 
@@ -167,8 +204,8 @@ input so lineage stays intact.
 
 ## 4. Reading the report
 
-Both scripts print a text report and write it plus a JSON sibling to
-`data/runs/eval_end_to_end_<run_id>_<source>_<holdout>.{json,txt}`.
+Every report is printed and also written to
+`data/evaluations/eval_<session_id>__<source>__<holdout>.{json,txt}`.
 
 **HEADLINE** — labeled pairs vs. final clustering. `coverage` separates *pairs
 the run never clustered* (a record that failed the Stage-1 validity filter has
@@ -176,8 +213,20 @@ no prediction at all) from *scored non-merges*; conflating them understates
 recall. `uncovered_as_negative` is the reviewer's-eye view, where an unclustered
 record is simply never surfaced.
 
-**PER-STAGE** — the same labeled pairs, each stage's own decision, so a bad
-headline can be attributed instead of guessed at.
+**PER-STAGE** — each stage's own decision, so a bad headline can be attributed
+instead of guessed at. Each stage is scored **only on the pairs it actually
+saw**: the gate sees just the rules' `non_matches` pool, and the ML matcher just
+the gate's survivors, so a true pair the rules already auto-merged never reaches
+either. Scoring those as stage misses would understate recall by exactly the
+number of pairs the previous stage resolved. When a stage's population is a
+subset, the report prints `scored on N/M labeled pairs`.
+
+For gold, the ML matcher gets two rows. `ml_auto_merge` scores it against
+`confident_match`, its own training target. `ml_auto_merge (vs match label)`
+scores it against `final_gold_label` — that is the row that answers "should
+`ml_feeds_clustering` be turned on?", because merging a pair that is a true
+match but was labeled *ambiguous* is a correct merge, and the first row counts
+it as a false positive.
 
 **FUNNEL** — labeled pairs surviving each boundary. Note the last row,
 `clustered`, is **not** a subset of the row above it: transitivity can merge a
@@ -205,7 +254,32 @@ reported separately because in a mostly-singleton population the overall rate is
 
 ---
 
-## 5. HIPAA
+## 5. Comparing results over time — the notebook
+
+`notebooks/evaluation/end_to_end_eval.ipynb` renders the stored reports as
+tables and trend charts. **The JSON files in `data/evaluations/` are the
+history** — the notebook only reads them (`src/evaluation/report_io.py`), so
+comparing past sessions needs no re-running, which matters because a past run's
+artifacts may no longer exist.
+
+Sections: what results exist → one report in detail (per-stage, funnel, loss
+attribution, transitivity, cluster-level) → trend across sessions → gold vs.
+synthetic side by side. §1 optionally shells out to `evaluate_all.py` to add a
+new session; everything else works offline.
+
+Re-evaluating the same (session, source, holdout) triple **overwrites** rather
+than accumulating — that is the same measurement, and keeping both would put a
+duplicate point on every trend. So pass `--session-id` something memorable when
+a session is a comparison point you want to keep.
+
+Each `report_io` frame is display-oriented, not a contract: a report from an
+older schema yields `NaN` for missing fields rather than raising, an unreadable
+file is skipped with a warning instead of sinking the comparison, and a report
+predating sessions falls back to its `run_id` as the timeline key.
+
+---
+
+## 6. HIPAA
 
 The reports contain aggregate counts and metrics only — no PATIDs, no field
 values, no example rows — so a JSON report is safe to copy off the VM. The label

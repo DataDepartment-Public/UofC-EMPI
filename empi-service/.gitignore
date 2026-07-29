@@ -31,6 +31,7 @@ data/ml_output/*
 data/gate_output/*
 data/clusters/*
 data/runs/*
+data/evaluations/*
 data/local_index/*
 data/silver_labels/*
 data/gold_labels?*
@@ -45,6 +46,7 @@ data/gold_labels?*
 !data/gate_output/.gitkeep
 !data/clusters/.gitkeep
 !data/runs/.gitkeep
+!data/evaluations/.gitkeep
 !data/local_index/.gitkeep
 !data/silver_labels/.gitkeep
 !data/raw/SCHEMA.md

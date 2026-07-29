@@ -835,7 +835,10 @@ whether that's by design.
 | `data/ml_output/` | Stage 4.5 (`ClassificationResults` audit frame + pipeline candidates + `PairExplanations` SHAP frame — merged folder, was `matches_ml/`+`ML_output/`) | `GET /explanations/ml_matcher/...` (SHAP frame); audit frame feeds Stage 5's edge union when `ml_feeds_clustering` is on | Active |
 | `data/clusters/` | Stage 5 | `src/api/ingest/publish.py` | Active |
 | `data/runs/` | `src/pipeline.py` (`RunManifest`) | `src/api/ingest/publish.py`, `fs_matcher/train.py` (input resolution), `scripts/build_eval_workbook.py` | Active |
+| `data/evaluations/` | `scripts/evaluate_all.py` / `eval_end_to_end.py` (`pipeline_eval.write_report`) | `src/evaluation/report_io.py`, `notebooks/evaluation/end_to_end_eval.ipynb` | Active — end-to-end evaluation reports, keyed by session, NOT by run |
 | `data/silver_labels/` | *(external, VM-only)* | `fs_matcher/train.py` | VM-only PHI input, gitignored |
+| `data/gold_labels/` | *(external, VM-only)* | `scripts/evaluate_all.py`, `src/evaluation/holdout.py`, the ML notebooks | VM-only PHI input, gitignored — also the gate/matcher TRAINING data, hence the holdout machinery |
+| `data/synthetic_data/` | *(external, curated)* | `src/evaluation/synthetic.py` via `scripts/evaluate_all.py` | Active — the only label source with entity-level ground truth |
 | `data/empi.db` | `src/api/ingest/publish.py` | `src/api/backends/sql_backend.py` + routers | Active — serves the review dashboard |
 | `data/local_index/` | `src/api/ingest/publish.py` / `publish_local.py` (batch), `src/api/ingest/incremental.py` / `local_score.py` (incremental) | `src/api/backends/parquet_backend.py`-backed routes (records/dashboard/audit), `src/api/ingest/local_score.py` | Active — full parity with `data/empi.db` (Stage 6) |
 | `models/fs/` *(not under `data/`)* | `fs_matcher/train.py` | Stage 4 (`registry.resolve_active_model`) | See `docs/FS-Matcher-Production-Guide.md` for the full model-store layout |

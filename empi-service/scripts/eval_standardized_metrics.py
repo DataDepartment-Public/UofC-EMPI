@@ -200,7 +200,6 @@ def _print_table(results: list[dict]) -> None:
     print(f"{'Rule':<20}{'Tier':<12}" + "".join(f"{r['source']:<12}" for r in results))
     for name in rule_names:
         tier = ""
-        row = f"{name:<20}"
         cells = []
         for r in results:
             d = r["rules"]["per_rule"].get(name)

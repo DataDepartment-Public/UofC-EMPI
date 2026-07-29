@@ -12,6 +12,10 @@ because the Stage-4.25 gate and the served Stage-4.5 matcher were both trained
 on the gold file — see `src/evaluation/holdout.py`. `--holdout none` is
 available for comparison but its ML-stage numbers are memorization.
 
+**For the usual case, use `scripts/evaluate_all.py` instead** — it runs the
+pipeline and scores gold (both holdouts) and synthetic in one session. This
+script is the granular tool: one existing run, one label file, one holdout.
+
 Usage:
     # headline, leakage-safe (gold)
     python scripts/eval_end_to_end.py --run-id 20260728T101500Z
@@ -28,7 +32,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -46,7 +49,11 @@ from src.evaluation.holdout import (  # noqa: E402
     gold_test_folds,
     load_gold_labels,
 )
-from src.evaluation.pipeline_eval import evaluate_run, load_manifest  # noqa: E402
+from src.evaluation.pipeline_eval import (  # noqa: E402
+    evaluate_run,
+    load_manifest,
+    write_report,
+)
 
 logger = logging.getLogger(__name__)
 _ROOT = Path(__file__).resolve().parents[1]
@@ -94,8 +101,13 @@ def main() -> None:
                     help="Restrict to pairs the trained models never saw. "
                          "'strict' (default) is the only leakage-safe choice "
                          "for gold; ignored for non-gold label files.")
+    ap.add_argument("--session-id", default=None,
+                    help="Group this report with others on one timeline point "
+                         "(default: the run id). scripts/evaluate_all.py sets "
+                         "this so the real and synthetic runs share a point.")
     ap.add_argument("--out", type=Path, default=None,
-                    help="JSON output path (a .txt sibling is written too).")
+                    help="JSON output path (a .txt sibling is written too). "
+                         "Defaults into settings.evaluations_dir.")
     ap.add_argument("--log-level", default="WARNING")
     args = ap.parse_args()
     configure_logging(level=args.log_level)
@@ -141,18 +153,14 @@ def main() -> None:
         label_source=source,
         holdout=holdout,
         holdout_name=holdout_name,
+        session_id=args.session_id,
         plausible_col=plausible_col,
         confident_match_col=confident_col,
     )
 
-    text = report.to_text()
-    print(text)
+    print(report.to_text())
 
-    out = args.out or (settings.runs_dir
-                       / f"eval_end_to_end_{args.run_id}_{source}_{holdout_name}.json")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report.as_dict(), indent=2, default=str))
-    out.with_suffix(".txt").write_text(text)
+    out = write_report(report, settings, out=args.out)
     print(f"\nWrote {out}\n      {out.with_suffix('.txt')}")
 
 

@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     no_match_dir: Path = _DATA / "no_match"
     clusters_dir: Path = _DATA / "clusters"
     runs_dir: Path = _DATA / "runs"
+    evaluations_dir: Path = Field(
+        default=_DATA / "evaluations",
+        description="Stored end-to-end evaluation reports (one JSON + TXT per "
+        "session/label-source/holdout). Kept out of runs_dir because those are "
+        "pipeline RunManifests — immutable per-run lineage — while these are "
+        "measurements ABOUT runs and accumulate on their own timeline.",
+    )
     log_dir: Path = _PROJECT_ROOT / "logs"
 
     # ── API service (src/api/) ──────────────────────────────────────────────
@@ -369,6 +376,7 @@ class Settings(BaseSettings):
             self.no_match_dir,
             self.clusters_dir,
             self.runs_dir,
+            self.evaluations_dir,
             self.fs_model_dir,
             self.fs_output_dir,
             self.ml_model_dir,

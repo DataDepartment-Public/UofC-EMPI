@@ -120,6 +120,41 @@ def test_rules_stage_is_scored_separately_from_clustering(run, labeled):
     assert rules["TP"] == 1 and rules["FN"] == 1
 
 
+def test_gate_is_scored_only_on_the_pool_it_actually_saw(run, labeled):
+    """p1-p2 is a true pair the rules auto-merged, so it never enters the
+    gate's `non_matches` pool. Counting it as a gate miss would understate
+    gate recall by exactly the number of pairs the rules already resolved."""
+    r = _report(run, labeled)
+    gate = r.stage_pairwise["gate_pass"]
+
+    assert gate["scored_pairs"] == 1          # only p3-p4 reached the gate
+    assert gate["labeled_pairs"] == 4
+    assert gate["FN"] == 0                    # not blamed for p1-p2
+    assert gate["recall"] == 1.0
+
+
+def test_ml_matcher_is_scored_only_on_gate_survivors(run, labeled):
+    r = _report(run, labeled)
+    assert r.stage_pairwise["ml_auto_merge"]["scored_pairs"] == 1
+
+
+def test_full_population_stages_are_scored_on_every_labeled_pair(run, labeled):
+    r = _report(run, labeled)
+    for name in ("blocking", "rules_auto_merge"):
+        assert r.stage_pairwise[name]["scored_pairs"] == 4
+
+
+def test_ml_is_also_scored_against_the_match_label_for_the_feed_decision(run, labeled):
+    """`confident_match` penalizes merging a true-but-ambiguous pair; the
+    match-label view is what actually answers 'turn ml_feeds_clustering on?'"""
+    labeled = labeled.copy()
+    labeled["confident_match"] = [True, False, False, False]  # p3-p4 ambiguous
+    r = _report(run, labeled, confident_match_col="confident_match")
+    assert "ml_auto_merge (vs match label)" in r.stage_pairwise
+    assert r.stage_pairwise["ml_auto_merge"]["target"] == "confident_match"
+    assert r.stage_pairwise["ml_auto_merge (vs match label)"]["target"] == "label"
+
+
 def test_fs_artifact_tier_column_is_read_despite_its_different_name(run, labeled):
     """`ProbabilisticMatches` calls the tier `classification_tier` while every
     other stage calls it `predicted_tier` — reading FS must not crash."""

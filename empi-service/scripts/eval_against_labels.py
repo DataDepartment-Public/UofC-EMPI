@@ -5,7 +5,7 @@ deterministic rules themselves as a silver standard (high precision but circular
 and only a recall *lower bound*) — this script scores the same two stages against
 two *independent* label sources:
 
-  * **silver labels** (`data/raw/silver_labels.csv`) — the production blocking
+  * **silver labels** (`data/silver_labels/silver_labels_v1_2026_06_21.csv`) — the production blocking
     candidate set (204,805 pairs over the real MDM_Population) with a True/False
     `silver_label` adjudication per pair. Lets us measure rule precision AND
     recall on real records, and blocking pair-quality (PQ). It can NOT measure
@@ -261,7 +261,7 @@ def main() -> None:
                     default=_ROOT / "data/processed/"
                     "MDM_Population_cleaned_real_20260620.parquet")
     ap.add_argument("--silver", type=Path,
-                    default=_ROOT / "data/raw/silver_labels.csv")
+                    default=_ROOT / "data/silver_labels/silver_labels_v1_2026_06_21.csv")
     ap.add_argument("--synthetic", type=Path,
                     default=_ROOT / "data/raw/synthetic_data.csv")
     ap.add_argument("--out", type=Path,

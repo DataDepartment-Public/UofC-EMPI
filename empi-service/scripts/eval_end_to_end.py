@@ -1,0 +1,160 @@
+"""Score a completed pipeline run end to end against a pairwise label set.
+
+The existing eval scripts stop at the deterministic rules
+(`eval_against_labels.py`, `eval_standardized_metrics.py`). This one starts
+from a `RunManifest` and scores the thing the pipeline actually ships — the
+Stage-5 cluster assignments — plus every stage boundary in between, so a bad
+number can be attributed rather than guessed at. See
+`docs/End-to-End-Evaluation-Guide.md`.
+
+Gold labels are the default source and the default holdout is **strict**,
+because the Stage-4.25 gate and the served Stage-4.5 matcher were both trained
+on the gold file — see `src/evaluation/holdout.py`. `--holdout none` is
+available for comparison but its ML-stage numbers are memorization.
+
+Usage:
+    # headline, leakage-safe (gold)
+    python scripts/eval_end_to_end.py --run-id 20260728T101500Z
+
+    # the same run over every gold pair, for comparison
+    python scripts/eval_end_to_end.py --run-id 20260728T101500Z --holdout none
+
+    # a generically-shaped label file (e.g. silver)
+    python scripts/eval_end_to_end.py --run-id <id> \
+        --labels data/silver_labels/silver_labels_v1_2026_06_21.csv \
+        --label-col silver_label --source silver --holdout none
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+_ROOT_FOR_IMPORT = Path(__file__).resolve().parents[1]
+if str(_ROOT_FOR_IMPORT) not in sys.path:
+    sys.path.insert(0, str(_ROOT_FOR_IMPORT))
+
+from src.config import configure_logging, settings  # noqa: E402
+from src.evaluation.holdout import (  # noqa: E402
+    GOLD_AMBIGUOUS_COL,
+    GOLD_LABEL_COL,
+    gold_test_folds,
+    load_gold_labels,
+)
+from src.evaluation.pipeline_eval import evaluate_run, load_manifest  # noqa: E402
+
+logger = logging.getLogger(__name__)
+_ROOT = Path(__file__).resolve().parents[1]
+
+DEFAULT_GOLD = _ROOT / "data" / "gold_labels" / "final_gold_labels_v1_2026_07_05.csv"
+
+
+def _load_labels(path: Path, label_col: str) -> pd.DataFrame:
+    """Read a label file, preserving PATID leading zeros.
+
+    Gold goes through `load_gold_labels` for the notebooks' exact boolean
+    coercion (the fold reconstruction depends on it); anything else gets a
+    generic truthy coercion.
+    """
+    if GOLD_LABEL_COL in pd.read_csv(path, nrows=0).columns:
+        return load_gold_labels(path)
+
+    df = pd.read_csv(path, dtype={"PATID_A": str, "PATID_B": str})
+    if label_col not in df.columns:
+        raise SystemExit(
+            f"Label column {label_col!r} not in {path.name} "
+            f"(columns: {list(df.columns)})"
+        )
+    if df[label_col].dtype != bool:
+        df[label_col] = (
+            df[label_col].astype(str).str.strip().str.lower()
+            .map({"true": True, "1": True, "1.0": True,
+                  "false": False, "0": False, "0.0": False})
+            .fillna(False).astype(bool)
+        )
+    return df
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--run-id", required=True, help="Run to score (needs a manifest).")
+    ap.add_argument("--labels", type=Path, default=DEFAULT_GOLD)
+    ap.add_argument("--label-col", default=GOLD_LABEL_COL)
+    ap.add_argument("--source", default=None,
+                    help="Name for the label source in the report (default: "
+                         "inferred from the filename).")
+    ap.add_argument("--holdout", default="strict",
+                    choices=["strict", "gate", "matcher", "none"],
+                    help="Restrict to pairs the trained models never saw. "
+                         "'strict' (default) is the only leakage-safe choice "
+                         "for gold; ignored for non-gold label files.")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="JSON output path (a .txt sibling is written too).")
+    ap.add_argument("--log-level", default="WARNING")
+    args = ap.parse_args()
+    configure_logging(level=args.log_level)
+
+    if not args.labels.exists():
+        raise SystemExit(
+            f"Label file not found: {args.labels}\n"
+            "Gold and silver labels are VM-only PHI and are gitignored — this "
+            "script must run where the data lives."
+        )
+
+    manifest = load_manifest(args.run_id, settings)
+    labels = _load_labels(args.labels, args.label_col)
+    source = args.source or args.labels.stem
+
+    # Gold carries the extra columns that let the gate and the matcher be
+    # scored against *their own* targets rather than the match label.
+    is_gold = GOLD_LABEL_COL in labels.columns and GOLD_AMBIGUOUS_COL in labels.columns
+    plausible_col = confident_col = None
+    if is_gold:
+        labels = labels.copy()
+        labels["plausible"] = labels[GOLD_LABEL_COL] | labels[GOLD_AMBIGUOUS_COL]
+        labels["confident_match"] = labels[GOLD_LABEL_COL] & ~labels[GOLD_AMBIGUOUS_COL]
+        plausible_col, confident_col = "plausible", "confident_match"
+
+    holdout = None
+    holdout_name = "none"
+    if args.holdout != "none":
+        if not is_gold:
+            logger.warning(
+                "--holdout %s ignored: %s is not the gold label file, so the "
+                "notebooks' folds are not defined over it.", args.holdout, args.labels.name,
+            )
+        else:
+            folds = gold_test_folds(labels)
+            holdout = {"strict": folds.strict, "gate": folds.gate,
+                       "matcher": folds.matcher}[args.holdout]
+            holdout_name = args.holdout
+
+    report = evaluate_run(
+        manifest, labels, args.label_col,
+        settings=settings,
+        label_source=source,
+        holdout=holdout,
+        holdout_name=holdout_name,
+        plausible_col=plausible_col,
+        confident_match_col=confident_col,
+    )
+
+    text = report.to_text()
+    print(text)
+
+    out = args.out or (settings.runs_dir
+                       / f"eval_end_to_end_{args.run_id}_{source}_{holdout_name}.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report.as_dict(), indent=2, default=str))
+    out.with_suffix(".txt").write_text(text)
+    print(f"\nWrote {out}\n      {out.with_suffix('.txt')}")
+
+
+if __name__ == "__main__":
+    main()

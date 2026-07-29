@@ -217,31 +217,56 @@ def run_pipeline(
     raw_input: Path | None = None,
     settings: Settings = default_settings,
     run_id: str | None = None,
+    cleaned_input: Path | None = None,
 ) -> RunManifest:
-    """Run clean → block → rules for one input and return the run manifest."""
+    """Run clean → block → rules for one input and return the run manifest.
+
+    `cleaned_input` skips Stage 1 and starts from an already-cleaned Parquet
+    frame instead. That is not a shortcut for production runs — it exists so an
+    evaluation harness can push a record set that is *already* in cleaned form
+    (the synthetic label file's `*_l`/`*_r` fields, say) through the real
+    Stages 2-5 rather than a reimplementation of them. Re-running the cleaning
+    rules over already-cleaned values would be lossy, and reimplementing the
+    stages would mean evaluating a copy of the pipeline instead of the pipeline.
+    The frame still has to satisfy `CleanedRecords`, and the manifest records it
+    as the run's input so lineage stays intact.
+    """
     configure_logging(settings)
     run_id = run_id or _new_run_id()
-    raw_input = Path(raw_input) if raw_input is not None else settings.raw_input
+    from_cleaned = cleaned_input is not None
+    if from_cleaned:
+        raw_input = Path(cleaned_input)
+    else:
+        raw_input = Path(raw_input) if raw_input is not None else settings.raw_input
     settings.ensure_dirs()
     started = datetime.utcnow()
 
     logger.info("=" * 64)
     logger.info("eMPI pipeline run %s starting", run_id)
-    logger.info("Input: %s", raw_input)
+    logger.info("Input: %s%s", raw_input, " (pre-cleaned)" if from_cleaned else "")
     logger.info("=" * 64)
 
     if not raw_input.exists():
         raise FileNotFoundError(f"Raw input not found: {raw_input}")
 
     # ── Stage 1: clean ────────────────────────────────────────────────────
-    raw_df = _read_raw(raw_input)
-    cleaned = transform_dataframe(raw_df)
-    validate(cleaned, CleanedRecords)
-    n_valid = int(cleaned["valid_record"].sum())
-    logger.info(
-        "[1/7] CLEAN — %d raw → %d cleaned rows (%d valid)",
-        len(raw_df), len(cleaned), n_valid,
-    )
+    if from_cleaned:
+        cleaned = pd.read_parquet(raw_input)
+        validate(cleaned, CleanedRecords)
+        n_valid = int(cleaned["valid_record"].sum())
+        logger.info(
+            "[1/7] CLEAN — skipped, starting from a pre-cleaned frame: "
+            "%d rows (%d valid)", len(cleaned), n_valid,
+        )
+    else:
+        raw_df = _read_raw(raw_input)
+        cleaned = transform_dataframe(raw_df)
+        validate(cleaned, CleanedRecords)
+        n_valid = int(cleaned["valid_record"].sum())
+        logger.info(
+            "[1/7] CLEAN — %d raw → %d cleaned rows (%d valid)",
+            len(raw_df), len(cleaned), n_valid,
+        )
     cleaned_path = settings.processed_dir / f"{settings.cleaned_stem}_{run_id}.parquet"
     write_cleaned(cleaned, cleaned_path)
 
@@ -551,7 +576,10 @@ def run_pipeline(
         run_id=run_id,
         created_utc=started.isoformat() + "Z",
         git_sha=_current_git_sha(),
-        raw_input=_artifact_ref(raw_input, raw_df, root),
+        # When starting pre-cleaned, the input file *is* the cleaned frame, so
+        # its row count is the cleaned row count — there is no raw stage to
+        # count. The path + sha still pin the run's lineage to a real file.
+        raw_input=_artifact_ref(raw_input, cleaned if from_cleaned else raw_df, root),
         cleaned=_artifact_ref(cleaned_path, cleaned, root),
         candidate_pairs=_artifact_ref(pairs_path, candidate_pairs, root),
         matches=_artifact_ref(matches_path, matches, root),
@@ -588,7 +616,7 @@ def run_pipeline(
             if ml_explanations_path is not None else None
         ),
         counts={
-            "raw_rows": len(raw_df),
+            "raw_rows": len(cleaned) if from_cleaned else len(raw_df),
             "cleaned_rows": len(cleaned),
             "valid_records": n_valid,
             "candidate_pairs": len(candidate_pairs),
@@ -623,12 +651,21 @@ def main() -> None:
         help="Override the generated run id (default: UTC timestamp).",
     )
     parser.add_argument(
+        "--cleaned", type=Path, default=None,
+        help="Start from an already-cleaned Parquet frame, skipping Stage 1. "
+             "For evaluation harnesses feeding pre-cleaned records (see "
+             "scripts/eval_synthetic_pipeline.py); mutually exclusive with "
+             "--input.",
+    )
+    parser.add_argument(
         "--log-level", type=str, default=None,
         help="Override EMPI_LOG_LEVEL for this run (DEBUG/INFO/WARNING/...).",
     )
     args = parser.parse_args()
+    if args.cleaned is not None and args.input is not None:
+        parser.error("--input and --cleaned are mutually exclusive.")
     configure_logging(level=args.log_level)
-    run_pipeline(raw_input=args.input, run_id=args.run_id)
+    run_pipeline(raw_input=args.input, run_id=args.run_id, cleaned_input=args.cleaned)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,9 @@ __all__ = [
     "load_report",
     "load_reports",
     "summary_frame",
+    "triage_matrix",
+    "triage_report",
+    "triage_history",
     "stage_frame",
     "funnel_frame",
     "loss_frame",
@@ -143,6 +146,105 @@ def summary_frame(reports: Iterable[dict]) -> pd.DataFrame:
     if not df.empty:
         df = df.sort_values(["evaluated_utc", "session_id"], ascending=False,
                             ignore_index=True)
+    return df
+
+
+#: Route order for the triage frames, matching `src.evaluation.triage.ROUTES`.
+#: Duplicated as a literal rather than imported so this module stays a pure
+#: reader — it must be able to render a report written by an older or newer
+#: version of the writer without importing its code.
+_ROUTES = ("no_match", "human_review", "auto_merge")
+
+
+def triage_matrix(report: dict, *, normalize: bool = False) -> pd.DataFrame:
+    """3x3 routing confusion matrix: rows expected, columns actual.
+
+    Row labels carry the gold class name alongside the route it should have
+    taken (`non-match -> no_match`), because the two vocabularies are what the
+    table is reconciling and showing only one of them makes the diagonal look
+    tautological.
+
+    `normalize=True` divides by the row total, giving per-class recall down the
+    diagonal — the right view when the classes are wildly imbalanced, which
+    they are (non-matches outnumber matches several to one).
+    """
+    t = report.get("triage") or {}
+    cm = t.get("confusion_matrix") or {}
+    if not cm:
+        return pd.DataFrame()
+
+    names = t.get("gold_class_names") or {}
+    rows = {}
+    for route in _ROUTES:
+        row = cm.get(route) or {}
+        label = f"{names.get(route, route)} -> {route}"
+        rows[label] = {c: int(row.get(c, 0)) for c in _ROUTES}
+
+    df = pd.DataFrame.from_dict(rows, orient="index")
+    df.index.name = "expected"
+    df.columns.name = "system routed to"
+    if normalize:
+        totals = df.sum(axis=1).replace(0, pd.NA)
+        return (df.div(totals, axis=0) * 100).round(1)
+    df["total"] = df.sum(axis=1)
+    return df
+
+
+def triage_report(report: dict) -> pd.DataFrame:
+    """Per-route precision / recall / F1 / support, plus averages and accuracy.
+
+    Shaped like sklearn's `classification_report` so it reads the way anyone
+    expects, with the averages appended as trailing rows rather than returned
+    separately — they belong in the same table or they get quoted without it.
+    """
+    t = report.get("triage") or {}
+    per_class = t.get("per_class") or {}
+    if not per_class:
+        return pd.DataFrame()
+
+    rows = []
+    for route in _ROUTES:
+        m = per_class.get(route) or {}
+        rows.append({"route": route, "precision": m.get("precision"),
+                     "recall": m.get("recall"), "f1": m.get("f1"),
+                     "support": m.get("support"), "predicted": m.get("predicted")})
+    for avg in ("macro_avg", "weighted_avg"):
+        m = t.get(avg) or {}
+        rows.append({"route": avg, "precision": m.get("precision"),
+                     "recall": m.get("recall"), "f1": m.get("f1"),
+                     "support": t.get("n_pairs"), "predicted": None})
+    rows.append({"route": "accuracy", "precision": None, "recall": None,
+                 "f1": t.get("accuracy"), "support": t.get("n_pairs"),
+                 "predicted": None})
+    return pd.DataFrame(rows)
+
+
+def triage_history(reports: Iterable[dict], metric: str = "recall") -> pd.DataFrame:
+    """One row per (report, route) for trending a single triage metric.
+
+    Long format keyed on `session_id`, same shape as `metric_history`, so the
+    notebook's plotting helper takes either without a branch.
+    """
+    rows = []
+    for r in reports:
+        per_class = ((r.get("triage") or {}).get("per_class")) or {}
+        for route in _ROUTES:
+            value = (per_class.get(route) or {}).get(metric)
+            if value is None:
+                continue
+            rows.append({
+                "session_id": _session(r),
+                "evaluated_utc": r.get("evaluated_utc"),
+                "run_id": r.get("run_id"),
+                "series": route,
+                "label": _label(r),
+                "metric": metric,
+                "value": value,
+                "support": (per_class.get(route) or {}).get("support"),
+            })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["series", "evaluated_utc"], ignore_index=True)
     return df
 
 

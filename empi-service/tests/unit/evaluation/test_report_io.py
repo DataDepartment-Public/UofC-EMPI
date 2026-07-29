@@ -22,6 +22,9 @@ from src.evaluation.report_io import (
     stage_frame,
     summary_frame,
     transitivity_frame,
+    triage_history,
+    triage_matrix,
+    triage_report,
 )
 
 
@@ -54,6 +57,30 @@ def _report(run_id="R1", source="gold", holdout="strict", evaluated="2026-07-29T
                                           "left in review (no auto_merge edge)": 5}},
         "transitivity": {"direct": {"n": 4, "TP": 4, "FP": 0, "precision": 1.0},
                          "transitive_only": {"n": 1, "TP": 0, "FP": 1, "precision": 0.0}},
+        "triage": {
+            "ambiguous_col": "ambiguous_pair",
+            "ambiguous_precedence": True,
+            "classes": ["no_match", "human_review", "auto_merge"],
+            "gold_class_names": {"no_match": "non-match",
+                                 "human_review": "ambiguous", "auto_merge": "match"},
+            "confusion_matrix": {
+                "no_match": {"no_match": 80, "human_review": 8, "auto_merge": 2},
+                "human_review": {"no_match": 1, "human_review": 5, "auto_merge": 0},
+                "auto_merge": {"no_match": 0, "human_review": 2, "auto_merge": 2},
+            },
+            "per_class": {
+                "no_match": {"precision": 0.988, "recall": 0.889, "f1": 0.936,
+                             "support": 90, "predicted": 81},
+                "human_review": {"precision": 0.333, "recall": 0.833, "f1": 0.476,
+                                 "support": 6, "predicted": 15},
+                "auto_merge": {"precision": 0.5, "recall": 0.5, "f1": 0.5,
+                               "support": 4, "predicted": 4},
+            },
+            "accuracy": 0.87,
+            "macro_avg": {"precision": 0.607, "recall": 0.741, "f1": 0.637},
+            "weighted_avg": {"precision": 0.93, "recall": 0.87, "f1": 0.892},
+            "n_pairs": 100,
+        },
         "cluster_level": {
             "bcubed": {"precision": 0.93, "recall": 0.9, "f1": 0.91, "n_records": 50},
             "recovery": {"exact_rate": 0.75,
@@ -192,6 +219,62 @@ def test_cluster_frame_labels_declared_truth_when_present():
     report = _report()
     report["cluster_level"]["closure_diagnostics"]["source"] = "declared ground truth"
     assert cluster_frame([report])["truth_source"].iloc[0] == "declared ground truth"
+
+
+# ── triage ───────────────────────────────────────────────────────────────────
+def test_triage_matrix_is_square_with_both_vocabularies_on_the_rows():
+    df = triage_matrix(_report())
+    assert list(df.index) == ["non-match -> no_match", "ambiguous -> human_review",
+                              "match -> auto_merge"]
+    assert list(df.columns) == ["no_match", "human_review", "auto_merge", "total"]
+    assert df.loc["ambiguous -> human_review", "human_review"] == 5
+
+
+def test_triage_matrix_normalized_gives_recall_down_the_diagonal():
+    """Raw counts hide per-class performance when classes are this imbalanced."""
+    df = triage_matrix(_report(), normalize=True)
+    assert df.loc["match -> auto_merge", "auto_merge"] == 50.0
+    assert "total" not in df.columns
+
+
+def test_triage_matrix_of_a_report_without_triage_is_empty_not_an_error():
+    """Reports written before the block existed must still render."""
+    legacy = _report()
+    del legacy["triage"]
+    assert triage_matrix(legacy).empty
+    assert triage_report(legacy).empty
+
+
+def test_triage_report_appends_averages_and_accuracy_as_rows():
+    df = triage_report(_report())
+    assert df["route"].tolist() == ["no_match", "human_review", "auto_merge",
+                                    "macro_avg", "weighted_avg", "accuracy"]
+    assert df.loc[df["route"] == "accuracy", "f1"].iloc[0] == 0.87
+
+
+def test_triage_report_keeps_support_beside_the_rates():
+    """A 0.83 recall on 6 pairs and on 6000 are not the same claim."""
+    df = triage_report(_report()).set_index("route")
+    assert df.loc["human_review", "support"] == 6
+    assert df.loc["human_review", "predicted"] == 15
+
+
+def test_triage_history_is_long_format_one_row_per_route():
+    df = triage_history([_report(run_id="R1"), _report(run_id="R2")])
+    assert len(df) == 6
+    assert set(df["series"]) == {"no_match", "human_review", "auto_merge"}
+
+
+def test_triage_history_shares_a_session_across_both_halves():
+    reports = [_report(session_id="S1", run_id="S1_real"),
+               _report(session_id="S1", run_id="S1_synthetic", source="synthetic")]
+    assert triage_history(reports)["session_id"].unique().tolist() == ["S1"]
+
+
+def test_triage_history_skips_routes_with_no_metric():
+    report = _report()
+    report["triage"]["per_class"]["human_review"]["recall"] = None
+    assert "human_review" not in set(triage_history(report and [report])["series"])
 
 
 # ── history ──────────────────────────────────────────────────────────────────

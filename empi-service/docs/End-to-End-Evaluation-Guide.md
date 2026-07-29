@@ -58,6 +58,47 @@ Both restrict to a universe of PATIDs (the records appearing in the labels) and
 *induce* the predicted partition onto it — truth is undefined for records nobody
 labeled.
 
+### Three-class triage — the fair recall view
+
+Both views above are **binary**: merged or not. That scores an *ambiguous* pair
+routed to a reviewer as a miss, when routing it there is precisely the correct
+behavior — the labeler themselves could not resolve it from the record. Binary
+recall therefore understates the system by the whole ambiguous population.
+
+The `triage` block scores the decision the pipeline actually makes. Both sides
+speak `CLASSIFICATION_TIERS`:
+
+| gold class | expected route | the pipeline's route is derived from |
+|---|---|---|
+| non-match (neither flag) | `no_match` | rules reject, gate drop, ML `no_match`, or never blocked |
+| ambiguous (`ambiguous_pair`) | `human_review` | survived every stage, not merged |
+| match (`final_gold_label`) | `auto_merge` | in the same cluster |
+
+The result is a square confusion matrix whose diagonal is correct routing, plus
+a standard per-class precision/recall/F1 report.
+
+Three things to know before quoting it:
+
+- **`ambiguous` outranks `match`** when a pair carries both flags. The class is
+  a claim about the *evidence*, and evidence too weak for a confident call
+  belongs with a human whatever the eventual adjudication was; scoring such a
+  pair as a required auto-merge penalizes correct caution. The report records
+  `ambiguous_precedence` so the number is never read without it. Pass
+  `ambiguous_precedence=False` to `triage_evaluation` for the other convention.
+- **It measures the *shipped* decision.** While `ml_feeds_clustering` is off the
+  ML matcher's `auto_merge` tier changes no output, so those pairs are scored as
+  `human_review` — which is where they genuinely end up. `stage_pairwise` is
+  where a stage's own decision is scored in isolation.
+- **Only gold defines the ambiguous class.** Synthetic and silver reports
+  degrade to two classes and leave `human_review` unpopulated — honest rather
+  than degenerate, since those sources make no undecidability claim.
+
+Read `auto_merge` recall as "share of confident matches resolved without a
+human" and `human_review` recall as "are undecidable pairs actually reaching a
+reviewer". A low value on the latter is the more serious failure: a pair
+misrouted to `no_match` is unrecoverable, while one left in review is merely
+slow.
+
 ---
 
 ## 2. Leakage — mandatory reading for gold
@@ -175,6 +216,11 @@ the gate and would otherwise count as a false positive:
 - ML matcher → `confident_match` = `final_gold_label & ~ambiguous_pair`
 - rules, blocking, clustering → `final_gold_label`
 
+It is also what makes the three-class **triage** block possible: without it the
+report cannot tell "we should have merged this" from "we should have sent this
+to a human", and recall is measured against a target the pipeline was never
+asked to hit. Only gold has the column today.
+
 ### What the synthetic half measures
 
 `data/synthetic_data/synthetic_test_v3.csv` is a *pair* file carrying
@@ -212,6 +258,11 @@ the run never clustered* (a record that failed the Stage-1 validity filter has
 no prediction at all) from *scored non-merges*; conflating them understates
 recall. `uncovered_as_negative` is the reviewer's-eye view, where an unclustered
 record is simply never surfaced.
+
+**TRIAGE** — the 3-class routing matrix and its classification report (§1). For
+gold this is the recall number to quote; the binary headline above it is the
+precision number to quote. They answer different questions and neither replaces
+the other.
 
 **PER-STAGE** — each stage's own decision, so a bad headline can be attributed
 instead of guessed at. Each stage is scored **only on the pairs it actually
@@ -262,10 +313,19 @@ history** — the notebook only reads them (`src/evaluation/report_io.py`), so
 comparing past sessions needs no re-running, which matters because a past run's
 artifacts may no longer exist.
 
-Sections: what results exist → one report in detail (per-stage, funnel, loss
-attribution, transitivity, cluster-level) → trend across sessions → gold vs.
-synthetic side by side. §1 optionally shells out to `evaluate_all.py` to add a
-new session; everything else works offline.
+Sections: what results exist → one report in detail (**triage**, per-stage,
+funnel, loss attribution, transitivity, cluster-level) → trend across sessions →
+gold vs. synthetic side by side. §1 optionally shells out to `evaluate_all.py`
+to add a new session; everything else works offline.
+
+The triage section (§3.1) is the one to open first on a gold report: it renders
+`triage_report()` (the classification report), `triage_matrix()` (raw counts, or
+`normalize=True` for row shares), an annotated heatmap of the matrix, and
+`triage_history()` across sessions. The heatmap shades by **row share** rather
+than raw count — non-matches outnumber matches several to one, so a
+count-shaded grid is one dark corner and two invisible rows — while printing
+each cell's absolute count, because a rate without its denominator is not
+actionable.
 
 Re-evaluating the same (session, source, holdout) triple **overwrites** rather
 than accumulating — that is the same measurement, and keeping both would put a

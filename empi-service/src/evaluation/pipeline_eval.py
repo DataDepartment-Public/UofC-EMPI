@@ -64,6 +64,7 @@ from src.evaluation.cluster_eval import (
     size_distribution,
     truth_clusters_from_pairs,
 )
+from src.evaluation.triage import ROUTES, triage_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,11 @@ class EndToEndReport:
     leakage: dict
     universe: dict
     clustering: dict
+    #: Three-class routing: where each pair *should* have gone (no_match /
+    #: human_review / auto_merge) vs. where the pipeline sent it. This is the
+    #: fair recall view — `clustering` above scores an ambiguous pair routed to
+    #: review as a miss, when routing it there is the correct behavior.
+    triage: dict
     stage_pairwise: dict
     funnel: dict
     loss_attribution: dict
@@ -186,6 +192,46 @@ class EndToEndReport:
                      f"({cov['uncovered_pairs']} uncovered, "
                      f"{cov['uncovered_positives']} of them true matches)")
         prf("  (uncovered as non-merge)", self.clustering["uncovered_as_negative"])
+
+        if self.triage:
+            t = self.triage
+            names = t.get("gold_class_names", {})
+            hdr("TRIAGE — 3-class routing (the decision the pipeline actually makes)")
+            if t.get("ambiguous_col") is None:
+                lines.append("  2-class only: this label source marks no ambiguous "
+                             "pairs, so the human_review route has no expected "
+                             "population.")
+            else:
+                lines.append(f"  ambiguous column: {t['ambiguous_col']}   "
+                             f"(ambiguous outranks match: {t['ambiguous_precedence']})")
+            lines.append("")
+            lines.append("  confusion matrix — rows: expected route, cols: actual")
+            header = "".join(f"{c:>14}" for c in ROUTES)
+            lines.append(f"  {'':<26}{header}{'total':>10}")
+            cm = t["confusion_matrix"]
+            for route in ROUTES:
+                row = cm.get(route, {})
+                label = f"{names.get(route, route)} -> {route}"
+                cells = "".join(f"{int(row.get(c, 0)):>14,}" for c in ROUTES)
+                lines.append(f"  {label:<26}{cells}{int(sum(row.values())):>10,}")
+            lines.append("")
+            lines.append("  classification report")
+            lines.append(f"  {'route':<22}{'precision':>12}{'recall':>10}"
+                         f"{'f1':>10}{'support':>12}")
+            for route in ROUTES:
+                m = t["per_class"][route]
+                fmt = lambda v: "N/A" if v is None else f"{v:.4f}"  # noqa: E731
+                lines.append(
+                    f"  {route:<22}{fmt(m['precision']):>12}{fmt(m['recall']):>10}"
+                    f"{fmt(m['f1']):>10}{m['support']:>12,}"
+                )
+            for avg in ("macro_avg", "weighted_avg"):
+                m = t[avg]
+                fmt = lambda v: "N/A" if v is None else f"{v:.4f}"  # noqa: E731
+                lines.append(f"  {avg:<22}{fmt(m['precision']):>12}"
+                             f"{fmt(m['recall']):>10}{fmt(m['f1']):>10}")
+            lines.append(f"  {'accuracy':<22}{fmt(t['accuracy']):>12}"
+                         f"{'':>20}{t['n_pairs']:>12,}")
 
         hdr("PER-STAGE — each stage's own decision, on the pairs it actually saw")
         for name, m in self.stage_pairwise.items():
@@ -273,6 +319,7 @@ def evaluate_run(
     session_id: str | None = None,
     plausible_col: str | None = None,
     confident_match_col: str | None = None,
+    ambiguous_col: str | None = None,
     truth_partition: Mapping[str, object] | None = None,
 ) -> EndToEndReport:
     """Score one completed run against a labeled pair set.
@@ -293,6 +340,11 @@ def evaluate_run(
     confident_match_col
         Optional column for the Stage-4.5 matcher's target (gold: label and not
         ambiguous). Same reasoning in the other direction.
+    ambiguous_col
+        Optional column marking pairs the labeler could not resolve (gold:
+        `ambiguous_pair`). Enables the three-class `triage` block: with it, a
+        pair the pipeline routed to review is scored as *correct* rather than
+        as a missed merge. Without it the block degrades to two classes.
     truth_partition
         Real `{PATID: entity_id}` ground truth, when the label source has it
         (the synthetic set's `entity_id_*` columns do). Skips the transitive
@@ -348,6 +400,21 @@ def evaluate_run(
 
     # ── headline ─────────────────────────────────────────────────────────────
     clustering = pairwise_against_clusters(labeled, partition, label_col)
+
+    # ── three-class routing ──────────────────────────────────────────────────
+    # Scored against the pipeline's *shipped* decision, so `ml_reject` is the
+    # matcher's own no_match tier (empty while ml_review_floor = 0.0) and the
+    # matcher's auto_merge tier is deliberately NOT treated as a merge — it
+    # feeds nothing while `ml_feeds_clustering` is off.
+    triage = triage_evaluation(
+        labeled, label_col, keys,
+        ambiguous_col=ambiguous_col,
+        partition=partition,
+        candidates=candidates,
+        rejects=rejects,
+        gate_drop=gate_drop,
+        ml_reject=ml_reject,
+    )
 
     # ── per-stage pairwise ───────────────────────────────────────────────────
     def _stage(pred_keys: set[PairKey], target: np.ndarray, target_name: str,
@@ -566,6 +633,7 @@ def evaluate_run(
             "records_in_labels": int(len({p for k in keys for p in k})),
         },
         clustering=clustering,
+        triage=triage,
         stage_pairwise=stage_pairwise,
         funnel=funnel,
         loss_attribution=loss_attribution,

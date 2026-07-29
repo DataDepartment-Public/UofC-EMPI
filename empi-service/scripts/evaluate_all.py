@@ -124,6 +124,7 @@ def evaluate_real(session_id: str, args) -> list[Path]:
             holdout_name=holdout,
             plausible_col="plausible",
             confident_match_col="confident_match",
+            ambiguous_col=GOLD_AMBIGUOUS_COL,
             session_id=session_id,
         )
         print(report.to_text())

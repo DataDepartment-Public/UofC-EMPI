@@ -156,6 +156,7 @@ def main() -> None:
         session_id=args.session_id,
         plausible_col=plausible_col,
         confident_match_col=confident_col,
+        ambiguous_col=GOLD_AMBIGUOUS_COL if is_gold else None,
     )
 
     print(report.to_text())

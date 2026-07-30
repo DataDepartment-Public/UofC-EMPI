@@ -1,9 +1,9 @@
 """Standardized precision/recall for blocking and deterministic rules across
 all three label sources: synthetic data, silver labels, and gold labels.
 
-Gold labels (`data/raw/gold_labels.csv`) are the first hand-adjudicated,
+Gold labels (`data/gold_labels/final_gold_labels_v1_2026_07_05.csv`) are the first hand-adjudicated,
 independent ground truth available for the production candidate pair set
-(same 204,805 pairs as `silver_labels.csv`, schema
+(same 204,805 pairs as the silver labels, schema
 `PATID_A, PATID_B, ambiguous_pair, final_gold_label`). This script re-runs the
 same methodology as `eval_against_labels.py` against all three sources side by
 side, and reports rule precision/recall at both decision tiers:
@@ -200,7 +200,6 @@ def _print_table(results: list[dict]) -> None:
     print(f"{'Rule':<20}{'Tier':<12}" + "".join(f"{r['source']:<12}" for r in results))
     for name in rule_names:
         tier = ""
-        row = f"{name:<20}"
         cells = []
         for r in results:
             d = r["rules"]["per_rule"].get(name)
@@ -217,8 +216,10 @@ def main() -> None:
     ap.add_argument("--cleaned", type=Path,
                     default=_ROOT / "data/processed/"
                     "MDM_Population_cleaned_real_20260620.parquet")
-    ap.add_argument("--silver", type=Path, default=_ROOT / "data/raw/silver_labels.csv")
-    ap.add_argument("--gold", type=Path, default=_ROOT / "data/raw/gold_labels.csv")
+    ap.add_argument("--silver", type=Path,
+                    default=_ROOT / "data/silver_labels/silver_labels_v1_2026_06_21.csv")
+    ap.add_argument("--gold", type=Path,
+                    default=_ROOT / "data/gold_labels/final_gold_labels_v1_2026_07_05.csv")
     ap.add_argument("--synthetic", type=Path,
                     default=_ROOT / "data/raw/synthetic_data.csv")
     ap.add_argument("--out", type=Path,

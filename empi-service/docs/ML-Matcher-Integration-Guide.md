@@ -52,7 +52,7 @@ discards everything below `settings.gate_threshold` as a confident non-match,
 so only the *plausible* survivors reach your model. Your model scores that
 subset (optionally enriched with FS's features) and is a scored classifier, not
 an automatic merger — whether its `auto_merge`-tier output feeds clustering is a
-config toggle (`settings.ml_feeds_clustering`, off by default — see §4).
+config toggle (`settings.ml_feeds_clustering`, **on** by default — see §4).
 
 > The FS matcher used to be that gate (`_fs_plausible_pool` in
 > `src/pipeline.py`, keeping pairs with `match_probability >=

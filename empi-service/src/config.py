@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     no_match_dir: Path = _DATA / "no_match"
     clusters_dir: Path = _DATA / "clusters"
     runs_dir: Path = _DATA / "runs"
+    evaluations_dir: Path = Field(
+        default=_DATA / "evaluations",
+        description="Stored end-to-end evaluation reports (one JSON + TXT per "
+        "session/label-source/holdout). Kept out of runs_dir because those are "
+        "pipeline RunManifests — immutable per-run lineage — while these are "
+        "measurements ABOUT runs and accumulate on their own timeline.",
+    )
     log_dir: Path = _PROJECT_ROOT / "logs"
 
     # ── API service (src/api/) ──────────────────────────────────────────────
@@ -275,12 +282,19 @@ class Settings(BaseSettings):
         "retrain).",
     )
     ml_feeds_clustering: bool = Field(
-        default=False,
+        default=True,
         description="When True, the ML matcher's auto_merge-tier "
         "ClassificationResults union into Stage 5 clustering edges alongside "
-        "the deterministic rules' matches. Independent of "
-        "fs_feeds_clustering. Default OFF preserves clustering-on-"
-        "deterministic-edges-only as the out-of-the-box behavior.",
+        "the deterministic rules' matches. Independent of fs_feeds_clustering. "
+        "Default ON: Stage 4.5 is a decision stage, not an audit stage — a "
+        "model whose verdict reaches nothing cannot raise recall. Two "
+        "consequences to know: (1) merge precision is now bounded by the "
+        "served model's, so tune ml_auto_merge_threshold against a held-out "
+        "precision target rather than leaving it at the training notebook's "
+        "operating point; (2) the served model was fit on gold, so the "
+        "end-to-end headline is no longer leakage-free at --holdout none — "
+        "use --holdout strict. Set EMPI_ML_FEEDS_CLUSTERING=false to restore "
+        "deterministic-edges-only clustering.",
     )
 
     # ── Per-pair SHAP explanations (src/models/explanations.py) ──────────────
@@ -369,6 +383,7 @@ class Settings(BaseSettings):
             self.no_match_dir,
             self.clusters_dir,
             self.runs_dir,
+            self.evaluations_dir,
             self.fs_model_dir,
             self.fs_output_dir,
             self.ml_model_dir,

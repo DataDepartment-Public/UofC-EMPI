@@ -412,6 +412,40 @@ union), keyed on `(PATID_A, PATID_B)`.
 
 ---
 
+## Stage 4.25 — non-match gate
+
+- **Producer:** `src/models/nonmatch_gate/` (`NonMatchGate.apply`). Invoked
+  from `src/pipeline.py` when an active gate model is resolvable
+  (`nonmatch_gate.registry.resolve_active_model`), `settings.gate_supersedes_fs`
+  is on (the default), and the `non_matches` pool is non-empty.
+- **Role:** the pipeline's **confident-non-match filter** — it decides which
+  `non_matches` pairs reach Stage 4.5 and discards the rest. This role used to
+  belong to Stage 4's FS `no_match` tier; **Stage 4 is now audit-only.** The
+  gate makes no merge decision and never feeds clustering.
+- **Score:** `P(plausible)` = `P(match ∪ ambiguous)`; pairs at/above
+  `settings.gate_threshold` (0.30) pass.
+- **Features:** reuses Stage 4.5's `V3FeatureBuilder` — the gate and the
+  matcher see identical inputs.
+- **Fallback:** with no active gate model (or `gate_supersedes_fs=false`), the
+  legacy FS gate (`_fs_plausible_pool`) filters the pool instead; with neither
+  FS nor a gate model, the pool passes through **ungated** with a `WARNING`.
+- **Model store:** `models/nonmatch_gate/` — not under `data/`.
+
+### 4.25a — gate_results (full audit frame, ClassificationResults-shaped)
+
+- **Contract:** `contracts.ClassificationResults`
+- **Location:** `data/gate_output/gate_results_<run_id>.parquet`
+- **Grain:** every scored `non_matches` pair, **including the dropped ones** —
+  which exist nowhere else (`data/no_match/` holds the deterministic rules'
+  rejects, not the gate's)
+- **Tiers:** `human_review` (passed) / `no_match` (dropped) only; never
+  `auto_merge`
+- **Status:** audit frame; the surviving pairs pass to Stage 4.5 in memory
+
+Full detail: `docs/Nonmatch-Gate-Guide.md`.
+
+---
+
 ## Stage 4.5 — ML matcher (pluggable candidate/feature generator)  `[SCAFFOLD]`
 
 - **Producer:** `src/models/ml_matcher/` (`MLMatcher.score` for serving,
@@ -754,8 +788,9 @@ specifically to replace fragile "latest version in the directory" resolution —
 | `raw_input`, `cleaned`, `candidate_pairs`, `matches`, `non_matches` | `ArtifactRef` | Always populated. |
 | `rejects`, `clusters`, `review_evidence` | `ArtifactRef`, optional | Populated by every current run; optional for backward-compat with older manifest shapes. |
 | `matches_model`, `fs_features` | `ArtifactRef`, optional | Populated **only** when an active FS model scored the run (null if Stage 4 was skipped). |
+| `gate_results` | `ArtifactRef`, optional | Populated **only** when an active gate model gated the run (null when Stage 4.25 fell back to the legacy FS gate or ran ungated). |
 | `matches_ml`, `ml_features` | `ArtifactRef`, optional | Populated **only** when an active ML model scored the run (null if Stage 4.5 was skipped — the common case today, since ml_matcher ships with no trained model). |
-| `counts` | `dict[str, int]` | `raw_rows`, `cleaned_rows`, `valid_records`, `candidate_pairs`, `matches`, `non_matches`, `rejects`, `clusters`, `total_clusters`. |
+| `counts` | `dict[str, int]` | `raw_rows`, `cleaned_rows`, `valid_records`, `candidate_pairs`, `matches`, `non_matches`, `gate_plausible`, `gate_dropped`, `rejects`, `clusters`, `total_clusters`. |
 
 Each `ArtifactRef` carries a project-root-relative `path`, `rows`, and a
 `sha256` of the file.
@@ -775,7 +810,8 @@ whether that's by design.
 | `data/auto_merge/` | Stage 3 (auto-merge tier) | `src/api/ingest/publish.py`, `src/evaluation/rule_eval.py` | Active |
 | `data/non_matches/` | Stage 3 (`non_matches_*` + `review_evidence_*` companion) | Stage 4 (scores `non_matches`), `src/api/ingest/publish.py` (both files) | Active |
 | `data/no_match/` | Stage 3 | *(none)* | Terminal — audit only, no reader |
-| `data/fs_output/` | Stage 4 (`ProbabilisticMatches` audit frame + pipeline candidates + `train.py` labeled training set — merged folder, was `matches_model/`+`FS_output/`) | Stage 4.5 (`fs_features` enrichment input, optional); audit frame feeds Stage 5's edge union when `fs_feeds_clustering` is on | Active |
+| `data/fs_output/` | Stage 4 (`ProbabilisticMatches` audit frame + pipeline candidates + `train.py` labeled training set — merged folder, was `matches_model/`+`FS_output/`) | Stage 4.5 (`fs_features` enrichment input, optional); audit frame feeds Stage 5's edge union when `fs_feeds_clustering` is on | Active — audit-only since Stage 4.25 took over gating |
+| `data/gate_output/` | Stage 4.25 (`ClassificationResults` audit frame) | *(none — the survivors pass to Stage 4.5 in memory)* | Active — sole record of the pairs the gate dropped |
 | `data/ml_output/` | Stage 4.5 (`ClassificationResults` audit frame + pipeline candidates — merged folder, was `matches_ml/`+`ML_output/`) | *(none yet)*; audit frame feeds Stage 5's edge union when `ml_feeds_clustering` is on | Scaffold — no in-repo consumer until a real model is trained |
 | `data/clusters/` | Stage 5 | `src/api/ingest/publish.py` | Active |
 | `data/runs/` | `src/pipeline.py` (`RunManifest`) | `src/api/ingest/publish.py`, `fs_matcher/train.py` (input resolution), `scripts/build_eval_workbook.py` | Active |
@@ -784,6 +820,7 @@ whether that's by design.
 | `data/local_index/` | `src/api/ingest/publish.py` / `publish_local.py` (batch), `src/api/ingest/incremental.py` / `local_score.py` (incremental) | `src/api/backends/parquet_backend.py`-backed routes (records/dashboard/audit), `src/api/ingest/local_score.py` | Active — full parity with `data/empi.db` (Stage 6) |
 | `models/fs/` *(not under `data/`)* | `fs_matcher/train.py` | Stage 4 (`registry.resolve_active_model`) | See `docs/FS-Matcher-Production-Guide.md` for the full model-store layout |
 | `models/ml/` *(not under `data/`)* | `ml_matcher/train.py` (scaffold — training unimplemented) | Stage 4.5 (`ml_matcher.registry.resolve_active_model`) | See `docs/ML-Matcher-Integration-Guide.md` |
+| `models/nonmatch_gate/` *(not under `data/`)* | the gate notebook's export + promote cell (`notebooks/ml_model/confident_nonmatch/`) | Stage 4.25 (`nonmatch_gate.registry.resolve_active_model`) | See `docs/Nonmatch-Gate-Guide.md` |
 
 ---
 

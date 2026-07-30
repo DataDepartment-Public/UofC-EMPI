@@ -185,6 +185,50 @@ class Settings(BaseSettings):
         "deliberately promoted for production auto-merge.",
     )
 
+    # ── Stage 4.25: ML non-match gate (src/models/nonmatch_gate/) ────────────
+    # The pipeline's non-match gate: a LightGBM classifier over the same 12
+    # features the ML matcher uses, trained on the WHOLE candidate pool to
+    # separate confident non-matches from plausible pairs (match ∪ ambiguous).
+    # It decides which of the rules' `non_matches` survive to the ML matcher —
+    # the job the FS matcher used to do. Skipped (pool passes through
+    # ungated, or falls back to the FS gate) when no active model resolves.
+    gate_model_dir: Path = Field(
+        default=_MODELS / "nonmatch_gate",
+        description="Directory of trained non-match gate artifacts "
+        "(nonmatch_gate_<ts>.pkl + meta sidecars) and the 'active' pointer. "
+        "Gitignored — populated by the notebook's export cell "
+        "(notebooks/ml_model/confident_nonmatch/).",
+    )
+    gate_active_model: Path | None = Field(
+        default=None,
+        description="Explicit active gate artifact to serve. When None, the "
+        "registry resolves the active pointer (or latest) in gate_model_dir.",
+    )
+    gate_output_dir: Path = Field(
+        default=_DATA / "gate_output",
+        description="Output dir for the gate's per-run ClassificationResults "
+        "audit frame. Gitignored.",
+    )
+    gate_threshold: float = Field(
+        default=0.30,
+        description="P(plausible) at/above which a pair PASSES the gate and "
+        "reaches the ML matcher. Below it the pair is a confident non-match "
+        "and is discarded. 0.30 is the notebook's operating point "
+        "(plausible recall 0.999 on held-out test).",
+    )
+    gate_deploy_gate_margin: float = Field(
+        default=0.02,
+        description="A retrained gate model may only be promoted to 'active' "
+        "if its held-out plausible precision/recall are within this margin of "
+        "the current active model's.",
+    )
+    gate_supersedes_fs: bool = Field(
+        default=True,
+        description="When True (the default), the ML non-match gate decides "
+        "the ML matcher's input pool. Set False to fall back to the legacy FS "
+        "gate (FS `no_match` tier discarded) even when a gate model is active.",
+    )
+
     # ── Stage 4.5: pluggable ML matcher (src/models/ml_matcher/) ─────────────
     # Bring-your-own-model / bring-your-own-features candidate + feature
     # generator, structurally parallel to the FS matcher: loads a pre-trained
@@ -309,6 +353,8 @@ class Settings(BaseSettings):
             self.fs_output_dir,
             self.ml_model_dir,
             self.ml_output_dir,
+            self.gate_model_dir,
+            self.gate_output_dir,
             self.db_path.parent,
             self.local_index_dir,
         ):

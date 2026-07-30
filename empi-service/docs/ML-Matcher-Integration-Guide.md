@@ -22,34 +22,43 @@
 ## 1. Where your model fits
 
 ```
-[1/6] clean ─► [2/6] block ─► [3/6] deterministic rules
+[1/7] clean ─► [2/7] block ─► [3/7] deterministic rules
                                         │
                                         ▼
-                          [4/6] Fellegi-Sunter matcher (audit-only)
+                          [4/7] Fellegi-Sunter matcher (audit-only)
+                                        │
+                                        ▼
+                          [5/7] non-match gate — drops confident non-matches
                                         │
                                         ▼
                           ┌─────────────────────┐
-                          │   YOUR MODEL HERE    │   [5/6] — between FS and clustering
+                          │   YOUR MODEL HERE    │   [6/7] — between the gate and clustering
                           │  (src/models/ml_matcher/) │
                           └─────────────────────┘
                                         │
                                         ▼
-                          [6/6] clustering (terminal)
+                          [7/7] clustering (terminal)
 ```
 
-(`[n/6]` matches the tags you'll actually see in pipeline log lines —
-`MODEL(FS)` is `[4/6]`, `MODEL(ML)` is `[5/6]`.)
+(`[n/7]` matches the tags you'll actually see in pipeline log lines —
+`MODEL(FS)` is `[4/7]`, `GATE` is `[5/7]`, `MODEL(ML)` is `[6/7]`.)
 
 The deterministic rules stage already splits every candidate pair into three
 buckets: pairs it's confident enough about get **auto-merged** directly into
-clustering; everything else falls into a `non_matches` pool. The FS matcher
-(Splink, Stage 4) scores that pool and **gates it** — the pairs FS ranks
-`no_match` (FS `match_probability < fs_review_floor`) are discarded as confident
-non-matches, and only the *plausible* survivors reach your model
-(`_fs_plausible_pool` in `src/pipeline.py`). Your model scores that FS-plausible
+clustering; everything else falls into a `non_matches` pool. The **non-match
+gate** (Stage 4.25, `src/models/nonmatch_gate/` — see
+`docs/Nonmatch-Gate-Guide.md`) scores that pool with `P(plausible)` and
+discards everything below `settings.gate_threshold` as a confident non-match,
+so only the *plausible* survivors reach your model. Your model scores that
 subset (optionally enriched with FS's features) and is a scored classifier, not
 an automatic merger — whether its `auto_merge`-tier output feeds clustering is a
 config toggle (`settings.ml_feeds_clustering`, off by default — see §4).
+
+> The FS matcher used to be that gate (`_fs_plausible_pool` in
+> `src/pipeline.py`, keeping pairs with `match_probability >=
+> fs_review_floor`). It still runs as the **fallback** when no gate model is
+> active, or when `EMPI_GATE_SUPERSEDES_FS=false`; otherwise Stage 4 is
+> audit-only.
 
 Because the non-matches are gated out upstream, the served LightGBM v3 model
 runs as a **2-tier** classifier (`ml_review_floor = 0.0`): confident match →
@@ -305,7 +314,7 @@ Three checkpoints, cheapest first:
    python -m src.models.ml_matcher.train --promote   # trains, writes ml_model_<ts>.json + .meta.json, promotes
    python -m src.pipeline --input data/raw/MDM_Population.csv
    ```
-   Watch for `[5/6] MODEL(ML) — scoring N non-match pairs with ML model ...`
+   Watch for `[6/7] MODEL(ML) — scoring N plausible pairs with ML model ...`
    in the log (not the `skipped` variant) — that confirms the registry
    resolved your promoted model and Stage 4.5 actually ran. Check
    `data/ml_output/ml_features_<run_id>.parquet` for your output.

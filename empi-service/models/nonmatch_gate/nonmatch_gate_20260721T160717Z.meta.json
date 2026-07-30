@@ -1,0 +1,35 @@
+{
+  "model_name": "nonmatch_gate",
+  "model_file": "nonmatch_gate_20260721T160717Z.pkl",
+  "created_utc": "2026-07-21T16:07:17.084685+00:00",
+  "notes": "LightGBM non-match gate, standalone (NOT the served ml_matcher). score = predict_proba[:, 1] = P(plausible) = P(match or ambiguous). High score -> keep pair; low score -> confident not-match (discard).",
+  "feature_cols": [
+    "sound_first",
+    "sound_last",
+    "cmp_street_num",
+    "sim_jw_first",
+    "sim_jw_last",
+    "sim_jw_middle",
+    "sim_lev_email",
+    "sim_lev_address1",
+    "addr_token_jaccard",
+    "ssn_digit_frac",
+    "sim_dob",
+    "sim_phones"
+  ],
+  "gate_threshold": 0.3,
+  "test_metrics": {
+    "n_test": 40961,
+    "roc_auc": 0.9997,
+    "pr_auc": 0.9994,
+    "gate_at_threshold": {
+      "threshold": 0.3,
+      "plausible_precision": 0.963,
+      "plausible_recall": 0.9992,
+      "tp": 12512,
+      "fp": 481,
+      "fn": 10,
+      "tn": 27958
+    }
+  }
+}

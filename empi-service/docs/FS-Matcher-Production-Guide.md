@@ -34,21 +34,34 @@ raw → 1. clean → 2. blocking → 3. deterministic rules ─┬─► matches
 
 The deterministic rules (Stage 3) confidently **auto-merge** the easy pairs and
 send everything uncertain to the **non-matches** pool. The FS matcher combs that
-pool and does two jobs: it **gates** the pool — discarding the pairs it ranks
-`no_match` (score `< fs_review_floor`, the confident non-matches) so only the
-*plausible* survivors flow onward — and it emits a rich set of per-pair
-**features**. The surviving plausible pairs go to the downstream model (the
+pool and emits a rich set of per-pair **features** plus a probabilistic score
+for every pair.
+
+> ### ⚠️ The FS matcher no longer gates the pool
+>
+> FS used to do a second job: **gate** the pool, discarding the pairs it ranked
+> `no_match` (score `< fs_review_floor`) so only the *plausible* survivors
+> reached the ML matcher. That job now belongs to a dedicated model — the
+> **non-match gate**, Stage 4.25, `src/models/nonmatch_gate/`
+> (`docs/Nonmatch-Gate-Guide.md`), trained on the whole candidate pool
+> specifically to separate confident non-matches from plausible pairs.
+>
+> **Stage 4 is now audit-only**: it still scores every `non_matches` pair and
+> writes both artifacts, but routes nothing. Everything in this guide about
+> training, promotion, thresholds, and output still applies — only the routing
+> changed.
+>
+> The FS gate remains the **fallback**: it filters the pool when no gate model
+> is active, or when `EMPI_GATE_SUPERSEDES_FS=false` puts it deliberately back
+> in the gate seat for a comparison run. With neither FS nor a gate model
+> active, the pool reaches Stage 4.5 ungated with a warning.
+
+The plausible pairs the gate passes go to the downstream model (the
 LightGBM v3 ML matcher, Stage 4.5 — see `docs/ML-Matcher-Integration-Guide.md`
 and `docs/ML-Model-LightGBM-v3.md`), which makes the final call: confident match
-(`auto_merge`) vs ambiguous (`human_review`).
-
-> **The FS gate is what makes the ML matcher a clean 2-tier classifier.** The ML
-> model was trained only on *plausible* pairs (match ∪ ambiguous) and has no
-> "true non-match" class; the FS gate removes the confident non-matches upstream
-> so the ML model never has to reason about them. If **no** FS model is active,
-> Stage 4 is skipped and the ML matcher falls back to scoring the full
-> non-matches pool with a warning — so promoting an FS model is what turns the
-> gate on. See §7 (Bootstrapping).
+(`auto_merge`) vs ambiguous (`human_review`). The ML model was trained only on
+*plausible* pairs (match ∪ ambiguous) and has no "true non-match" class, which
+is why some gate must remove the confident non-matches upstream.
 
 **The FS matcher, the ML matcher, and the deterministic-rules engine all
 implement the same shared interface** (`src.models.base.PairClassifier`) and
@@ -169,19 +182,20 @@ Every setting is overridable via an `EMPI_`-prefixed environment variable (see
 
 | Setting | Env var | Default | Meaning |
 |---|---|---|---|
-| `fs_review_floor` | `EMPI_FS_REVIEW_FLOOR` | `0.40` | **The gate boundary + candidate cutoff.** Pairs scoring **below** this are the FS `no_match` tier — discarded, and never seen by the ML matcher. Pairs at/above are the plausible survivors (also the candidates written to the feature file, and the boundary of the `human_review` tier). |
+| `fs_review_floor` | `EMPI_FS_REVIEW_FLOOR` | `0.40` | **The candidate cutoff** (and, on the fallback path, the gate boundary). Pairs scoring **below** this are the FS `no_match` tier; pairs at/above are the candidates written to the feature file and the boundary of the `human_review` tier. Only routes pairs when FS is acting as the fallback gate — see the callout in §1. |
 | `fs_auto_merge_threshold` | `EMPI_FS_AUTO_MERGE_THRESHOLD` | `0.95` | Labels the `auto_merge` tier. **Informational only** — the FS matcher merges nothing; this just tags high-confidence pairs. |
 | `fs_deploy_gate_margin` | `EMPI_FS_DEPLOY_GATE_MARGIN` | `0.02` | How much held-out precision/recall a retrain may drop before promotion is refused. |
 | `fs_active_model` | `EMPI_FS_ACTIVE_MODEL` | `None` | Explicit model file to serve (overrides `active.json`). |
 | `fs_model_dir` | `EMPI_FS_MODEL_DIR` | `models/fs` | Model store (trained JSON + meta + `active.json`). |
 | `fs_output_dir` | `EMPI_FS_OUTPUT_DIR` | `data/fs_output` | Where both the GBT feature files and the audit frame are written. |
 
-> **One knob to widen/narrow the gate:** lower `EMPI_FS_REVIEW_FLOOR` to let
-> more (lower-confidence) pairs through to the ML matcher; raise it to discard
-> more aggressively. Because the ML matcher only ever sees pairs above this
-> floor, the floor sets the **maximum recall** the downstream can achieve — set
-> it with that trade-off in mind. On a run, the `[4/6] MODEL(FS) — gate: K/N
-> pairs plausible, dropped …` log line tells you how much the gate is removing.
+> **On the fallback path, this is the knob that widens/narrows the gate:** lower
+> `EMPI_FS_REVIEW_FLOOR` to let more (lower-confidence) pairs through to the ML
+> matcher; raise it to discard more aggressively — the floor sets the **maximum
+> recall** the downstream can achieve. When the Stage-4.25 gate is active (the
+> default) the equivalent knob is `EMPI_GATE_THRESHOLD`. Either way the
+> `[5/7] GATE — K/N pairs plausible, dropped …` log line tells you how much is
+> being removed.
 
 ### Scoring is O(candidate_pairs), not O(records²)
 

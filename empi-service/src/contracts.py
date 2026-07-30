@@ -513,6 +513,9 @@ class RunManifest(BaseModel):
     # Stage-4 FS artifacts (present only when an active FS model scored the run):
     matches_model: ArtifactRef | None = None  # ProbabilisticMatches audit frame
     fs_features: ArtifactRef | None = None     # FSFeatures GBT candidate parquet
+    # Stage-4.25 non-match gate artifact (present only when an active gate
+    # model gated the run — absent on the legacy FS-gate fallback):
+    gate_results: ArtifactRef | None = None   # ClassificationResults audit frame
     # Stage-4.5 ML artifacts (present only when an active ML model scored the run):
     matches_ml: ArtifactRef | None = None     # ClassificationResults audit frame
     ml_features: ArtifactRef | None = None    # MLFeatures candidate parquet

@@ -437,9 +437,79 @@ def validate_fs_features(df: pd.DataFrame, *, allow_empty: bool = True) -> pd.Da
     return validate(df, FSFeatures, allow_empty=allow_empty)
 
 
+class PairExplanations(pa.DataFrameModel):
+    """Per-pair SHAP explanation frame, emitted by the non-match gate (Stage
+    4.25) and the ML matcher (Stage 4.5) alongside their scores.
+
+    Deliberately **self-contained**: it carries the decision (`score`,
+    `predicted_tier`), the model's expected output (`base_value`), one
+    `shap_<feature>` contribution per feature and one `feat_<feature>` value
+    per feature. The explanation endpoint therefore serves a complete payload
+    from this one artifact and never rebuilds features — which is the point,
+    since a rebuilt feature vector could differ from the one actually scored.
+
+    Contributions are in log-odds and sum to `base_value + Σ shap_* =` the
+    model's raw margin, with signs normalized so positive always pushes
+    toward the model's positive decision. Feature columns are dynamic extras
+    (`strict=False`), like `MLFeatures`, since the roster belongs to whatever
+    `FeatureBuilder` produced them.
+    """
+
+    PATID_A: Series[str] = pa.Field(nullable=False, coerce=True)
+    PATID_B: Series[str] = pa.Field(nullable=False, coerce=True)
+    model_name: Series[str] = pa.Field(nullable=False, coerce=True)
+    score: Series[float] = pa.Field(nullable=False, coerce=True, ge=0.0, le=1.0)
+    predicted_tier: Series[str] = pa.Field(
+        nullable=False, coerce=True, isin=list(CLASSIFICATION_TIERS),
+    )
+    base_value: Series[float] = pa.Field(nullable=False, coerce=True)
+
+    class Config:
+        strict = False  # shap_* / feat_* columns are dynamic extras
+        coerce = True
+
+    @pa.dataframe_check
+    def _canonical_order(cls, df: pd.DataFrame) -> bool:  # noqa: N805
+        return bool((df[PATID_A] < df[PATID_B]).all())
+
+
 #: Required base columns of the MLFeatures parquet — just the pair key, since
 #: BYOF feature-column names/count are a custom FeatureBuilder's decision.
 ML_FEATURES_REQUIRED_COLUMNS: tuple[str, ...] = (PATID_A, PATID_B)
+
+#: Column prefixes carrying the dynamic parts of PairExplanations.
+EXPLANATION_SHAP_PREFIX = "shap_"
+EXPLANATION_FEAT_PREFIX = "feat_"
+
+
+def validate_pair_explanations(
+    df: pd.DataFrame, *, allow_empty: bool = True
+) -> pd.DataFrame:
+    """Validate a per-pair SHAP explanation frame.
+
+    Checks the fixed columns via the pandera schema, then asserts every
+    `shap_<feature>` has a matching `feat_<feature>` — a payload with a
+    contribution but no value to label it against would render a nameless
+    bar in the reviewer UI.
+    """
+    if allow_empty and len(df) == 0:
+        return df
+    shap_cols = {c[len(EXPLANATION_SHAP_PREFIX):]
+                 for c in df.columns if c.startswith(EXPLANATION_SHAP_PREFIX)}
+    feat_cols = {c[len(EXPLANATION_FEAT_PREFIX):]
+                 for c in df.columns if c.startswith(EXPLANATION_FEAT_PREFIX)}
+    if not shap_cols:
+        raise ValueError(
+            "PairExplanations has no shap_* contribution columns; "
+            f"have {sorted(df.columns)[:12]}..."
+        )
+    if shap_cols != feat_cols:
+        raise ValueError(
+            "PairExplanations shap_*/feat_* columns disagree: "
+            f"missing values for {sorted(shap_cols - feat_cols)}, "
+            f"missing contributions for {sorted(feat_cols - shap_cols)}"
+        )
+    return validate(df, PairExplanations, allow_empty=allow_empty)
 
 
 def validate_ml_features(df: pd.DataFrame, *, allow_empty: bool = True) -> pd.DataFrame:
@@ -516,9 +586,11 @@ class RunManifest(BaseModel):
     # Stage-4.25 non-match gate artifact (present only when an active gate
     # model gated the run — absent on the legacy FS-gate fallback):
     gate_results: ArtifactRef | None = None   # ClassificationResults audit frame
+    gate_explanations: ArtifactRef | None = None  # PairExplanations (SHAP) frame
     # Stage-4.5 ML artifacts (present only when an active ML model scored the run):
     matches_ml: ArtifactRef | None = None     # ClassificationResults audit frame
     ml_features: ArtifactRef | None = None    # MLFeatures candidate parquet
+    ml_explanations: ArtifactRef | None = None  # PairExplanations (SHAP) frame
     counts: dict[str, int] = Field(default_factory=dict)
 
 
@@ -532,6 +604,7 @@ __all__ = [
     "FSFeatures",
     "MLFeatures",
     "Matches",
+    "PairExplanations",
     "NonMatches",
     "ProbabilisticMatches",
     "Rejects",
@@ -551,4 +624,7 @@ __all__ = [
     "validate",
     "validate_fs_features",
     "validate_ml_features",
+    "validate_pair_explanations",
+    "EXPLANATION_SHAP_PREFIX",
+    "EXPLANATION_FEAT_PREFIX",
 ]

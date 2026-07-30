@@ -290,6 +290,63 @@ class AuditLogRow(BaseModel):
     run_id: str | None
 
 
+# ── Explanations (GET /explanations/...) ─────────────────────────────────────
+class ExplanationFeature(BaseModel):
+    """One bar of the waterfall.
+
+    `start`/`end` are precomputed cumulative positions, so the UI draws a
+    rectangle per feature and does no arithmetic — it needs no notion of a
+    base value, log-odds, or SHAP at all.
+    """
+
+    name: str
+    label: str
+    value: float | str | None = None
+    display_value: str | None = None
+    shap: float
+    start: float
+    end: float
+    direction: Literal["positive", "negative"]
+    cumulative_prob: float
+
+
+class ExplanationDecision(BaseModel):
+    score: float
+    tier: str
+    threshold: float | None = None
+
+
+class ExplanationAxis(BaseModel):
+    min: float
+    max: float
+
+
+class PairExplanation(BaseModel):
+    """A plot-ready waterfall for one pair under one model.
+
+    Contributions are exact TreeSHAP in **log-odds** (`units`), summing to
+    `final_margin` from `base_value`. Signs are normalized so positive always
+    pushes toward the model's positive decision — plausible for the gate,
+    confident-match for the ML matcher. `features` is ordered by descending
+    |contribution|; `top_n` is a suggestion for how many to show.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    model: str
+    run_id: str | None = None
+    model_file: str | None = None
+    patid_a: str
+    patid_b: str
+    decision: ExplanationDecision
+    base_value: float
+    final_margin: float
+    units: Literal["log_odds"] = "log_odds"
+    top_n: int
+    axis: ExplanationAxis
+    features: list[ExplanationFeature]
+
+
 __all__ = [
     "RunStatus",
     "RunCreateResponse",
@@ -321,4 +378,8 @@ __all__ = [
     "ScoreTier",
     "RecordScoreOutcome",
     "ScoreResult",
+    "ExplanationFeature",
+    "ExplanationDecision",
+    "ExplanationAxis",
+    "PairExplanation",
 ]

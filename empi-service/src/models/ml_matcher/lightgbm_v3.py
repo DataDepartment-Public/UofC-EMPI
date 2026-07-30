@@ -318,3 +318,24 @@ class MatchProbabilityAdapter:
         if proba.ndim == 2 and proba.shape[1] == 2:
             return proba[:, ::-1]  # [P(match), P(amb)] -> [P(amb), P(match)]
         return proba
+
+    def contributions(self, X):
+        """Exact TreeSHAP contributions **in served-score space**.
+
+        The inner model's raw margin ``f`` gives ``P(ambiguous) =
+        sigmoid(f)``, but the served score is ``P(confident match) = 1 -
+        sigmoid(f) = sigmoid(-f)``. So the served margin is ``-f`` and every
+        contribution — the base value included — negates with it. Without
+        this, a feature that pushes a pair toward *ambiguous* would render as
+        pushing it toward *auto-merge*: a waterfall that reads backwards but
+        looks entirely plausible.
+
+        Returns `(n_rows, n_features + 1)` with the base value last, matching
+        LightGBM's `pred_contrib` layout. Returns None if the inner model
+        can't produce contributions.
+        """
+        try:
+            contrib = self.model.predict_proba(self._align(X), pred_contrib=True)
+        except TypeError:
+            return None
+        return -np.asarray(contrib)

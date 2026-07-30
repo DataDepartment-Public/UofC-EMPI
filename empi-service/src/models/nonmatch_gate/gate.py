@@ -31,11 +31,13 @@ PHI / HIPAA: logs aggregate counts only, mirroring the FS and ML matchers.
 from __future__ import annotations
 
 import logging
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
 
 from src.contracts import TIER_HUMAN_REVIEW, TIER_NO_MATCH
+from src.models.explanations import build_explanation_frame, compute_contributions
 from src.models.ml_matcher.base import FeatureBuilder
 from src.models.ml_matcher.lightgbm_v3 import V3FeatureBuilder
 
@@ -43,6 +45,14 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "nonmatch_gate"
 DEFAULT_THRESHOLD = 0.30
+
+
+class GateResult(NamedTuple):
+    """What one `NonMatchGate.apply()` produces."""
+
+    survivors: pd.DataFrame
+    evaluation: pd.DataFrame
+    explanations: pd.DataFrame | None = None
 
 
 class NonMatchGate:
@@ -135,18 +145,46 @@ class NonMatchGate:
             }
         )
 
+    def explain(self, features: pd.DataFrame, classified: pd.DataFrame) -> pd.DataFrame | None:
+        """Per-pair SHAP explanations for an already-built feature frame.
+
+        Takes `features` rather than rebuilding them from the pair list —
+        feature building is the expensive part of this stage, and rebuilding
+        would also risk explaining a different vector than the one scored.
+        Returns None when the model can't produce contributions (BYOM).
+        """
+        X = features.drop(columns=["PATID_A", "PATID_B"], errors="ignore")
+        contributions = compute_contributions(self.model, self._align(X))
+        if contributions is None:
+            return None
+        return build_explanation_frame(
+            features, X, contributions,
+            model_name=self.model_name,
+            scores=classified["plausible_probability"],
+            tiers=classified["classification_tier"],
+            feature_cols=list(X.columns),
+        )
+
     def apply(
         self, candidate_pairs: pd.DataFrame, df_clean: pd.DataFrame,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        *, explain: bool = False,
+    ) -> GateResult:
         """Gate `candidate_pairs`, the pipeline's one call.
 
-        Returns ``(surviving_pairs, evaluation_frame)`` where
-        ``surviving_pairs`` is the subset of `candidate_pairs` that passed —
-        the input frame's own rows, so passthrough columns (`source_blocks`/
-        `n_blocks`) are preserved — and ``evaluation_frame`` is the full
-        `ClassificationResults` audit frame covering every scored pair.
+        Returns a `GateResult` of ``(survivors, evaluation, explanations)``:
+
+        * ``survivors`` — the subset of `candidate_pairs` that passed, taken
+          from the input frame's own rows so passthrough columns
+          (`source_blocks`/`n_blocks`) are preserved.
+        * ``evaluation`` — the full `ClassificationResults` audit frame,
+          covering every scored pair including the dropped ones.
+        * ``explanations`` — the per-pair SHAP frame when `explain` is set and
+          the model supports contributions, else None.
+
+        Features are built once and reused for scoring and explaining.
         """
-        classified = self.score(candidate_pairs, df_clean)
+        features = self.build_features(candidate_pairs, df_clean)
+        classified = self.classify(self.predict(features))
         evaluation = self.to_evaluation_schema(classified)
         passed = classified.loc[
             classified["classification_tier"] == TIER_HUMAN_REVIEW, ["PATID_A", "PATID_B"]
@@ -154,7 +192,8 @@ class NonMatchGate:
         survivors = candidate_pairs.merge(
             passed, on=["PATID_A", "PATID_B"], how="inner"
         ).reset_index(drop=True)
-        return survivors, evaluation
+        explanations = self.explain(features, classified) if explain else None
+        return GateResult(survivors, evaluation, explanations)
 
     # ── internals ─────────────────────────────────────────────────────────────
     def _align(self, X):
@@ -166,4 +205,4 @@ class NonMatchGate:
         return X
 
 
-__all__ = ["NonMatchGate", "MODEL_NAME", "DEFAULT_THRESHOLD"]
+__all__ = ["NonMatchGate", "GateResult", "MODEL_NAME", "DEFAULT_THRESHOLD"]

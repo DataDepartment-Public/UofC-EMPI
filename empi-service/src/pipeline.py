@@ -99,6 +99,7 @@ from src.contracts import (  # noqa: E402
     validate,
     validate_fs_features,
     validate_ml_features,
+    validate_pair_explanations,
 )
 from src.preprocessing.clean import _load as _read_raw, write_cleaned  # noqa: E402
 from src.preprocessing.transformations import transform_dataframe  # noqa: E402
@@ -158,6 +159,34 @@ def _rel(path: Path, root: Path) -> str:
 
 def _artifact_ref(path: Path, df: pd.DataFrame, root: Path) -> ArtifactRef:
     return ArtifactRef(path=_rel(path, root), rows=len(df), sha256=_file_sha256(path))
+
+
+def _write_explanations(
+    explanations: pd.DataFrame | None,
+    path: Path,
+    settings: Settings,
+    *,
+    stage: str,
+) -> Path | None:
+    """Validate and persist a stage's per-pair SHAP frame; return its path.
+
+    Returns None (with a log line, not an exception) when the stage produced
+    nothing — a BYOM model that can't emit contributions is a legitimate
+    state, and a missing explanation must never fail a run whose scores are
+    perfectly good.
+    """
+    if explanations is None:
+        logger.info(
+            "%s — no explanations (model does not expose SHAP contributions)", stage,
+        )
+        return None
+    validate_pair_explanations(explanations)
+    explanations.to_parquet(path, index=False)
+    logger.info(
+        "%s — explanations for %d pairs → %s",
+        stage, len(explanations), _rel(path, settings.project_root),
+    )
+    return path
 
 
 def _fs_plausible_pool(non_matches: pd.DataFrame, eval_frame_fs: pd.DataFrame) -> pd.DataFrame:
@@ -347,7 +376,9 @@ def run_pipeline(
     # settings.gate_supersedes_fs=False to fall back to the legacy FS gate.
     # With neither available the pool passes through ungated (with a warning).
     gate_results_path: Path | None = None
+    gate_explanations_path: Path | None = None
     eval_frame_gate: pd.DataFrame | None = None
+    gate_explanations: pd.DataFrame | None = None
     ml_input_pool: pd.DataFrame = non_matches
     active_gate_model = (
         resolve_active_gate_model(settings) if settings.gate_supersedes_fs else None
@@ -390,7 +421,9 @@ def run_pipeline(
             model=load_gate_artifact(active_gate_model),
             threshold=settings.gate_threshold,
         )
-        ml_input_pool, eval_frame_gate = _gate.apply(non_matches, cleaned)
+        ml_input_pool, eval_frame_gate, gate_explanations = _gate.apply(
+            non_matches, cleaned, explain=settings.explanations_enabled,
+        )
         validate(eval_frame_gate, ClassificationResults)
         gate_results_path = settings.gate_output_dir / f"gate_results_{run_id}.parquet"
         eval_frame_gate.to_parquet(gate_results_path, index=False)
@@ -398,6 +431,15 @@ def run_pipeline(
             "[5/7] GATE — %d/%d pairs plausible, dropped %d confident non-matches → %s",
             len(ml_input_pool), len(non_matches), len(non_matches) - len(ml_input_pool),
             _rel(gate_results_path, settings.project_root),
+        )
+        if gate_explanations is not None:
+            # Stamp the serving artifact onto the frame so it is fully
+            # self-describing — the endpoint can say which model explained
+            # a decision without consulting a registry that may have moved on.
+            gate_explanations["model_file"] = active_gate_model.name
+        gate_explanations_path = _write_explanations(
+            gate_explanations, settings.gate_output_dir / f"gate_explanations_{run_id}.parquet",
+            settings, stage="[5/7] GATE",
         )
 
     # ── Stage 4.5: pluggable ML matcher (candidate/feature generator) ──────
@@ -410,7 +452,9 @@ def run_pipeline(
     # active model resolves or the pool is empty.
     matches_ml_path: Path | None = None
     ml_features_path: Path | None = None
+    ml_explanations_path: Path | None = None
     eval_frame_ml: pd.DataFrame | None = None
+    ml_explanations: pd.DataFrame | None = None
     active_ml_model = resolve_active_ml_model(settings)
     if active_ml_model is None:
         logger.info(
@@ -468,6 +512,15 @@ def run_pipeline(
             "[6/7] MODEL(ML) — tiers %s → %d candidates → %s",
             tier_counts_ml, len(ml_features), _rel(ml_features_path, settings.project_root),
         )
+        if settings.explanations_enabled:
+            ml_explanations = _ml_model.explain(classified_ml)
+            if ml_explanations is not None:
+                ml_explanations["model_file"] = active_ml_model.name
+            ml_explanations_path = _write_explanations(
+                ml_explanations,
+                settings.ml_output_dir / f"ml_explanations_{run_id}.parquet",
+                settings, stage="[6/7] MODEL(ML)",
+            )
 
     # ── Stage 5: cluster (terminal) — connected components over the deterministic
     #    auto-merge edges, plus any classifier stage's auto_merge-tier edges
@@ -518,6 +571,10 @@ def run_pipeline(
             _artifact_ref(gate_results_path, eval_frame_gate, root)
             if gate_results_path is not None else None
         ),
+        gate_explanations=(
+            _artifact_ref(gate_explanations_path, gate_explanations, root)
+            if gate_explanations_path is not None else None
+        ),
         matches_ml=(
             _artifact_ref(matches_ml_path, eval_frame_ml, root)
             if matches_ml_path is not None else None
@@ -525,6 +582,10 @@ def run_pipeline(
         ml_features=(
             _artifact_ref(ml_features_path, ml_features, root)
             if ml_features_path is not None else None
+        ),
+        ml_explanations=(
+            _artifact_ref(ml_explanations_path, ml_explanations, root)
+            if ml_explanations_path is not None else None
         ),
         counts={
             "raw_rows": len(raw_df),

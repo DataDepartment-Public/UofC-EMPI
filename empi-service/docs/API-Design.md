@@ -309,6 +309,31 @@ insert the `audit_log` row. Either both land or neither does — the audit
 trail can never disagree with the stored output. `merge` collapses members
 into one `mid`; `unmerge` detaches a `patid` into a fresh standalone `mid`.
 
+### Explanations (why a model decided a pair)
+
+```
+GET /explanations/{model_name}/{patid_a}/{patid_b}[?run_id=]
+  model_name: nonmatch_gate | ml_matcher
+  → 200 PairExplanation   # plot-ready SHAP waterfall
+  → 404                   # unknown model/run, no explanation artifact, or the
+                          #   pair was never scored by that model
+```
+
+The **only read route that does not go through `IndexBackend`.** Explanations are
+immutable evidence about a decision a specific model made during a specific run, so
+this route resolves the run's `RunManifest` and reads the pipeline's Parquet
+artifact — the one whose sha256 the manifest records. No model is loaded in the
+request path and nothing is recomputed, so promoting a new model tomorrow cannot
+silently change the explanation shown for a decision made today.
+
+A 404 is frequently a **normal** answer: deterministic auto-merges and rule rejects
+are never scored by either model (their explanation is `match_rule`/`rules_fired`),
+and a pair the gate dropped never reaches the ML matcher. Pass the entity's `run_id`
+so the explanation provably matches the score shown beside it.
+
+Full payload contract — the one your front-end needs — is
+`docs/Explanations-Guide.md` §2.
+
 ---
 
 ## 4. Code layout
@@ -328,7 +353,7 @@ src/api/
   incremental.py       # one/few new records -> IndexBackend, no full pipeline re-run
   local_score.py       # incremental.py's path with no FastAPI/uvicorn — Parquet only
   routers/
-    health.py  runs.py  records.py  audit.py  dashboard.py
+    health.py  runs.py  records.py  audit.py  dashboard.py  explanations.py
 ```
 
 `run_pipeline()` itself is **not modified** by any of this — the service calls it

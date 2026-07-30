@@ -12,6 +12,6 @@ over the same 12 features as the Stage-4.5 ML matcher (it reuses
 is `P(plausible)` directly — no adapter. See `docs/Nonmatch-Gate-Guide.md`.
 """
 
-from src.models.nonmatch_gate.gate import MODEL_NAME, NonMatchGate
+from src.models.nonmatch_gate.gate import GateResult, MODEL_NAME, NonMatchGate
 
-__all__ = ["NonMatchGate", "MODEL_NAME"]
+__all__ = ["NonMatchGate", "GateResult", "MODEL_NAME"]

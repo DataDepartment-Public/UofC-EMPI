@@ -26,3 +26,15 @@ Model + operating point: `docs/Nonmatch-Gate-Guide.md`.
 - **Tiers:** only `human_review` (passed the gate) and `no_match` (dropped).
   Never `auto_merge`.
 - **Status:** audit frame; the survivors are passed in-memory to Stage 4.5
+
+## gate_explanations (per-pair SHAP)
+
+- **Contract:** `contracts.PairExplanations` (`validate_pair_explanations`)
+- **File:** `gate_explanations_<run_id>.parquet`
+- **Grain:** every scored pair, dropped ones included
+- **Columns:** pair key + `model_name` / `score` / `predicted_tier` /
+  `base_value` / `model_file`, then one `shap_<feature>` contribution and one
+  `feat_<feature>` value per feature. Self-contained by design so the
+  explanation endpoint never rebuilds features.
+- **Consumer:** `GET /explanations/nonmatch_gate/{a}/{b}` — read-only; nothing
+  in the pipeline reads it back. See `docs/Explanations-Guide.md`.

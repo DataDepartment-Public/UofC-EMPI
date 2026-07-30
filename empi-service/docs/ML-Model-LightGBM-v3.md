@@ -197,6 +197,10 @@ Per run, Stage 4.5 writes to `data/ml_output/`:
 - `ml_features_<run_id>.parquet` — the `MLFeatures` candidate parquet: the pair
   keys + `match_probability` + `classification_tier` + the 12 feature columns,
   for every survivor.
+- `ml_explanations_<run_id>.parquet` — per-pair SHAP contributions
+  (`PairExplanations`), sign-normalized to the **served** score so positive
+  pushes toward `auto_merge`. Served by `GET /explanations/ml_matcher/{a}/{b}`;
+  see `docs/Explanations-Guide.md`.
 
 ---
 

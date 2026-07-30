@@ -110,6 +110,11 @@ The dropped pairs live only in this frame — they are not written to `data/no_m
 holds the deterministic rules' rejects. Read `gate_results` when you need to know why a pair
 vanished between the rules and the matcher.
 
+Alongside it, `data/gate_output/gate_explanations_<run_id>.parquet` carries the per-pair SHAP
+contributions behind each of those verdicts — including the drops, which is what keeps "why was
+this pair dropped?" answerable. Served by `GET /explanations/nonmatch_gate/{a}/{b}`; see
+`docs/Explanations-Guide.md`.
+
 ## 6. Lifecycle — train, export, promote
 
 Training happens in the notebook (there is no `train` CLI for the gate). Its §11 cell:

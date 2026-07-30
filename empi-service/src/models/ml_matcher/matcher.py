@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from src.contracts import TIER_AUTO_MERGE, TIER_HUMAN_REVIEW, TIER_NO_MATCH
+from src.models.explanations import build_explanation_frame, compute_contributions
 from src.models.ml_matcher.base import (
     ClassificationConfig,
     FeatureBuilder,
@@ -79,7 +80,13 @@ class MLMatcher:
     # ── Scoring (BYOM) ──────────────────────────────────────────────────────────
     def predict(self, features: pd.DataFrame) -> pd.DataFrame:
         """Score a feature frame (`PATID_A`/`PATID_B` + feature columns) with
-        the attached model. Returns `PATID_A`/`PATID_B` + `match_probability`."""
+        the attached model. Returns the input frame plus `match_probability`.
+
+        The feature columns are carried through deliberately: `MLFeatures`
+        (`docs/Data-Contract.md` §4.5b) specifies the candidate parquet as the
+        pair keys + score + tier + **every feature column**, and
+        `to_ml_features` can only pass through what it is given.
+        """
         if self.model is None:
             raise RuntimeError(
                 "MLMatcher.predict: no model attached — load or train one first."
@@ -87,7 +94,7 @@ class MLMatcher:
         X = features.drop(columns=["PATID_A", "PATID_B"], errors="ignore")
         proba = np.asarray(self.model.predict_proba(X))
         score = proba[:, 1] if proba.ndim == 2 else proba
-        out = features[["PATID_A", "PATID_B"]].copy()
+        out = features.copy()
         out["match_probability"] = score
         return out
 
@@ -144,6 +151,33 @@ class MLMatcher:
                 "score": df_classified["match_probability"].to_numpy(),
                 "predicted_tier": df_classified["classification_tier"].to_numpy(),
             }
+        )
+
+    def explain(self, df_classified: pd.DataFrame) -> pd.DataFrame | None:
+        """Per-pair SHAP explanations for a `score()`/`classify()` output.
+
+        Reads the feature columns straight off the classified frame (which
+        `predict` carries through), so nothing is rebuilt and the explanation
+        is guaranteed to describe the exact vector that was scored. Returns
+        None when the attached model can't produce contributions — BYOM means
+        that is a legitimate state, not an error.
+        """
+        feature_cols = [
+            c for c in df_classified.columns
+            if c not in ("PATID_A", "PATID_B", "match_probability", "classification_tier")
+        ]
+        if not feature_cols:
+            return None
+        X = df_classified[feature_cols]
+        contributions = compute_contributions(self.model, X)
+        if contributions is None:
+            return None
+        return build_explanation_frame(
+            df_classified, X, contributions,
+            model_name=self.model_name,
+            scores=df_classified["match_probability"],
+            tiers=df_classified["classification_tier"],
+            feature_cols=feature_cols,
         )
 
     # ── PairClassifier ──────────────────────────────────────────────────────────

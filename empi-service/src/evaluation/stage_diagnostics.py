@@ -97,6 +97,10 @@ __all__ = [
     "route_errors",
     "load_cleaned",
     "with_attributes",
+    "stacked_pairs",
+    "style_pairs",
+    "ATTRIBUTE_COLUMNS",
+    "STACKED_CONTEXT",
 ]
 
 #: Cumulative-route column per stage, in pipeline order. `blocking` has no entry
@@ -649,6 +653,176 @@ def load_cleaned(manifest: RunManifest,
     if cleaned is None:
         raise FileNotFoundError("The manifest's cleaned artifact is missing.")
     return cleaned.set_index(cleaned[PATID].astype(str))
+
+
+def _as_set(value) -> set[str] | None:
+    """Set-valued cleaned fields, whatever form they survived Parquet in.
+
+    `Phones_set` round-trips as the legacy stringified form `"{'a', 'b'}"`
+    (Arrow has no set type), and a list/array compares unequal on ordering
+    alone. Both are normalized here so the comparison is membership, not
+    formatting.
+    """
+    if isinstance(value, (set, frozenset)):
+        return {str(v) for v in value}
+    if isinstance(value, (list, tuple, np.ndarray)):
+        return {str(v) for v in value}
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") and text.endswith("}"):
+            inner = text[1:-1].strip()
+            if not inner:
+                return set()
+            return {t.strip().strip("'\"") for t in inner.split(",")}
+    return None
+
+
+def _is_missing(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, (list, tuple, set, frozenset, np.ndarray)):
+        return len(value) == 0
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):      # array-likes pandas can't reduce
+        return False
+    return isinstance(value, str) and not value.strip()
+
+
+def _format(value) -> str:
+    if _is_missing(value):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d")
+    as_set = _as_set(value)
+    if as_set is not None:
+        return ", ".join(sorted(as_set))
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return str(value)
+
+
+#: Cell backgrounds for the stacked view — the same vocabulary
+#: `gold_labeling.ipynb` uses, so a pair reads the same way in both notebooks.
+AGREE_COLORS = {
+    "equal": "#a8e6a3",       # green  — both present and the same
+    "differ": "#f4a8a8",      # red    — both present and different
+    "one_missing": "#fff3a3",  # yellow — only one side has it
+    "both_missing": "#d3d3d3",  # grey   — neither side has it
+}
+
+#: The adjudicated class, called out strongly (white text on a solid fill) so
+#: the eye lands on it before reading any field.
+CLASS_COLORS = {
+    "match": "#00c853",
+    "ambiguous": "#ffab00",
+    "non-match": "#d50000",
+}
+
+#: Context columns repeated on both rows of a pair in the stacked view.
+STACKED_CONTEXT: tuple[str, ...] = (
+    "gold_class", "error", "source_blocks", "rules_decision", "rules_rule",
+    "rules_n_contradictions", "gate_score", "ml_score", "route_final",
+)
+
+
+def _agreement(a, b) -> str:
+    am, bm = _is_missing(a), _is_missing(b)
+    if am and bm:
+        return "both_missing"
+    if am or bm:
+        return "one_missing"
+    sa, sb = _as_set(a), _as_set(b)
+    if sa is not None and sb is not None:
+        return "equal" if sa & sb else "differ"
+    return "equal" if _format(a) == _format(b) else "differ"
+
+
+def stacked_pairs(
+    pairs: pd.DataFrame,
+    cleaned: pd.DataFrame,
+    *,
+    fields: Sequence[str] = ATTRIBUTE_COLUMNS,
+    context: Sequence[str] = STACKED_CONTEXT,
+    limit: int | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """One pair per block of three rows: record A, record B, a blank spacer.
+
+    Returns `(display, colors)` — same shape, `colors` holding a CSS string per
+    cell. Kept separate from the styling so the layout and the comparison logic
+    can be tested without going through pandas' `Styler`.
+
+    Two records stacked with their fields aligned column-wise is how a reviewer
+    actually reads a pair: the eye compares down, not across, and the colour
+    says which fields agree before any of them are read.
+    """
+    if limit is not None:
+        pairs = pairs.head(limit)
+    fields = [f for f in fields if f"{f}_A" in pairs.columns or f in cleaned.columns]
+    context = [c for c in context if c in pairs.columns]
+    display_names = {f: f.replace("_clean", "") for f in fields}
+
+    a_side = cleaned.reindex(pairs[PATID_A].astype(str))
+    b_side = cleaned.reindex(pairs[PATID_B].astype(str))
+
+    rows: list[dict] = []
+    cells: list[dict] = []
+    for i in range(len(pairs)):
+        pair = pairs.iloc[i]
+        ctx = {c: _format(pair[c]) for c in context}
+        klass = str(pair.get("gold_class", ""))
+        class_style = (f"background-color: {CLASS_COLORS[klass]}; color: white"
+                       if klass in CLASS_COLORS else "")
+
+        for side, frame in (("A", a_side), ("B", b_side)):
+            values = {f: frame.iloc[i][f] if f in frame.columns else None for f in fields}
+            # PATID is a column, not the index: two records of a pair and the
+            # spacers repeat, and `Styler.apply` rejects a non-unique index.
+            rows.append({PATID: str(pair[PATID_A if side == "A" else PATID_B]),
+                         **ctx,
+                         **{display_names[f]: _format(v) for f, v in values.items()}})
+            style = {c: "" for c in context}
+            if "gold_class" in ctx:
+                style["gold_class"] = class_style
+            for f in fields:
+                a = a_side.iloc[i][f] if f in a_side.columns else None
+                b = b_side.iloc[i][f] if f in b_side.columns else None
+                style[display_names[f]] = (
+                    f"background-color: {AGREE_COLORS[_agreement(a, b)]}"
+                )
+            cells.append(style)
+
+        rows.append({})          # spacer between pairs
+        cells.append({})
+
+    columns = [PATID, *context, *(display_names[f] for f in fields)]
+    display = pd.DataFrame(rows, columns=columns).fillna("")
+    colors = pd.DataFrame(cells, columns=columns).fillna("")
+    return display, colors
+
+
+def style_pairs(pairs: pd.DataFrame, cleaned: pd.DataFrame, **kwargs):
+    """`stacked_pairs` rendered as a colour-coded pandas `Styler`.
+
+    Green = the two records agree on this field, red = they disagree, yellow =
+    only one side has it, grey = neither does. The `gold_class` cell carries the
+    adjudicated class in solid colour.
+    """
+    display, colors = stacked_pairs(pairs, cleaned, **kwargs)
+    if display.empty:
+        return display
+    return (
+        display.style
+        .apply(lambda _: colors, axis=None)
+        .hide(axis="index")      # the row number carries nothing; PATID is a column
+        .set_properties(**{"font-size": "11px", "white-space": "nowrap"})
+        .set_table_styles([
+            {"selector": "th", "props": [("font-size", "11px"),
+                                         ("text-align", "left")]},
+            {"selector": "td", "props": [("padding", "2px 6px")]},
+        ])
+    )
 
 
 def with_attributes(pairs: pd.DataFrame, cleaned: pd.DataFrame, *,

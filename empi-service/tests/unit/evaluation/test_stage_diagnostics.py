@@ -310,3 +310,117 @@ def test_missing_cleaned_columns_are_skipped_not_fatal(run, diag):
     cleaned = sd.load_cleaned(manifest, settings)
     out = sd.with_attributes(sd.binary_errors(diag, "blocking"), cleaned)
     assert "SSN_clean_A" not in out.columns      # the fixture has no SSN column
+
+
+# ── the stacked view ─────────────────────────────────────────────────────────
+@pytest.fixture
+def stack_fixture(tmp_path):
+    """Two pairs covering every cell colour: agree, disagree, one side missing,
+    both missing, and a set-valued field that overlaps."""
+    cleaned = pd.DataFrame({
+        "PATID": ["a1", "a2", "b1", "b2"],
+        "LastNM_clean": ["SMITH", "SMITH", "JONES", "PATEL"],      # equal / differ
+        "FirstNM_clean": ["JOHN", None, None, None],               # one / both missing
+        "BirthDT_clean": pd.to_datetime(["1980-01-02", "1980-01-02",
+                                         "1975-05-05", "1975-05-05"]),
+        "Phones_set": ["{'3125550000', '3125550001'}", "{'3125550001'}",
+                       "{'7735550000'}", "{'8475550000'}"],
+        "valid_record": [True, True, True, True],
+    }).set_index("PATID", drop=False)
+    pairs = pd.DataFrame({
+        "PATID_A": ["a1", "b1"], "PATID_B": ["a2", "b2"],
+        "gold_class": ["match", "non-match"],
+        "error": ["true match -> not blocked", "non-match -> merged"],
+    })
+    return pairs, cleaned
+
+
+def _bg(colors, row, col):
+    return colors.iloc[row][col]
+
+
+def test_each_pair_becomes_two_rows_and_a_spacer(stack_fixture):
+    pairs, cleaned = stack_fixture
+    display, colors = sd.stacked_pairs(pairs, cleaned)
+    assert len(display) == len(pairs) * 3 == len(colors)
+    assert list(display["PATID"]) == ["a1", "a2", "", "b1", "b2", ""]
+    assert (display.iloc[2] == "").all()          # the spacer carries nothing
+
+
+def test_columns_lose_the_clean_suffix(stack_fixture):
+    pairs, cleaned = stack_fixture
+    display, _ = sd.stacked_pairs(pairs, cleaned)
+    assert "LastNM" in display.columns and "LastNM_clean" not in display.columns
+
+
+def test_context_repeats_on_both_rows_of_a_pair(stack_fixture):
+    pairs, cleaned = stack_fixture
+    display, _ = sd.stacked_pairs(pairs, cleaned)
+    assert display.iloc[0]["error"] == display.iloc[1]["error"] == \
+        "true match -> not blocked"
+
+
+def test_cell_colour_says_whether_the_records_agree(stack_fixture):
+    pairs, cleaned = stack_fixture
+    _, colors = sd.stacked_pairs(pairs, cleaned)
+    AGREE = sd.AGREE_COLORS
+    assert AGREE["equal"] in _bg(colors, 0, "LastNM")        # SMITH / SMITH
+    assert AGREE["one_missing"] in _bg(colors, 0, "FirstNM")  # JOHN / None
+    assert AGREE["differ"] in _bg(colors, 3, "LastNM")       # JONES / PATEL
+    assert AGREE["both_missing"] in _bg(colors, 3, "FirstNM")
+
+
+def test_both_rows_of_a_pair_share_the_comparison_colour(stack_fixture):
+    """The colour is a property of the pair, not of one record."""
+    pairs, cleaned = stack_fixture
+    _, colors = sd.stacked_pairs(pairs, cleaned)
+    assert _bg(colors, 0, "LastNM") == _bg(colors, 1, "LastNM")
+
+
+def test_set_valued_fields_compare_by_overlap_not_by_formatting(stack_fixture):
+    """`Phones_set` survives Parquet as the stringified set form, and one shared
+    number is a match however the two strings are ordered."""
+    pairs, cleaned = stack_fixture
+    display, colors = sd.stacked_pairs(pairs, cleaned)
+    assert sd.AGREE_COLORS["equal"] in _bg(colors, 0, "Phones_set")   # shared number
+    assert sd.AGREE_COLORS["differ"] in _bg(colors, 3, "Phones_set")  # disjoint
+    assert display.iloc[0]["Phones_set"] == "3125550000, 3125550001"
+
+
+def test_the_gold_class_cell_is_filled_with_its_class_colour(stack_fixture):
+    pairs, cleaned = stack_fixture
+    _, colors = sd.stacked_pairs(pairs, cleaned)
+    assert sd.CLASS_COLORS["match"] in _bg(colors, 0, "gold_class")
+    assert sd.CLASS_COLORS["non-match"] in _bg(colors, 3, "gold_class")
+
+
+def test_dates_render_as_dates_not_timestamps(stack_fixture):
+    pairs, cleaned = stack_fixture
+    display, _ = sd.stacked_pairs(pairs, cleaned)
+    assert display.iloc[0]["BirthDT"] == "1980-01-02"
+
+
+def test_limit_caps_the_pairs_rendered(stack_fixture):
+    pairs, cleaned = stack_fixture
+    display, _ = sd.stacked_pairs(pairs, cleaned, limit=1)
+    assert len(display) == 3
+
+
+def test_style_pairs_returns_a_styler_over_the_same_layout(stack_fixture):
+    pairs, cleaned = stack_fixture
+    styler = sd.style_pairs(pairs, cleaned, limit=1)
+    assert styler.data.shape == sd.stacked_pairs(pairs, cleaned, limit=1)[0].shape
+    # `Styler.apply` rejects a non-unique index, which repeated PATIDs and
+    # spacer rows would otherwise produce — rendering is the regression test.
+    html = styler.to_html()
+    assert sd.AGREE_COLORS["equal"] in html and "a1" in html
+
+
+def test_an_empty_cell_renders_without_raising(diag, run):
+    manifest, settings = run
+    cleaned = sd.load_cleaned(manifest, settings)
+    empty = sd.route_errors(diag, "clustering", expected="no_match",
+                            actual="human_review").iloc[:0]
+    display, colors = sd.stacked_pairs(empty, cleaned)
+    assert display.empty and colors.empty
+    assert sd.style_pairs(empty, cleaned).empty

@@ -402,10 +402,21 @@ without its denominator is not actionable.
 
 ### `notebooks/evaluation/misclassified_pairs.ipynb` — the pairs
 
-The same stages in the same order, but listing the **pairs** in each off-diagonal
-cell with both records' cleaned fields side by side, so an error can be judged
-rather than only counted. Nothing is capped — `show()` limits the display, the
-underlying frame is always complete.
+The same stages in the same order, but showing the **pairs** in each off-diagonal
+cell so an error can be judged rather than only counted.
+
+`show()` renders them the way `gold_labeling.ipynb` does — the two records
+stacked, A above B, fields aligned column-wise, a blank row between pairs — with
+each cell coloured green (both present and equal), red (both present and
+different), yellow (one side missing) or grey (neither). Comparing down a column
+is how a reviewer actually reads a pair, and the colour answers "which fields
+agree" before any of them are read. The leading context columns (`gold_class`,
+`error`, the rule that fired, the model scores, the final route) repeat on both
+rows; `gold_class` is filled solid in its own colour. `table()` gives the same
+pairs one row each (`<field>_A` beside `<field>_B`) for sorting and export.
+
+Nothing is capped — `show()`/`table()` limit what is rendered, the underlying
+frame is always complete.
 
 It is a separate notebook because **its output is PHI**: PATIDs and identity
 fields. Clear outputs before saving. The counts notebook stays committable.

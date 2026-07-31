@@ -495,8 +495,10 @@ Full detail: `docs/Nonmatch-Gate-Guide.md`, `docs/Explanations-Guide.md`.
   column names/count are the implementer's choice; only the pair key is
   validated by name, via `validate_ml_features`).
 - **Location:** `data/ml_output/ml_features_<run_id>.parquet`
-- **Grain:** candidates only — filtered to `match_probability >=
-  settings.ml_review_floor` (0.40 default)
+- **Grain:** **every scored pair**, unfiltered. There is no candidate cutoff:
+  the file is the complete record of the stage's scores, which is what an
+  offline threshold sweep reads (a filtered file makes any threshold below the
+  cutoff unevaluable).
 
 ### 4.5c — ml_explanations (per-pair SHAP)
 

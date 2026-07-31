@@ -12,25 +12,48 @@ Two Protocols define the plug-in surface:
   adapter code; a PyTorch/TensorFlow model needs a small wrapper exposing the
   same two methods.
 
-Reuses `fs_matcher.base.ClassificationConfig` (a plain dataclass, no Splink
-dependency) for the auto_merge_threshold/review_floor pair rather than
-re-declaring a near-duplicate.
+`MLClassificationConfig` is the stage's threshold config. It carries a single
+threshold, deliberately: Stage 4.5 is a **2-tier** classifier. The Stage-4.25
+gate owns the discard decision and records every drop it makes in
+`data/gate_output/`, so a second stage able to discard would mean a pair could
+vanish in either of two places with only one of them audited. The FS matcher
+keeps its own 3-tier `fs_matcher.base.ClassificationConfig` (it predates the
+gate and still serves as the fallback gate); the two are not interchangeable.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
-from src.models.fs_matcher.base import ClassificationConfig
-
 __all__ = [
-    "ClassificationConfig",
+    "MLClassificationConfig",
     "FeatureBuilder",
     "MLModel",
     "NotImplementedFeatureBuilder",
 ]
+
+
+@dataclass(frozen=True)
+class MLClassificationConfig:
+    """The ML matcher's single decision threshold.
+
+    `auto_merge_threshold` splits every scored pair into exactly two tiers:
+    at/above it, `auto_merge`; below it, `human_review`. There is no floor and
+    no `no_match` tier — see the module docstring for why that is structural
+    rather than configured.
+    """
+
+    auto_merge_threshold: float = 0.70
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.auto_merge_threshold <= 1.0:
+            raise ValueError(
+                f"MLClassificationConfig: auto_merge_threshold must be in "
+                f"[0, 1], got {self.auto_merge_threshold}"
+            )
 
 
 @runtime_checkable

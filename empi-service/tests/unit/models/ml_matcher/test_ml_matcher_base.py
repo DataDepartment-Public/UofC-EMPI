@@ -11,16 +11,25 @@ import pytest
 
 from src.models.fs_matcher.base import ClassificationConfig as FSClassificationConfig
 from src.models.ml_matcher.base import (
-    ClassificationConfig,
     FeatureBuilder,
+    MLClassificationConfig,
     MLModel,
     NotImplementedFeatureBuilder,
 )
 
 
-def test_classification_config_is_reexported_from_fs_matcher():
-    # Reuses fs_matcher's dataclass rather than re-declaring a near-duplicate.
-    assert ClassificationConfig is FSClassificationConfig
+def test_ml_config_is_single_threshold_not_the_fs_three_tier_one():
+    """Stage 4.5 has one threshold and two tiers. Sharing FS's 3-tier config
+    would reintroduce a floor, i.e. a second stage able to discard pairs
+    without the gate's audit trail covering it."""
+    assert MLClassificationConfig is not FSClassificationConfig
+    assert not hasattr(MLClassificationConfig(), "review_floor")
+    assert MLClassificationConfig().auto_merge_threshold == 0.70
+
+
+def test_ml_config_rejects_out_of_range_threshold():
+    with pytest.raises(ValueError, match="auto_merge_threshold"):
+        MLClassificationConfig(auto_merge_threshold=1.5)
 
 
 def test_not_implemented_feature_builder_raises():

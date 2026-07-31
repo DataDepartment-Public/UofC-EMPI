@@ -103,8 +103,8 @@ Two design decisions make this coherent:
 
 2. **The ML model runs as a 2-tier classifier.** With non-matches gated out
    upstream, the ML matcher never needs a `no_match` tier. It is configured with
-   `ml_review_floor = 0.0`, so every scored pair lands in exactly one of two
-   tiers: `auto_merge` (confident match) or `human_review` (ambiguous). The
+   no floor at all, so every scored pair lands in exactly one of two tiers:
+   `auto_merge` (confident match) or `human_review` (ambiguous). The
    effective three pipeline tiers are produced across stages:
    **rules-reject + gate-discard = `no_match`; ML = `auto_merge` / `human_review`.**
 
@@ -200,7 +200,6 @@ the boundary is identical, only its statement changed.
 | Setting | Value | Meaning |
 |---|---|---|
 | `ml_auto_merge_threshold` | **0.70** | `score ≥ this` → `auto_merge` (the notebook operating point). |
-| `ml_review_floor` | **0.0** | Removes the `no_match` tier → 2-tier classifier. Also the candidate-parquet cutoff (0.0 keeps every survivor). |
 | `ml_feeds_clustering` | `True` | The `auto_merge` tier forms real merge edges. |
 | `gate_threshold` | `0.30` | The **non-match gate** boundary — pairs scoring below `P(plausible) = this` are discarded before the ML model (`EMPI_GATE_THRESHOLD`). |
 | `fs_review_floor` | `0.40` | The FS candidate cutoff; the gate boundary **only** on the FS fallback path (`EMPI_FS_REVIEW_FLOOR`). |

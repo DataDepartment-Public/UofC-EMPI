@@ -23,11 +23,11 @@ import logging
 import numpy as np
 import pandas as pd
 
-from src.contracts import TIER_AUTO_MERGE, TIER_HUMAN_REVIEW, TIER_NO_MATCH
+from src.contracts import TIER_AUTO_MERGE, TIER_HUMAN_REVIEW
 from src.models.explanations import build_explanation_frame, compute_contributions
 from src.models.ml_matcher.base import (
-    ClassificationConfig,
     FeatureBuilder,
+    MLClassificationConfig,
     MLModel,
     NotImplementedFeatureBuilder,
 )
@@ -47,7 +47,7 @@ class MLMatcher:
         self,
         model: MLModel | None = None,
         feature_builder: FeatureBuilder | None = None,
-        classification_config: ClassificationConfig | None = None,
+        classification_config: MLClassificationConfig | None = None,
     ):
         """
         Parameters
@@ -60,13 +60,13 @@ class MLMatcher:
             Defaults to `NotImplementedFeatureBuilder` (raises on use) — pass
             a real `FeatureBuilder` implementation to make this usable.
         classification_config : optional
-            Thresholds. Defaults to `ClassificationConfig()` (0.95 / 0.40);
-            the pipeline passes settings-derived thresholds
-            (`ml_auto_merge_threshold` / `ml_review_floor`).
+            The single decision threshold. Defaults to
+            `MLClassificationConfig()` (0.70); the pipeline passes
+            `settings.ml_auto_merge_threshold`.
         """
         self.model = model
         self.feature_builder = feature_builder or NotImplementedFeatureBuilder()
-        self.classification_config = classification_config or ClassificationConfig()
+        self.classification_config = classification_config or MLClassificationConfig()
 
     # ── Feature building (BYOF) ────────────────────────────────────────────────
     def build_features(
@@ -99,14 +99,17 @@ class MLMatcher:
         return out
 
     def classify(self, df_predictions: pd.DataFrame) -> pd.DataFrame:
-        """Threshold `match_probability` into `classification_tier` — the
-        same cutoffs `FSModel.classify()` uses, minus the n_blocks bump
-        (BYOF means the pipeline can't assume `n_blocks` survived feature
-        building)."""
+        """Split `match_probability` into the two tiers this stage emits.
+
+        At/above `auto_merge_threshold` → `auto_merge`; everything else →
+        `human_review`. **No pair is ever dropped here.** Discarding confident
+        non-matches is the Stage-4.25 gate's job, and it is the only stage that
+        records its drops (`data/gate_output/`); a pair falling below the
+        threshold goes to a reviewer, not into a void.
+        """
         cfg = self.classification_config
         p = df_predictions["match_probability"]
-        tier = pd.Series(TIER_NO_MATCH, index=df_predictions.index, dtype="object")
-        tier = tier.mask(p >= cfg.review_floor, TIER_HUMAN_REVIEW)
+        tier = pd.Series(TIER_HUMAN_REVIEW, index=df_predictions.index, dtype="object")
         tier = tier.mask(p >= cfg.auto_merge_threshold, TIER_AUTO_MERGE)
         out = df_predictions.copy()
         out["classification_tier"] = tier
@@ -193,14 +196,16 @@ class MLMatcher:
         return self.to_evaluation_schema(self.score(candidate_pairs, df_clean, fs_features))
 
     # ── Candidate feature projection (mirrors FSMatcher.to_fs_features) ────────
-    def to_ml_features(
-        self, df_classified: pd.DataFrame, *, candidates_only: bool = True,
-    ) -> pd.DataFrame:
+    def to_ml_features(self, df_classified: pd.DataFrame) -> pd.DataFrame:
         """Project a `classify()`-output frame to the `MLFeatures` candidate
         parquet: `PATID_A`/`PATID_B` + `match_probability` +
         `classification_tier` + every BYOF feature column `build_features()`
-        produced. When `candidates_only` (the pipeline default), keeps only
-        rows at/above the review floor.
+        produced.
+
+        **Every scored pair is kept.** There used to be a review-floor cutoff
+        here; dropping it is what makes the parquet a complete record of the
+        stage's scores, which is what an offline threshold sweep needs — you
+        cannot evaluate a candidate threshold against pairs the file omits.
         """
         required = {"PATID_A", "PATID_B", "match_probability", "classification_tier"}
         missing = required - set(df_classified.columns)
@@ -209,16 +214,7 @@ class MLMatcher:
                 f"to_ml_features is missing columns {sorted(missing)}; expected "
                 "the output of classify()."
             )
-        out = df_classified.reset_index(drop=True).copy()
-        if candidates_only:
-            floor = self.classification_config.review_floor
-            before = len(out)
-            out = out[out["match_probability"] >= floor].reset_index(drop=True)
-            logger.info(
-                "to_ml_features: kept %d/%d candidate pairs (match_probability >= %.2f)",
-                len(out), before, floor,
-            )
-        return out
+        return df_classified.reset_index(drop=True).copy()
 
     # ── Training (STUB) ──────────────────────────────────────────────────────────
     def train(

@@ -21,7 +21,7 @@ import pandas as pd
 import pytest
 
 from src.contracts import TIER_AUTO_MERGE, TIER_HUMAN_REVIEW, TIER_NO_MATCH
-from src.models.ml_matcher.base import ClassificationConfig
+from src.models.ml_matcher.base import MLClassificationConfig
 from src.models.ml_matcher.lightgbm_v5 import (
     CATEGORICAL_FEATURES,
     FEATURE_COLS,
@@ -179,11 +179,11 @@ def test_fit_is_refused():
         DirectMatchAdapter(_InnerModel()).fit(_X(), [0, 1])
 
 
-# ─── 2-tier classify (review_floor = 0.0) ─────────────────────────────────────
-def test_classify_two_tier_when_review_floor_zero():
-    """With the gate removing non-matches upstream, the ML matcher runs with
-    review_floor=0.0 and must emit ONLY auto_merge / human_review (no no_match)."""
-    ml = MLMatcher(classification_config=ClassificationConfig(auto_merge_threshold=0.70, review_floor=0.0))
+# ─── 2-tier classify ──────────────────────────────────────────────────────────
+def test_classify_two_tier_at_the_served_threshold():
+    """With the gate removing non-matches upstream, the matcher emits ONLY
+    auto_merge / human_review — no no_match tier exists to emit."""
+    ml = MLMatcher(classification_config=MLClassificationConfig(auto_merge_threshold=0.70))
     preds = pd.DataFrame({
         "PATID_A": ["A", "C", "E", "G"],
         "PATID_B": ["B", "D", "F", "H"],

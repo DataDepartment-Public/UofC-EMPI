@@ -436,10 +436,10 @@ def evaluate_run(
     clustering = pairwise_against_clusters(labeled, partition, label_col)
 
     # ── three-class routing ──────────────────────────────────────────────────
-    # Scored against the pipeline's *shipped* decision, so `ml_reject` is the
-    # matcher's own no_match tier (empty while ml_review_floor = 0.0) and the
-    # matcher's auto_merge tier is deliberately NOT treated as a merge — it
-    # feeds nothing while `ml_feeds_clustering` is off.
+    # Scored against the pipeline's *shipped* decision. `ml_reject` is the
+    # matcher's own no_match tier, which is now always empty: Stage 4.5 is a
+    # 2-tier classifier with no floor and cannot discard a pair. Kept in the
+    # vocabulary so a BYOM model that does reject would still be scored.
     triage = triage_evaluation(
         labeled, label_col, keys,
         ambiguous_col=ambiguous_col,

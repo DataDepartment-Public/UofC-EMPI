@@ -1,19 +1,23 @@
-"""Guards on the reconstruction of the training notebooks' test folds.
+"""Guards on the shared evaluation holdout (`src/evaluation/holdout.py`).
 
-If either notebook changes its `RANDOM_STATE`, split ratios, stratification
-target, or the row ordering it loads gold in, `src/evaluation/holdout.py` goes
-silently wrong — it would still return *a* fold, just not the one the model was
-actually held out on, and every "leakage-safe" number downstream would be
-quietly contaminated. These tests are the tripwire.
+One function defines the split and every site calls it — both training
+notebooks and both evaluation CLIs. The properties that matter:
 
-`test_real_gold_*` are the strongest guards but need the VM's PHI label file;
-they skip cleanly on a dev machine. The rest run everywhere against a
-gold-shaped fixture.
+* **order-invariance** — the previous positional `train_test_split` meant a
+  re-saved gold CSV silently changed which pairs were held out, invalidating
+  already-trained models with nothing raised;
+* **stability under growth** — appending labels must not re-partition existing
+  pairs, or every retrain silently invalidates the last evaluation;
+* **stratification** — the hash is label-independent, so it must take ~the same
+  share of every class without being told the classes exist;
+* **provenance** — a model fit under a different spec must be reported, because
+  for it the "leakage-safe" restriction is a fiction.
+
+`test_real_gold_*` needs the VM's PHI label file and skips cleanly elsewhere.
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
@@ -23,97 +27,132 @@ import pytest
 from src.evaluation.holdout import (
     GOLD_AMBIGUOUS_COL,
     GOLD_LABEL_COL,
-    RANDOM_STATE,
-    TEST_SIZE,
-    gold_test_folds,
+    HOLDOUT_FRACTION,
+    holdout_bucket,
+    holdout_keys,
+    holdout_mask,
+    holdout_spec,
+    is_holdout,
     load_gold_labels,
+    verify_model_provenance,
 )
 
-# The real file, if this is running where the data lives.
 _GOLD = (
     Path(__file__).resolve().parents[3]
     / "data" / "gold_labels" / "final_gold_labels_v1_2026_07_05.csv"
 )
-
-# Counts the notebooks printed for the served gate and matcher — see
-# `pair_classifier_lightgbm_{nonmatch_gate_v1,ambiguous_v3}.ipynb` cell 5.
 GOLD_ROWS = 204_805
 GOLD_PLAUSIBLE = 62_610
 
 
-def _fixture_gold(n: int = 1_000, seed: int = 0) -> pd.DataFrame:
-    """Gold-shaped labels with a plausible-ish class balance."""
+def _fixture_gold(n: int = 20_000, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    label = rng.random(n) < 0.17
-    ambiguous = rng.random(n) < 0.14
     return pd.DataFrame({
         "PATID_A": [f"{i:06d}" for i in range(n)],
         "PATID_B": [f"{i + n:06d}" for i in range(n)],
-        "ambiguous_pair": ambiguous,
-        "final_gold_label": label,
+        "ambiguous_pair": rng.random(n) < 0.14,
+        "final_gold_label": rng.random(n) < 0.17,
     })
 
 
-# ── constants ────────────────────────────────────────────────────────────────
-def test_split_constants_match_the_notebooks():
-    assert RANDOM_STATE == 42
-    assert TEST_SIZE == 0.20
+# ── the split's definition ───────────────────────────────────────────────────
+def test_bucket_is_deterministic_across_calls():
+    """hashlib, not the builtin `hash()` — which is salted per process and would
+    give a different split on every run."""
+    assert holdout_bucket("000123", "004567") == holdout_bucket("000123", "004567")
 
 
-# ── mechanics ────────────────────────────────────────────────────────────────
-def test_fold_sizes_are_twenty_percent_of_each_population():
+def test_bucket_is_canonical_in_pair_order():
+    assert holdout_bucket("aaa", "bbb") == holdout_bucket("bbb", "aaa")
+
+
+def test_bucket_is_uniform_enough():
     gold = _fixture_gold()
-    folds = gold_test_folds(gold)
-    n_plausible = int((gold[GOLD_LABEL_COL] | gold[GOLD_AMBIGUOUS_COL]).sum())
-
-    # sklearn rounds the test split UP (`ceil`), which is exact for the real
-    # gold sizes but not for an arbitrary fixture.
-    assert len(folds.gate) == math.ceil(len(gold) * TEST_SIZE)
-    assert len(folds.matcher) == math.ceil(n_plausible * TEST_SIZE)
-    assert len(folds.matcher_population) == n_plausible
+    buckets = np.array([holdout_bucket(a, b) for a, b in zip(gold.PATID_A, gold.PATID_B)])
+    assert 0.0 <= buckets.min() and buckets.max() < 1.0
+    assert abs(buckets.mean() - 0.5) < 0.02
 
 
-def test_folds_are_deterministic():
+def test_holdout_is_the_configured_fraction():
+    mask = holdout_mask(_fixture_gold())
+    assert abs(mask.mean() - HOLDOUT_FRACTION) < 0.01
+
+
+def test_membership_is_invariant_to_row_order():
+    """THE property positional splitting lacked: re-saving gold in a different
+    order must not move a single pair."""
     gold = _fixture_gold()
-    assert gold_test_folds(gold).gate == gold_test_folds(gold).gate
+    shuffled = gold.sample(frac=1.0, random_state=7).reset_index(drop=True)
+    assert holdout_keys(gold) == holdout_keys(shuffled)
 
 
-def test_row_order_changes_the_fold():
-    """Positional indices make row order load-bearing — a reordered gold file
-    is a different split, which is exactly why `load_gold_labels` must not sort."""
+def test_membership_is_stable_when_rows_are_added():
+    """Appending new gold labels must not re-partition the existing ones."""
+    gold = _fixture_gold(1_000)
+    grown = pd.concat([gold, _fixture_gold(1_500).iloc[1_000:]], ignore_index=True)
+    before, after = holdout_keys(gold), holdout_keys(grown)
+    assert before <= after
+
+
+def test_membership_is_independent_of_the_label():
+    """Stratification is free only because the hash ignores the label. If a
+    label correction moved a pair, the previous evaluation would be invalid."""
+    gold = _fixture_gold(2_000)
+    flipped = gold.assign(final_gold_label=~gold.final_gold_label,
+                          ambiguous_pair=~gold.ambiguous_pair)
+    assert holdout_keys(gold) == holdout_keys(flipped)
+
+
+def test_every_class_is_sampled_at_the_same_rate():
     gold = _fixture_gold()
-    shuffled = gold.sample(frac=1.0, random_state=1).reset_index(drop=True)
-    assert gold_test_folds(gold).gate != gold_test_folds(shuffled).gate
+    mask = holdout_mask(gold)
+    strata = np.where(gold.ambiguous_pair, "ambiguous",
+                      np.where(gold.final_gold_label, "match", "non-match"))
+    for cls in ("non-match", "ambiguous", "match"):
+        in_cls = strata == cls
+        assert in_cls.sum() > 0
+        assert abs(mask[in_cls].mean() - HOLDOUT_FRACTION) < 0.03
 
 
-def test_strict_holdout_is_a_subset_of_the_gate_fold():
-    folds = gold_test_folds(_fixture_gold())
-    assert folds.strict <= folds.gate
-
-
-def test_strict_holdout_excludes_every_matcher_training_pair():
-    """The whole point: no pair the matcher was fit on survives into `strict`."""
-    folds = gold_test_folds(_fixture_gold())
-    matcher_train = folds.matcher_population - folds.matcher
-    assert not (folds.strict & matcher_train)
-
-
-def test_strict_holdout_keeps_pairs_the_matcher_never_saw():
-    """Confident non-matches were dropped by the matcher's `keep_mask`, so a
-    gate-held-out pair outside its population is safe and must be retained."""
-    folds = gold_test_folds(_fixture_gold())
-    never_seen = folds.gate - folds.matcher_population
-    assert never_seen and never_seen <= folds.strict
-
-
-def test_pair_keys_are_canonicalized():
-    gold = _fixture_gold(50)
+def test_holdout_keys_are_canonicalized():
+    gold = _fixture_gold(500)
     gold.loc[0, ["PATID_A", "PATID_B"]] = ["zzz", "aaa"]
-    folds = gold_test_folds(gold)
-    assert all(a <= b for a, b in folds.gate)
+    assert all(a <= b for a, b in holdout_keys(gold))
 
 
-# ── loading ──────────────────────────────────────────────────────────────────
+def test_mask_and_keys_agree():
+    gold = _fixture_gold(2_000)
+    mask = holdout_mask(gold)
+    assert len(holdout_keys(gold)) == int(mask.sum())
+    assert all(is_holdout(a, b) for a, b in holdout_keys(gold))
+
+
+# ── provenance ───────────────────────────────────────────────────────────────
+def test_provenance_passes_when_both_models_record_the_current_spec():
+    spec = holdout_spec()
+    metas = {"ml_matcher": {"holdout_spec": spec}, "nonmatch_gate": {"holdout_spec": spec}}
+    assert verify_model_provenance(metas) == []
+
+
+def test_provenance_flags_a_model_trained_before_the_shared_holdout():
+    problems = verify_model_provenance({"ml_matcher": {"notes": "old"}})
+    assert len(problems) == 1 and "re-run its notebook" in problems[0]
+
+
+def test_provenance_flags_a_different_salt_or_fraction():
+    """Changing either redefines which pairs are held out, so every model
+    trained under the old spec is no longer held out on them."""
+    stale = {**holdout_spec(), "salt": "something-else"}
+    problems = verify_model_provenance({"nonmatch_gate": {"holdout_spec": stale}})
+    assert len(problems) == 1 and "DIFFERENT holdout spec" in problems[0]
+
+
+def test_provenance_flags_a_missing_sidecar():
+    problems = verify_model_provenance({"ml_matcher": None})
+    assert len(problems) == 1 and "no meta sidecar" in problems[0]
+
+
+# ── gold loading ─────────────────────────────────────────────────────────────
 def test_load_gold_coerces_string_booleans(tmp_path):
     path = tmp_path / "gold.csv"
     path.write_text(
@@ -139,15 +178,14 @@ def test_load_gold_preserves_leading_zeros(tmp_path):
 @pytest.mark.skipif(not _GOLD.exists(), reason="gold labels are VM-only PHI")
 def test_real_gold_population_matches_the_notebooks():
     gold = load_gold_labels(_GOLD)
-    plausible = int((gold[GOLD_LABEL_COL] | gold[GOLD_AMBIGUOUS_COL]).sum())
     assert len(gold) == GOLD_ROWS
-    assert plausible == GOLD_PLAUSIBLE
+    assert int((gold[GOLD_LABEL_COL] | gold[GOLD_AMBIGUOUS_COL]).sum()) == GOLD_PLAUSIBLE
 
 
 @pytest.mark.skipif(not _GOLD.exists(), reason="gold labels are VM-only PHI")
-def test_real_gold_fold_sizes_match_the_notebooks():
-    folds = gold_test_folds(load_gold_labels(_GOLD))
-    assert len(folds.gate) == math.ceil(GOLD_ROWS * TEST_SIZE) == 40_961
-    assert len(folds.matcher) == math.ceil(GOLD_PLAUSIBLE * TEST_SIZE) == 12_522
-    # Enough leakage-safe pairs left to make the end-to-end number meaningful.
-    assert len(folds.strict) > 30_000
+def test_real_holdout_is_about_a_fifth_of_the_file():
+    """~41k — not the ~8k the two independently-drawn folds used to intersect to."""
+    gold = load_gold_labels(_GOLD)
+    n = len(holdout_keys(gold))
+    assert abs(n / GOLD_ROWS - HOLDOUT_FRACTION) < 0.01
+    assert 39_000 < n < 43_000

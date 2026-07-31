@@ -64,8 +64,9 @@ from src.config import configure_logging, settings  # noqa: E402
 from src.evaluation.holdout import (  # noqa: E402
     GOLD_AMBIGUOUS_COL,
     GOLD_LABEL_COL,
-    gold_test_folds,
+    holdout_keys,
     load_gold_labels,
+    verify_model_provenance,
 )
 from src.evaluation.pipeline_eval import (  # noqa: E402
     evaluate_run,
@@ -87,6 +88,25 @@ DEFAULT_SYNTHETIC = _ROOT / "data" / "synthetic_data" / "synthetic_test_v3.csv"
 
 def _new_session_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _warn_if_models_predate_the_holdout() -> None:
+    """Surface any served model not trained under the current holdout spec.
+    A mismatch makes `--holdout strict` a fiction for that model — the "safe"
+    pairs may be its training data — so it is logged loudly rather than
+    silently trusted."""
+    from src.models.ml_matcher import registry as ml_registry
+    from src.models.nonmatch_gate import registry as gate_registry
+
+    metas = {}
+    for name, reg in (("ml_matcher", ml_registry), ("nonmatch_gate", gate_registry)):
+        try:
+            active = reg.resolve_active_model(settings)
+            metas[name] = reg.load_model_meta(active) if active is not None else None
+        except Exception:  # noqa: BLE001 - provenance must never break an eval
+            metas[name] = None
+    for problem in verify_model_provenance(metas):
+        logger.warning("HOLDOUT PROVENANCE — %s", problem)
 
 
 def _banner(text: str) -> None:
@@ -116,7 +136,8 @@ def evaluate_real(session_id: str, args) -> list[Path]:
     # ambiguous non-match is correct behavior for the gate.
     labels["plausible"] = labels[GOLD_LABEL_COL] | labels[GOLD_AMBIGUOUS_COL]
     labels["confident_match"] = labels[GOLD_LABEL_COL] & ~labels[GOLD_AMBIGUOUS_COL]
-    folds = gold_test_folds(labels)
+    holdout_pairs = holdout_keys(labels)
+    _warn_if_models_predate_the_holdout()
 
     written = []
     for holdout in ("none", "strict"):
@@ -125,7 +146,7 @@ def evaluate_real(session_id: str, args) -> list[Path]:
             manifest, labels, GOLD_LABEL_COL,
             settings=settings,
             label_source="gold",
-            holdout=None if holdout == "none" else folds.strict,
+            holdout=None if holdout == "none" else holdout_pairs,
             holdout_name=holdout,
             plausible_col="plausible",
             confident_match_col="confident_match",

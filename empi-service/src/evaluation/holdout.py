@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -76,6 +77,7 @@ from src.evaluation.cluster_eval import PairKey, canonical_key, pair_keys
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_GOLD_LABELS",
     "GOLD_AMBIGUOUS_COL",
     "GOLD_LABEL_COL",
     "HOLDOUT_FRACTION",
@@ -87,11 +89,20 @@ __all__ = [
     "holdout_spec",
     "is_holdout",
     "load_gold_labels",
+    "load_labels",
     "verify_model_provenance",
 ]
 
 GOLD_LABEL_COL = "final_gold_label"
 GOLD_AMBIGUOUS_COL = "ambiguous_pair"
+
+#: The gold file every evaluation defaults to. VM-only PHI and gitignored, so
+#: this path exists only where the data lives — deliberately a constant rather
+#: than a `Settings` field, since it names one specific labeling round.
+DEFAULT_GOLD_LABELS = (
+    Path(__file__).resolve().parents[2]
+    / "data" / "gold_labels" / "final_gold_labels_v1_2026_07_05.csv"
+)
 
 #: The split's definition. **Changing either value redefines which pairs are
 #: held out and invalidates every model already trained against it** — both
@@ -185,6 +196,29 @@ def load_gold_labels(path) -> pd.DataFrame:
         if col in gold.columns:
             gold[col] = _to_bool(gold[col])
     return gold
+
+
+def load_labels(path, label_col: str = GOLD_LABEL_COL) -> pd.DataFrame:
+    """Read any pairwise label file, preserving PATID leading zeros.
+
+    Gold goes through `load_gold_labels` for the notebooks' exact boolean
+    coercion (the fold reconstruction depends on it); anything else — silver,
+    synthetic entity truth — gets the same coercion applied to `label_col`.
+    One implementation so the CLIs and the evaluation notebooks can never read
+    the same file two different ways.
+    """
+    path = Path(path)
+    if GOLD_LABEL_COL in pd.read_csv(path, nrows=0).columns:
+        return load_gold_labels(path)
+
+    df = pd.read_csv(path, dtype={"PATID_A": str, "PATID_B": str})
+    if label_col not in df.columns:
+        raise ValueError(
+            f"Label column {label_col!r} not in {path.name} "
+            f"(columns: {list(df.columns)})"
+        )
+    df[label_col] = _to_bool(df[label_col])
+    return df
 
 
 def verify_model_provenance(model_metas: dict[str, dict | None]) -> list[str]:

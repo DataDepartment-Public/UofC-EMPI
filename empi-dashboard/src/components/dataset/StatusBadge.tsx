@@ -8,7 +8,7 @@ const STYLES: Record<Origin, { label: string; bg: string; fg: string }> = {
 };
 
 /** FR-21/22: "Match Status / Row Origin" pill — one fixed style per origin,
- * reusing the FR-13 color family (green/gold/red) plus blue for a
+ * reusing the FR-13 color family (green/teal/cyan) plus blue for a
  * reviewer-confirmed manual merge. */
 export function StatusBadge({ origin }: { origin: Origin }) {
   const s = STYLES[origin];

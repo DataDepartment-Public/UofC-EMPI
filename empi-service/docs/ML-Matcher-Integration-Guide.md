@@ -60,9 +60,10 @@ config toggle (`settings.ml_feeds_clustering`, **on** by default — see §4).
 > active, or when `EMPI_GATE_SUPERSEDES_FS=false`; otherwise Stage 4 is
 > audit-only.
 
-Because the non-matches are gated out upstream, the served LightGBM v3 model
-runs as a **2-tier** classifier (`ml_review_floor = 0.0`): confident match →
-`auto_merge`, ambiguous → `human_review`; it does not emit `no_match`. A model
+Because the non-matches are gated out upstream, the served LightGBM v5 model
+(`docs/ML-Model-LightGBM-v5.md`) runs as a **2-tier** classifier
+(`ml_review_floor = 0.0`): confident match → `auto_merge`, ambiguous →
+`human_review`; it does not emit `no_match`. A model
 that *does* need to distinguish non-matches can still emit all three tiers by
 setting a non-zero `ml_review_floor` — the `classify()` machinery supports it.
 

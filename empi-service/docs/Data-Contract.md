@@ -424,7 +424,7 @@ union), keyed on `(PATID_A, PATID_B)`.
   gate makes no merge decision and never feeds clustering.
 - **Score:** `P(plausible)` = `P(match ∪ ambiguous)`; pairs at/above
   `settings.gate_threshold` (0.30) pass.
-- **Features:** reuses Stage 4.5's `V3FeatureBuilder` — the gate and the
+- **Features:** reuses Stage 4.5's `FeatureBuilderV5` — the gate and the
   matcher see identical inputs.
 - **Fallback:** with no active gate model (or `gate_supersedes_fs=false`), the
   legacy FS gate (`_fs_plausible_pool`) filters the pool instead; with neither

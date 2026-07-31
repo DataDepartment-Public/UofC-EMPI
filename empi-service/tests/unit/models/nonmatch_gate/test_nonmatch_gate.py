@@ -169,6 +169,6 @@ def test_predict_reorders_columns_to_the_models_training_order():
 def test_default_feature_builder_is_the_v3_builder():
     """The gate model is trained on the ML matcher's 12 features — sharing the
     builder is what keeps the two stages' inputs identical."""
-    from src.models.ml_matcher.lightgbm_v3 import V3FeatureBuilder
+    from src.models.ml_matcher.lightgbm_v5 import FeatureBuilderV5
 
-    assert isinstance(NonMatchGate(model=_ScriptedModel([])).feature_builder, V3FeatureBuilder)
+    assert isinstance(NonMatchGate(model=_ScriptedModel([])).feature_builder, FeatureBuilderV5)

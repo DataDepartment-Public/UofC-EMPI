@@ -10,7 +10,7 @@ LightGBM classifier trained specifically for it —
 FS still runs (Stage 4) but is **audit-only**: it writes its `ProbabilisticMatches` and
 `FSFeatures` artifacts and routes nothing.
 
-Related docs: `docs/ML-Model-LightGBM-v3.md` (the Stage-4.5 model the gate feeds),
+Related docs: `docs/ML-Model-LightGBM-v5.md` (the Stage-4.5 model the gate feeds),
 `docs/ML-Matcher-Integration-Guide.md` (the Stage-4.5 extension contract),
 `docs/FS-Matcher-Production-Guide.md` (the gate this replaced).
 
@@ -52,10 +52,11 @@ raising the threshold buys very little pool reduction and costs recall quickly.
 ## 2. Features
 
 The gate reuses the ML matcher's builder verbatim —
-`src.models.ml_matcher.lightgbm_v3.V3FeatureBuilder`, the same 12 features (3 categorical +
-9 numeric) documented in `docs/ML-Model-LightGBM-v3.md` §2. That is deliberate: the gate and
-the matcher see **identical inputs**, so their decisions are directly comparable and there is
-one feature implementation to keep correct, not two.
+`src.models.ml_matcher.lightgbm_v5.FeatureBuilderV5`, the same 12 features (3 categorical +
+9 numeric) documented in `docs/ML-Model-LightGBM-v5.md` §4 — the same class object, not a
+copy. That is deliberate: the gate and the matcher see **identical inputs**, so their
+decisions are directly comparable and there is one feature implementation to keep correct,
+not two.
 
 Only the training target and population differ between the two models.
 

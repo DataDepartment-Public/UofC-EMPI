@@ -500,15 +500,16 @@ def run_pipeline(
         from src.models.ml_matcher.matcher import MLMatcher
         # BYOM artifact loading is the implementer's extension point — see
         # docs/ML-Matcher-Integration-Guide.md. load_model_artifact deserializes
-        # whatever active.json points at; V3FeatureBuilder is the matching BYOF
-        # implementation for the served LightGBM v3 model. Both are imported
-        # lazily so Stage 4.5's deps stay off the import path when it's skipped.
-        from src.models.ml_matcher.lightgbm_v3 import V3FeatureBuilder
+        # whatever active.json points at; FeatureBuilderV5 is the matching BYOF
+        # implementation for the served LightGBM v5 model (the same 12 features
+        # v3/v4 used, so the gate shares the builder). Both are imported lazily
+        # so Stage 4.5's deps stay off the import path when it's skipped.
+        from src.models.ml_matcher.lightgbm_v5 import FeatureBuilderV5
         from src.models.ml_matcher.registry import load_model_artifact
 
         _ml_model = MLMatcher(
             model=load_model_artifact(active_ml_model),
-            feature_builder=V3FeatureBuilder(),
+            feature_builder=FeatureBuilderV5(),
             classification_config=MLClassificationConfig(
                 auto_merge_threshold=settings.ml_auto_merge_threshold,
                 review_floor=settings.ml_review_floor,

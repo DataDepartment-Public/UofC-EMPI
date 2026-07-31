@@ -177,8 +177,8 @@ function CandidateRow({
       : confPct >= 90
         ? "text-status-auto"
         : confPct >= 75
-          ? "text-status-review"
-          : "text-status-nomatch";
+          ? "text-status-review-display"
+          : "text-status-nomatch-display";
   const inCluster = item.member_count_a > 1 || item.member_count_b > 1;
 
   return (
@@ -211,7 +211,7 @@ function CandidateRow({
           className={clsx(
             "mt-1 inline-block rounded-full px-2 py-0.5 text-[9.5px] font-bold",
             item.match_rule
-              ? "bg-status-review/15 text-status-review"
+              ? "bg-status-review-display/15 text-status-review-display"
               : "bg-bg text-gray-2",
           )}
         >

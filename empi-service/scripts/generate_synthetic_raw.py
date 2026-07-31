@@ -290,7 +290,26 @@ _SCENARIO_FORCE = {
     "name_dob_email": frozenset({"first", "last", "dob", "email"}),
     "name_dob_address": frozenset({"first", "last", "dob",
                                    "street_canon", "city", "state", "zip"}),
+    # Ambiguous (ML-training-only) scenarios below — genuinely hard cases:
+    # same name+DOB, PLUS a partial/near-miss on one of the 12 ML features
+    # (never an exact match, so no deterministic rule fires and the pair
+    # lands in the non_matches/review pool). Deliberately NOT a bare
+    # name+DOB-only share — `sex` isn't one of the 12 ML features at all, so
+    # a bare name+DOB pair is feature-identical to a `name_dob_sex` confident
+    # match and gives the model nothing to learn from; a near-miss on a
+    # feature that IS tracked (SSN digits, or address) gives real gradient.
+    "ambiguous_ssn_typo": frozenset({"first", "last", "dob", "ssn"}),
+    "ambiguous_partial_address": frozenset({"first", "last", "dob", "street_canon"}),
 }
+
+#: Scenarios that satisfy a real deterministic rule end-to-end — planted
+#: pairs from these are confident matches for ML gold-label purposes.
+#: Everything else in `_SCENARIO_FORCE` (currently just `ambiguous_name_dob`)
+#: is a genuinely uncertain case: same core identity, no corroborating field.
+CONFIDENT_SCENARIOS = frozenset({
+    "ssn_dob", "email", "name_dob_sex", "name_dob_phone", "name_dob_email",
+    "name_dob_address",
+})
 
 
 def _scenario_ok(base: dict, scenario: str) -> bool:
@@ -305,7 +324,22 @@ def _scenario_ok(base: dict, scenario: str) -> bool:
         return base["sex"] is not None
     if scenario == "name_dob_email":
         return base["email"] is not None
-    return True  # name_dob_address always has address components
+    if scenario == "ambiguous_ssn_typo":
+        return base["ssn"] is not None
+    return True  # name_dob_address / ambiguous_partial_address always have
+    # address components; base always has a street_canon/street_raw.
+
+
+def _typo_one_digit(digits: str, rng: random.Random) -> str:
+    """`digits` with exactly one character changed — a data-entry typo, not
+    a random SSN. `ssn_digit_frac` (position-wise match fraction) then reads
+    as "almost identical, one digit off" rather than "unrelated"."""
+    pos = rng.randrange(len(digits))
+    original = digits[pos]
+    new_digit = str(rng.randrange(10))
+    while new_digit == original:
+        new_digit = str(rng.randrange(10))
+    return digits[:pos] + new_digit + digits[pos + 1:]
 
 
 def _plant_duplicate(base: dict, dup_patid: str, scenario: str,
@@ -329,35 +363,65 @@ def _plant_duplicate(base: dict, dup_patid: str, scenario: str,
         elif scenario == "name_dob_address":
             for k in ("street_canon", "street_raw", "city", "state", "zip"):
                 dup[k] = base[k]
+        elif scenario == "ambiguous_ssn_typo":
+            if base["ssn"] is not None:
+                dup["ssn"] = _typo_one_digit(base["ssn"], rng)
+        elif scenario == "ambiguous_partial_address":
+            # Same street NAME, different house NUMBER — high address-token
+            # overlap but no exact street-number match ("maybe moved").
+            name_part = (
+                base["street_raw"].split(" ", 1)[1]
+                if " " in base["street_raw"] else base["street_raw"]
+            )
+            dup["street_canon"] = base["street_canon"]
+            dup["street_raw"] = f"{rng.randint(1, 9999)} {name_part}"
     return _render_raw(dup_patid, dup, rng, force=force)
 
 
-def generate(n: int, dup_rate: float, junk_rate: float, seed: int) -> pd.DataFrame:
-    """Generate base patients + planted duplicates + standalone junk records."""
+def generate(
+    n: int, dup_rate: float, junk_rate: float, seed: int
+) -> tuple[pd.DataFrame, list[tuple[str, str, str]]]:
+    """Generate base patients + planted duplicates + standalone junk records.
+
+    Returns `(df, planted_pairs)` — `planted_pairs` is `(base_patid,
+    dup_patid, scenario)` for every duplicate actually planted, the mapping
+    `_plant_duplicate` itself doesn't retain (it only sees the canonical
+    dict, not the base's PATID). This is the ground truth `--emit-labels`
+    writes; nothing else in this module needs it, so it's fine that it's
+    reconstructed here rather than threaded through `_plant_duplicate`.
+    """
     rng = random.Random(seed)
     np.random.seed(seed)
 
     base_canon = [_canonical_patient(rng) for _ in range(n)]
-    records = [_render_raw(f"PAT{i:06d}", c, rng) for i, c in enumerate(base_canon)]
+    base_patids = [f"PAT{i:06d}" for i in range(n)]
+    records = [
+        _render_raw(patid, c, rng) for patid, c in zip(base_patids, base_canon)
+    ]
 
     scenarios = list(_SCENARIO_FORCE.keys())
     n_dups_target = int(n * dup_rate)
     dup_idx = 0
     attempts = 0
+    planted_pairs: list[tuple[str, str, str]] = []
     while dup_idx < n_dups_target and attempts < n_dups_target * 20:
         attempts += 1
-        base = rng.choice(base_canon)
+        base_i = rng.randrange(n)
+        base = base_canon[base_i]
         scenario = rng.choice(scenarios)
         if not _scenario_ok(base, scenario):
             continue
-        records.append(_plant_duplicate(base, f"DUP{dup_idx:06d}", scenario, rng))
+        dup_patid = f"DUP{dup_idx:06d}"
+        records.append(_plant_duplicate(base, dup_patid, scenario, rng))
+        planted_pairs.append((base_patids[base_i], dup_patid, scenario))
         dup_idx += 1
 
     for j in range(int(n * junk_rate)):
         records.append(_junk_record(f"JNK{j:06d}", rng))
 
     df = pd.DataFrame(records, columns=COLUMNS)
-    return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+    return df, planted_pairs
 
 
 def main() -> None:
@@ -372,9 +436,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="RNG seed")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT,
                         help=f"Output CSV path (default {DEFAULT_OUT})")
+    parser.add_argument(
+        "--emit-labels", type=Path, default=None,
+        help="Optional path to also write the planted pairs as a ground-truth "
+             "labels CSV (PATID_A, PATID_B, final_gold_label, ambiguous_pair) "
+             "— for training the gate/ML matcher on this same synthetic run. "
+             "Omit to keep today's exact behavior (CSV only, no labels).",
+    )
     args = parser.parse_args()
 
-    df = generate(args.n, args.dup_rate, args.junk_rate, args.seed)
+    df, planted_pairs = generate(args.n, args.dup_rate, args.junk_rate, args.seed)
     n_dups = int(df["PATID"].str.startswith("DUP").sum())
     n_junk = int(df["PATID"].str.startswith("JNK").sum())
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -385,6 +456,21 @@ def main() -> None:
     print(f"  planted duplicates: {n_dups:,}")
     print(f"  junk records:       {n_junk:,}")
     print(f"  columns ({len(df.columns)}): {list(df.columns)}")
+
+    if args.emit_labels is not None:
+        labels_df = pd.DataFrame(
+            planted_pairs, columns=["PATID_A", "PATID_B", "scenario"]
+        )
+        labels_df["final_gold_label"] = labels_df["scenario"].isin(CONFIDENT_SCENARIOS)
+        labels_df["ambiguous_pair"] = ~labels_df["final_gold_label"]
+        labels_df = labels_df.drop(columns=["scenario"])
+        args.emit_labels.parent.mkdir(parents=True, exist_ok=True)
+        labels_df.to_csv(args.emit_labels, index=False)
+        n_confident = int(labels_df["final_gold_label"].sum())
+        n_ambiguous = int(labels_df["ambiguous_pair"].sum())
+        print(f"Wrote {len(labels_df):,} planted-pair labels to {args.emit_labels}")
+        print(f"  confident matches:  {n_confident:,}")
+        print(f"  ambiguous pairs:    {n_ambiguous:,}")
 
 
 if __name__ == "__main__":

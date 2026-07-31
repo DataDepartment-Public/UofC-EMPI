@@ -178,6 +178,23 @@ class UnmergeResponse(BaseModel):
     entity: Entity
 
 
+class UndoResponse(BaseModel):
+    """`POST /audit/{audit_id}/undo` — reverses a `merge` or `unmerge` entry.
+
+    `reversed_action` is the action that was undone (not the action taken to
+    undo it). Undoing a `merge` unmerges every patid back into its own
+    singleton entity (no single `entity` to return, hence `new_mids`);
+    undoing an `unmerge` re-merges the one patid back into `prev_mid`
+    (`entity` is that reconstituted entity, and `new_mids` is just `[mid]`
+    for symmetry with the merge case).
+    """
+
+    audit_id: int
+    reversed_action: Literal["merge", "unmerge"]
+    entity: Entity | None = None
+    new_mids: list[str] = Field(default_factory=list)
+
+
 class MatchStatusCounts(BaseModel):
     """FR-11: the three-way Auto-match / Needs review / No match bar chart."""
 
@@ -282,12 +299,15 @@ class AuditLogRow(BaseModel):
     id: int
     ts_utc: str
     user: str
-    action: Literal["merge", "unmerge", "split", "dismiss"]
+    action: Literal["merge", "unmerge", "split", "dismiss", "view_raw"]
     patids: str
     mid: str
     prev_state: str
     next_state: str
     run_id: str | None
+    prev_mid: str | None = None
+    undo_of: int | None = None
+    undone: bool = False
 
 
 # ── Explanations (GET /explanations/...) ─────────────────────────────────────
@@ -347,6 +367,30 @@ class PairExplanation(BaseModel):
     features: list[ExplanationFeature]
 
 
+# ── Admin (GET/PUT /admin/thresholds) ────────────────────────────────────────
+class ThresholdSettings(BaseModel):
+    """The live-tunable ML decision thresholds — see
+    `src/api/threshold_store.py`. Same shape for both the GET response and
+    the PUT request body."""
+
+    gate_threshold: float = Field(
+        ge=0.0, le=1.0,
+        description="P(plausible) at/above which a pair passes the "
+        "non-match gate and reaches the ML matcher.",
+    )
+    ml_auto_merge_threshold: float = Field(
+        ge=0.0, le=1.0,
+        description="Match-probability at/above which the ML matcher "
+        "tiers a pair 'auto_merge'.",
+    )
+    ml_review_floor: float = Field(
+        ge=0.0, le=1.0,
+        description="Match-probability at/above which the ML matcher "
+        "tiers a pair 'human_review' (also the candidate-inclusion floor "
+        "for the MLFeatures parquet).",
+    )
+
+
 __all__ = [
     "RunStatus",
     "RunCreateResponse",
@@ -371,6 +415,7 @@ __all__ = [
     "MergeResponse",
     "UnmergeRequest",
     "UnmergeResponse",
+    "UndoResponse",
     "AuditLogRow",
     "IncomingRecord",
     "ScoreRequest",
@@ -382,4 +427,5 @@ __all__ = [
     "ExplanationDecision",
     "ExplanationAxis",
     "PairExplanation",
+    "ThresholdSettings",
 ]

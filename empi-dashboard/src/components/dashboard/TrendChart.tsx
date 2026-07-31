@@ -73,7 +73,7 @@ export function TrendChart({
             <Line
               type="monotone"
               dataKey="Auto-match rate"
-              stroke="var(--brand-gold)"
+              stroke="var(--status-auto)"
               strokeWidth={2.5}
               dot={{ r: 3 }}
             />
@@ -89,7 +89,7 @@ export function TrendChart({
       )}
       <div className="mt-3 flex flex-wrap gap-4">
         <span className="flex items-center gap-1.5 text-xs font-semibold text-gray-2">
-          <i className="inline-block h-2.5 w-2.5 rounded-sm bg-brand-gold" />
+          <i className="inline-block h-2.5 w-2.5 rounded-sm bg-status-auto" />
           Auto-match rate
         </span>
         <span className="flex items-center gap-1.5 text-xs font-semibold text-gray-2">

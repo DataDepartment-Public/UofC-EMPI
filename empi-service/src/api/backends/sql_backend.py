@@ -75,7 +75,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     mid          TEXT NOT NULL,
     prev_state   TEXT NOT NULL,
     next_state   TEXT NOT NULL,
-    run_id       TEXT
+    run_id       TEXT,
+    prev_mid     TEXT,
+    undo_of      INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS record_attrs (
@@ -183,6 +185,10 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     "review_candidate": {
         "fs_match_probability": "REAL",
         "fs_classification_tier": "TEXT",
+    },
+    "audit_log": {
+        "prev_mid": "TEXT",
+        "undo_of": "INTEGER",
     },
 }
 
@@ -428,12 +434,30 @@ def insert_review_candidates(conn: sqlite3.Connection, rows: list[tuple]) -> Non
         conn.executemany(_REVIEW_CANDIDATE_INSERT_FULL_SQL, rows)
 
 
+#: A pair can exist in `review_candidate` under more than one `run_id` — the
+#: UNIQUE constraint is `(patid_a, patid_b, run_id)`, so a candidate that
+#: stays unresolved across successive full-batch publishes gets a fresh row
+#: each time rather than being replaced (only `replace_review_candidates_for_run`
+#: clears rows for its OWN run_id first). Both read queries below dedupe to
+#: the single most-recently-created row per `(patid_a, patid_b)` so a pair
+#: is never listed twice — the invariant `list_review_candidates`'s docstring
+#: already promises ("each should appear once here").
+_DEDUPED_REVIEW_CANDIDATE = """
+    SELECT * FROM (
+        SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY patid_a, patid_b ORDER BY created_utc DESC, id DESC
+        ) AS rn
+        FROM review_candidate
+    ) WHERE rn = 1
+"""
+
+
 def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[dict]:
     """Every review-candidate pair touching `patid`, joined to `record_attrs`
     on *both* sides — the UI needs the other PATID's name/SSN/DOB to render
     the expanded-row candidate list, not just its ID."""
     rows = conn.execute(
-        """
+        f"""
         SELECT rc.*,
                ra_a.first_name AS a_first_name, ra_a.last_name AS a_last_name,
                ra_a.birth_date AS a_birth_date, ra_a.ssn_last4 AS a_ssn_last4,
@@ -443,7 +467,7 @@ def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[di
                ra_b.birth_date AS b_birth_date, ra_b.ssn_last4 AS b_ssn_last4,
                ra_b.email AS b_email, ra_b.zip_code AS b_zip_code,
                ra_b.address1 AS b_address1, ra_b.sex AS b_sex, ra_b.phone AS b_phone
-        FROM review_candidate rc
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
         WHERE rc.patid_a = ? OR rc.patid_b = ?
@@ -508,8 +532,8 @@ def list_review_candidates(
         where.append(f"NOT {reviewed_expr}")
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
-    base_from = """
-        FROM review_candidate rc
+    base_from = f"""
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         JOIN entity_member ema ON ema.patid = rc.patid_a
         JOIN entity_member emb ON emb.patid = rc.patid_b
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
@@ -788,16 +812,26 @@ def insert_audit_log(
     prev_state: str,
     next_state: str,
     run_id: str | None,
+    prev_mid: str | None = None,
+    undo_of: int | None = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO audit_log
-            (ts_utc, user, action, patids, mid, prev_state, next_state, run_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
+             prev_mid, undo_of)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id),
+        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
+         prev_mid, undo_of),
     )
     return int(cur.lastrowid)
+
+
+#: Shared with `list_audit_log` and `get_audit_log_row` — `undone` is never
+#: stored, it's derived: a row is undone iff some other row's `undo_of`
+#: points back at its id (see docstring on `get_audit_log_row`).
+_UNDONE_EXPR = "EXISTS(SELECT 1 FROM audit_log u WHERE u.undo_of = al.id)"
 
 
 def list_audit_log(
@@ -805,14 +839,31 @@ def list_audit_log(
 ) -> list[dict]:
     if since:
         rows = conn.execute(
-            "SELECT * FROM audit_log WHERE ts_utc > ? ORDER BY id DESC LIMIT ?",
+            f"""
+            SELECT al.*, {_UNDONE_EXPR} AS undone FROM audit_log al
+            WHERE al.ts_utc > ? ORDER BY al.id DESC LIMIT ?
+            """,
             (since, limit),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)
+            f"""
+            SELECT al.*, {_UNDONE_EXPR} AS undone FROM audit_log al
+            ORDER BY al.id DESC LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_audit_log_row(conn: sqlite3.Connection, audit_id: int) -> dict | None:
+    """One audit_log row plus its derived `undone` flag — the reversal target
+    of `POST /audit/{audit_id}/undo` (`src/api/routers/audit.py`)."""
+    row = conn.execute(
+        f"SELECT al.*, {_UNDONE_EXPR} AS undone FROM audit_log al WHERE al.id = ?",
+        (audit_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def member_count(conn: sqlite3.Connection, mid: str) -> int:
@@ -994,6 +1045,7 @@ __all__ = [
     "list_entities",
     "insert_audit_log",
     "list_audit_log",
+    "get_audit_log_row",
     "member_count",
     "dashboard_summary",
     "hash_block_key",

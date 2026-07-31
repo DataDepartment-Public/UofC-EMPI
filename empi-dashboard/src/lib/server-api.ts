@@ -14,7 +14,7 @@ const API_BASE = process.env.EMPI_API_URL ?? "http://localhost:8000";
  * "Identity / auth" — no login UI was requested for this build; a real
  * deploy would source this from a server-side session instead).
  */
-export const REVIEWER_ID = "reviewer.jclark";
+export const REVIEWER_ID = "klkendall";
 
 export class UpstreamError extends Error {
   constructor(
@@ -38,8 +38,11 @@ async function request(
   });
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const res = await request(path);
+export async function apiGet<T>(
+  path: string,
+  init?: { reviewer?: boolean },
+): Promise<T> {
+  const res = await request(path, init);
   if (!res.ok) throw new UpstreamError(res.status, await safeJson(res));
   return res.json() as Promise<T>;
 }
@@ -50,6 +53,16 @@ export async function apiPostJson<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     reviewer: true,
+  });
+  if (!res.ok) throw new UpstreamError(res.status, await safeJson(res));
+  return res.json() as Promise<T>;
+}
+
+export async function apiPutJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await request(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new UpstreamError(res.status, await safeJson(res));
   return res.json() as Promise<T>;

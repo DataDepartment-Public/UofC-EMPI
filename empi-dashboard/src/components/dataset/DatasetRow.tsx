@@ -7,6 +7,7 @@ import type { Entity, EntityMember } from "@/lib/schemas";
 import { encodeExplainPayload, ExplainPatient } from "@/lib/explain";
 import { formatDate, fullName, maskSsn } from "@/lib/format";
 import { SsnReveal } from "@/components/shared/SsnReveal";
+import { StatusBadge } from "@/components/dataset/StatusBadge";
 
 interface Props {
   entity: Entity;
@@ -34,7 +35,7 @@ export function DatasetRow({
       <button
         onClick={() => expandable && setExpanded((e) => !e)}
         className={clsx(
-          "grid w-full grid-cols-[20px_1.7fr_1fr_1fr_0.8fr_1fr] items-center gap-3 px-4 py-3 text-left text-[13px]",
+          "grid w-full grid-cols-[20px_1.5fr_0.9fr_1fr_1fr_0.8fr_1fr] items-center gap-3 px-4 py-3 text-left text-[13px]",
           expandable && "cursor-pointer hover:bg-bg",
         )}
       >
@@ -51,6 +52,9 @@ export function DatasetRow({
           >
             {entity.mid}
           </div>
+        </span>
+        <span>
+          <StatusBadge origin={entity.origin} />
         </span>
         <span className="text-gray-2">{maskSsn(primary?.ssn_last4)}</span>
         <span className="text-gray-2">{primary?.birth_date ?? "—"}</span>

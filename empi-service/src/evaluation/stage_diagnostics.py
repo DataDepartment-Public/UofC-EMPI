@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -95,6 +96,10 @@ __all__ = [
     "route_confusion",
     "route_report",
     "route_errors",
+    "batch_name",
+    "review_batches",
+    "export_review_batches",
+    "BATCH_COLUMNS",
     "load_cleaned",
     "with_attributes",
     "stacked_pairs",
@@ -621,15 +626,39 @@ def binary_errors(diag: StageDiagnostics, stage: str, kind: str = "all") -> pd.D
     return _order(out, extra=("error",))
 
 
+def _as_route(value: str | None, argument: str) -> str | None:
+    """Accept either a route (`auto_merge`) or the gold class that maps to it
+    (`match`), and reject anything else.
+
+    The two vocabularies sit side by side in the matrix's row labels
+    (`ambiguous -> human_review`), so reaching for the wrong one is the obvious
+    mistake. Silently matching nothing would read as "no pairs in that cell",
+    which is the one wrong answer this function must never give.
+    """
+    if value is None or value in ROUTES:
+        return value
+    if value in GOLD_TO_ROUTE:
+        return GOLD_TO_ROUTE[value]
+    raise ValueError(
+        f"{argument}={value!r} is neither a route {list(ROUTES)} nor a gold "
+        f"class {list(GOLD_TO_ROUTE)}."
+    )
+
+
 def route_errors(diag: StageDiagnostics, stage: str, *,
                  expected: str | None = None, actual: str | None = None,
                  population: str | None = None) -> pd.DataFrame:
     """The misrouted pairs after `stage` — every off-diagonal cell, or one.
 
-    Pass `expected` / `actual` (route names from `ROUTES`) to pull a single
-    cell, e.g. `expected="auto_merge", actual="no_match"` for true matches the
-    pipeline has already thrown away.
+    Pass `expected` / `actual` to pull a single cell, e.g.
+    `expected="auto_merge", actual="no_match"` for true matches the pipeline has
+    already thrown away. Both accept a route name (`no_match` / `human_review` /
+    `auto_merge`) or the gold class that maps to it (`non-match` / `ambiguous` /
+    `match`) — `expected="ambiguous"` and `expected="human_review"` select the
+    same pairs. An unknown value raises rather than matching nothing.
     """
+    expected = _as_route(expected, "expected")
+    actual = _as_route(actual, "actual")
     col = ROUTE_COLUMNS[stage]
     pairs = diag.pairs if population is None else diag.pairs[diag.pairs[population]]
     exp = pairs["gold_class"].map(GOLD_TO_ROUTE)
@@ -643,6 +672,106 @@ def route_errors(diag: StageDiagnostics, stage: str, *,
     out["error"] = exp[mask] + " -> " + out[col].astype(str)
     out["stage"] = stage
     return _order(out, extra=("error", col))
+
+
+# ── Review batches (hand-off to the gold labeler) ────────────────────────────
+#: Filename-safe stem per gold class. `non-match` loses its hyphen so a batch
+#: name is a valid identifier wherever it is pasted.
+_CLASS_SLUG = {"non-match": "nonmatch", "ambiguous": "ambiguous", "match": "match"}
+
+#: What travels with a batch. Deliberately **not** the identity fields: the
+#: labeling notebook rejoins these ids to its own record frame, so a batch file
+#: carries pair ids and provenance, and the fields come from the source of truth
+#: on the other side rather than from a copy that can go stale.
+BATCH_COLUMNS: tuple[str, ...] = (
+    PATID_A, PATID_B, "gold_class", "expected_route", "actual_route", "error",
+    "source_blocks", "rules_decision", "rules_rule", "gate_score", "ml_score",
+)
+
+
+def batch_name(expected: str, actual: str) -> str:
+    """`match_to_no_match`, `ambiguous_to_auto_merge`, … — the batch's stem."""
+    expected = _as_route(expected, "expected")
+    actual = _as_route(actual, "actual")
+    gold_class = next(c for c, r in GOLD_TO_ROUTE.items() if r == expected)
+    return f"{_CLASS_SLUG[gold_class]}_to_{actual}"
+
+
+def review_batches(diag: StageDiagnostics, *, stage: str = "clustering",
+                   population: str | None = None) -> dict[str, pd.DataFrame]:
+    """One frame per error type — the six off-diagonal cells of `stage`'s
+    routing matrix, keyed by `batch_name`.
+
+    Empty cells are included (as empty frames) on purpose: "we made none of
+    this error" is a result, and a batch silently missing from the mapping
+    reads as a bug in the export instead.
+    """
+    col = ROUTE_COLUMNS[stage]
+    out: dict[str, pd.DataFrame] = {}
+    for gold_class, expected in GOLD_TO_ROUTE.items():
+        for actual in ROUTES:
+            if actual == expected:
+                continue                     # the diagonal is correct routing
+            cell = route_errors(diag, stage, expected=expected, actual=actual,
+                                population=population).copy()
+            cell["expected_route"] = expected
+            cell["actual_route"] = actual
+            cell["gold_class"] = gold_class
+            out[batch_name(expected, actual)] = cell
+    return out
+
+
+def export_review_batches(
+    diag: StageDiagnostics,
+    out_dir,
+    *,
+    stage: str = "clustering",
+    population: str | None = None,
+    columns: Sequence[str] = BATCH_COLUMNS,
+    max_per_batch: int | None = None,
+    random_state: int = 0,
+) -> pd.DataFrame:
+    """Write one CSV per error type plus a `_batches.csv` index; return the index.
+
+    The batches are the review queue: each file is one *kind* of mistake, so a
+    reviewer adjudicates a homogeneous list and their judgement stays calibrated
+    — rather than context-switching between "did we wrongly merge these?" and
+    "should this have been merged?" every few rows.
+
+    `max_per_batch` takes a reproducible random sample of an oversized cell.
+    Sampling rather than `head` matters: the frame is ordered by the label file,
+    and the first *n* rows of it are not a fair look at the error.
+
+    **The files are PHI** (pair ids). Write them somewhere gitignored.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    index_rows = []
+    for name, cell in review_batches(diag, stage=stage, population=population).items():
+        total = len(cell)
+        if max_per_batch is not None and total > max_per_batch:
+            cell = cell.sample(max_per_batch, random_state=random_state)
+        cell = cell[[c for c in columns if c in cell.columns]]
+        path = out_dir / f"{name}.csv"
+        cell.to_csv(path, index=False)
+        index_rows.append({
+            "batch": name,
+            "expected_route": name.split("_to_")[0],
+            "actual_route": name.split("_to_")[1],
+            "pairs": total,
+            "exported": len(cell),
+            "file": path.name,
+        })
+
+    index = pd.DataFrame(index_rows)
+    index.insert(0, "run_id", diag.run_id)
+    index.insert(1, "holdout", diag.holdout_name)
+    index.insert(2, "stage", stage)
+    index.to_csv(out_dir / "_batches.csv", index=False)
+    logger.info("Wrote %d review batches (%d pairs) to %s",
+                len(index), int(index["exported"].sum()), out_dir)
+    return index
 
 
 # ── Identity attributes ──────────────────────────────────────────────────────

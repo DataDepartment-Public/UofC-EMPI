@@ -105,10 +105,19 @@ slow.
 
 ## 2. Leakage — mandatory reading for gold
 
-**The Stage-4.25 gate and the Stage-4.5 ML matcher are both trained on
-`data/gold_labels/final_gold_labels_v1_2026_07_05.csv`.** Roughly 80% of the
-gold pairs are training data for those stages, so scoring the pipeline on all
-204,805 gold pairs reports a number that is substantially memorized.
+**The Stage-4.25 gate and the Stage-4.5 ML matcher are both trained on the gold
+labels.** Roughly 80% of the gold pairs are training data for those stages, so
+scoring the pipeline on all 204,805 gold pairs reports a number that is
+substantially memorized.
+
+**Which gold file is current is defined in exactly one place:**
+`DEFAULT_GOLD_LABELS` in `src/evaluation/holdout.py` — today
+`data/gold_labels/final_gold_labels_v2_2026_08_01.csv`. Every evaluation CLI,
+notebook and test imports that constant instead of spelling the filename, so a
+new labeling round is a one-line change. The served gate and v5 matcher were fit
+under **v1**; because the holdout is a hash of each pair's identity rather than a
+row split, they are still held out on the same pairs under v2 — the labels on
+those pairs are what changed, which is exactly what re-scoring measures.
 
 **Both models hold out the same pairs**, and there is exactly one definition of
 which: `src/evaluation/holdout.py`. Both training notebooks (§6) and both

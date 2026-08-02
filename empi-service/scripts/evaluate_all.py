@@ -62,6 +62,7 @@ if str(_ROOT_FOR_IMPORT) not in sys.path:
 
 from src.config import configure_logging, settings  # noqa: E402
 from src.evaluation.holdout import (  # noqa: E402
+    DEFAULT_GOLD_LABELS,
     GOLD_AMBIGUOUS_COL,
     GOLD_LABEL_COL,
     holdout_keys,
@@ -82,7 +83,8 @@ from src.evaluation.synthetic import (  # noqa: E402
 logger = logging.getLogger(__name__)
 _ROOT = Path(__file__).resolve().parents[1]
 
-DEFAULT_GOLD = _ROOT / "data" / "gold_labels" / "final_gold_labels_v1_2026_07_05.csv"
+# The gold file is defined once, in `src/evaluation/holdout.py`.
+DEFAULT_GOLD = DEFAULT_GOLD_LABELS
 DEFAULT_SYNTHETIC = _ROOT / "data" / "synthetic_data" / "synthetic_test_v3.csv"
 
 

@@ -1,15 +1,21 @@
 """The project's single evaluation holdout — one function, called by everyone.
 
 **Why this exists.** The Stage-4.25 gate and the Stage-4.5 ML matcher are both
-trained on `data/gold_labels/final_gold_labels_v1_2026_07_05.csv` — the same
-file we want to score the pipeline against. Roughly 80% of the gold pairs are
-training data for those stages, so scoring the end-to-end pipeline on all
-204,805 pairs reports a number that is substantially memorized.
+trained on the gold labels — the same file we want to score the pipeline
+against. Roughly 80% of the gold pairs are training data for those stages, so
+scoring the end-to-end pipeline on every pair reports a number that is
+substantially memorized.
 
 Both training notebooks and both evaluation CLIs call `holdout_mask` /
 `holdout_keys` here. There is exactly one definition of the split, so the two
-models are held out on **the same ~41k pairs**, and an evaluation restricted to
-them is leakage-free.
+models are held out on **the same ~20% of pairs**, and an evaluation restricted
+to them is leakage-free.
+
+Which file that is lives in `DEFAULT_GOLD_LABELS` below — currently the v2
+round. The split is defined by a hash of each pair's identity, not by row
+position, so re-pointing at a new labeling round keeps every pair on the side it
+was already on: a model trained under v1 is still held out on the v2 rows it
+never saw, and only genuinely new pairs get assigned fresh.
 
 HOW THE SPLIT IS DEFINED
 ------------------------
@@ -96,12 +102,15 @@ __all__ = [
 GOLD_LABEL_COL = "final_gold_label"
 GOLD_AMBIGUOUS_COL = "ambiguous_pair"
 
-#: The gold file every evaluation defaults to. VM-only PHI and gitignored, so
-#: this path exists only where the data lives — deliberately a constant rather
-#: than a `Settings` field, since it names one specific labeling round.
+#: **The single definition of "the gold file".** Every evaluation CLI, notebook
+#: and test resolves the default label set through this constant — import it,
+#: never re-spell the filename, so a new labeling round is a one-line change
+#: here instead of a hunt through `scripts/`. VM-only PHI and gitignored, so the
+#: path exists only where the data lives. Deliberately a constant rather than a
+#: `Settings` field, since it names one specific labeling round.
 DEFAULT_GOLD_LABELS = (
     Path(__file__).resolve().parents[2]
-    / "data" / "gold_labels" / "final_gold_labels_v1_2026_07_05.csv"
+    / "data" / "gold_labels" / "final_gold_labels_v2_2026_08_01.csv"
 )
 
 #: The split's definition. **Changing either value redefines which pairs are

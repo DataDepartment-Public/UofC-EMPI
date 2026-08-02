@@ -25,6 +25,7 @@ import pandas as pd
 import pytest
 
 from src.evaluation.holdout import (
+    DEFAULT_GOLD_LABELS,
     GOLD_AMBIGUOUS_COL,
     GOLD_LABEL_COL,
     HOLDOUT_FRACTION,
@@ -37,12 +38,13 @@ from src.evaluation.holdout import (
     verify_model_provenance,
 )
 
-_GOLD = (
-    Path(__file__).resolve().parents[3]
-    / "data" / "gold_labels" / "final_gold_labels_v1_2026_07_05.csv"
-)
+#: Resolved through the one constant, so a new labeling round needs no edit
+#: here. VM-only PHI — the tests below skip wherever the file is absent.
+_GOLD = DEFAULT_GOLD_LABELS
+#: The candidate pool the gold rounds adjudicate. Re-adjudication (v1 -> v2)
+#: changes labels, not which pairs are labeled, so this stays put; a genuinely
+#: re-blocked pool would move it.
 GOLD_ROWS = 204_805
-GOLD_PLAUSIBLE = 62_610
 
 
 def _fixture_gold(n: int = 20_000, seed: int = 0) -> pd.DataFrame:
@@ -177,9 +179,12 @@ def test_load_gold_preserves_leading_zeros(tmp_path):
 # ── the real file (VM only) ──────────────────────────────────────────────────
 @pytest.mark.skipif(not _GOLD.exists(), reason="gold labels are VM-only PHI")
 def test_real_gold_population_matches_the_notebooks():
+    """The pool is fixed across labeling rounds; the labels within it are not,
+    so assert the population and the schema, not a round's class counts."""
     gold = load_gold_labels(_GOLD)
     assert len(gold) == GOLD_ROWS
-    assert int((gold[GOLD_LABEL_COL] | gold[GOLD_AMBIGUOUS_COL]).sum()) == GOLD_PLAUSIBLE
+    plausible = int((gold[GOLD_LABEL_COL] | gold[GOLD_AMBIGUOUS_COL]).sum())
+    assert 0 < plausible < GOLD_ROWS
 
 
 @pytest.mark.skipif(not _GOLD.exists(), reason="gold labels are VM-only PHI")

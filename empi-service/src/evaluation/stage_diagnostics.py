@@ -121,7 +121,7 @@ ROUTE_COLUMNS: dict[str, str] = {
 #: Cleaned columns worth eyeballing when judging a misclassification. Order is
 #: strongest identifier first — how a reviewer actually reads a pair.
 ATTRIBUTE_COLUMNS: tuple[str, ...] = (
-    LAST_NM, FIRST_NM, BIRTH_DT, SSN, EMAIL, PHONES, ADDRESS1, ZIP_BASE, SEX,
+    FIRST_NM, LAST_NM,  BIRTH_DT, SSN, EMAIL, PHONES, ADDRESS1, ZIP_BASE, SEX,
     VALID_RECORD,
 )
 

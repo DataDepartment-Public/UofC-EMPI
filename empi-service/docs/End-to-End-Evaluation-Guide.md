@@ -433,21 +433,41 @@ asserts only confirmable links, so its `incomplete` is genuine recall failure.
 The gap between the two is the **cost of deferring to a reviewer**; §3.7 prints
 it. Quote the confident-only column.
 
-Both artifacts that distort this section inflate **`contaminated`**, not
-`incomplete`:
+**And against two views**, which is what makes the comparison fair. Both run the
+same union-find on both sides — `truth_clusters_from_pairs` is deliberately the
+same algorithm as `clustering.assign_clusters`. What differs is *which pairs each
+side closes over*:
 
-- **Holdout fragmentation.** Under `holdout='strict'` the truth groups are built
-  from ~20% of the pairs, so a real 3-record patient splits into `{R1,R2}` and
-  `{R3}` — and a run that correctly keeps all three together is scored as
-  carrying a foreign record. It cannot inflate `incomplete`: fewer truth edges
-  means smaller truth groups, which are *easier* to reproduce exactly.
-- **Label incompleteness.** A record whose true links were never labeled is a
-  truth singleton, so a correct merge reads as contamination. The difference
-  between the non-singleton and all-groups `contaminated` counts is entirely
-  truth singletons, and is the least trustworthy number in the section.
+| view | truth closes over | prediction closes over |
+|---|---|---|
+| **as shipped** | this report's labeled pairs | **every `auto_merge` edge in the whole corpus**, induced onto the labeled records afterwards |
+| **like-for-like** | this report's labeled pairs | the same labeled pairs, edge where the run chose to auto-merge |
 
-The cell prints the warning when it applies; prefer the `holdout='none'` report
-here, and the synthetic run for the number that has neither defect.
+`as shipped` is not a like-for-like comparison: the prediction can join two
+labeled records through a chain of records the label set has never heard of, and
+truth structurally cannot. That is a property of one side having more edges, not
+of the clustering, and it inflates `contaminated`. `like-for-like` removes it —
+same records, same candidate pairs, same algorithm, same opportunity to chain,
+differing only in who decided each pair. **Quote `like-for-like`.** §3.7 prints
+the gap between the two views, which is the contribution of records outside the
+label set.
+
+Two artifacts still distort the section, and both inflate **`contaminated`**,
+never `incomplete`:
+
+- **Holdout fragmentation** (`as shipped` only). Under `holdout='strict'` the
+  truth groups are built from ~20% of the pairs, so a real 3-record patient
+  splits into `{R1,R2}` and `{R3}` — and a run that correctly keeps all three
+  together is scored as carrying a foreign record. It cannot inflate
+  `incomplete`: fewer truth edges means smaller truth groups, which are *easier*
+  to reproduce exactly.
+- **Label incompleteness** (both views). A record whose true links were never
+  labeled is a truth singleton, so a correct merge reads as contamination. The
+  difference between the non-singleton and all-groups `contaminated` counts is
+  entirely truth singletons, and is the least trustworthy number in the section.
+
+Prefer the `holdout='none'` report here, and the synthetic run for the number
+that has neither defect.
 
 Every heatmap shades by **row share** rather than raw count — non-matches
 outnumber matches several to one, so a count-shaded grid is one dark corner and

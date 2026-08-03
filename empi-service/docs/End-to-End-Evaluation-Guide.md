@@ -424,11 +424,30 @@ patients the overall `exact_rate` is ~1.0 by construction and says nothing.
 foreign records carried — because one group short by a single record and one
 welded to three other patients are not the same failure.
 
-Its numbers inherit the §1 cluster-level caveats and one more: under
-`holdout='strict'` the truth clusters are built from ~20% of the pairs, so
-genuinely intact groups come out fragmented and `split` is inflated. The cell
-prints the warning when it applies; prefer the `holdout='none'` report here, and
-the synthetic run for the number that has neither defect.
+**Every table is computed against two truth definitions**, because ~99% of
+`ambiguous_pair` rows also carry `final_gold_label = True`. A truth partition
+built from `gold_match` therefore asserts links no human could confirm, and the
+pipeline's designed response — route them to a reviewer, do not merge — is
+counted as a missing record. `gold_confident` (match **and not** ambiguous)
+asserts only confirmable links, so its `incomplete` is genuine recall failure.
+The gap between the two is the **cost of deferring to a reviewer**; §3.7 prints
+it. Quote the confident-only column.
+
+Both artifacts that distort this section inflate **`contaminated`**, not
+`incomplete`:
+
+- **Holdout fragmentation.** Under `holdout='strict'` the truth groups are built
+  from ~20% of the pairs, so a real 3-record patient splits into `{R1,R2}` and
+  `{R3}` — and a run that correctly keeps all three together is scored as
+  carrying a foreign record. It cannot inflate `incomplete`: fewer truth edges
+  means smaller truth groups, which are *easier* to reproduce exactly.
+- **Label incompleteness.** A record whose true links were never labeled is a
+  truth singleton, so a correct merge reads as contamination. The difference
+  between the non-singleton and all-groups `contaminated` counts is entirely
+  truth singletons, and is the least trustworthy number in the section.
+
+The cell prints the warning when it applies; prefer the `holdout='none'` report
+here, and the synthetic run for the number that has neither defect.
 
 Every heatmap shades by **row share** rather than raw count — non-matches
 outnumber matches several to one, so a count-shaded grid is one dark corner and

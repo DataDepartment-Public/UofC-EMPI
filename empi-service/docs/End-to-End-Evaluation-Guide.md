@@ -406,73 +406,69 @@ routing matrix onward. That is where the pipeline has in fact left it, and
 folding it anywhere else would make blocking misses invisible.
 
 **§3.7 counts groups, not pairs.** Everything above scores *pairs*; §3.7 asks
-the question a reviewer asks — **of the patient groups we shipped, how many are
-right, and how are the wrong ones wrong?** It lifts the labels into truth
-clusters and reports `cluster_recovery`'s four-way split in that vocabulary:
+the question a reviewer asks — **of the patient groups we ship, how many are
+right, and how are the wrong ones wrong?** It reports `cluster_recovery`'s
+four-way split over multi-record patients, in that vocabulary:
 
 | §3.7 row | `cluster_recovery` key | meaning |
 |---|---|---|
 | correct | `exact` | the group is exactly this patient's records |
-| incomplete — records missing | `split` | under-merge: some of the patient's records landed elsewhere |
-| contaminated — foreign records | `merged` | over-merge: someone else's records are in the group |
+| incomplete — records missing | `split` | under-merge |
+| contaminated — foreign records merged in | `merged` | over-merge — **the false positives** |
 | both | `mixed` | missing some *and* carrying strangers |
 
-Read the **non-singleton** table. In a population that is mostly one-record
-patients the overall `exact_rate` is ~1.0 by construction and says nothing.
+Singletons are excluded: in a population that is mostly one-record patients the
+overall `exact_rate` is ~1.0 by construction and says nothing.
 
-§3.7 also reports *how far off* each wrong group is — records missing and
-foreign records carried — because one group short by a single record and one
-welded to three other patients are not the same failure.
+**Both sides are built the same way** — identical union-find
+(`truth_clusters_from_pairs`, deliberately the same algorithm as
+`clustering.assign_clusters`) over the identical pair set, this report's labeled
+pairs. Truth has an edge where the gold label says match; the pipeline has one
+where the run chose to auto-merge. Only the decision differs.
 
-**Every table is computed against two truth definitions**, because ~99% of
-`ambiguous_pair` rows also carry `final_gold_label = True`. A truth partition
-built from `gold_match` therefore asserts links no human could confirm, and the
-pipeline's designed response — route them to a reviewer, do not merge — is
-counted as a missing record. `gold_confident` (match **and not** ambiguous)
-asserts only confirmable links, so its `incomplete` is genuine recall failure.
-The gap between the two is the **cost of deferring to a reviewer**; §3.7 prints
-it. Quote the confident-only column.
+Two choices behind that, both of which change the answer by orders of magnitude:
 
-**And against two views**, which is what makes the comparison fair. Both run the
-same union-find on both sides — `truth_clusters_from_pairs` is deliberately the
-same algorithm as `clustering.assign_clusters`. What differs is *which pairs each
-side closes over*:
+- **`gold_confident`, not `gold_match`** (`TRUTH_COL` in the notebook). ~99% of
+  `ambiguous_pair` rows also carry `final_gold_label = True`, so a truth
+  partition built from `gold_match` asserts links no human could confirm and
+  charges the pipeline for correctly routing them to a reviewer — worth ~5,100
+  spurious `incomplete` groups on the first run scored this way.
+- **The same pair set on both sides.** The shipped `ClusterAssignments` closes
+  over every `auto_merge` edge in the *whole corpus*, so it can join two labeled
+  records through a record the label set has never heard of — something truth
+  structurally cannot do. Scoring against it inflated `contaminated` by ~450
+  groups, none demonstrably wrong. Holdout fragmentation compounds the same
+  effect. Neither artifact can inflate `incomplete`: fewer truth edges means
+  smaller truth groups, which are *easier* to reproduce exactly.
 
-| view | truth closes over | prediction closes over |
-|---|---|---|
-| **as shipped** | this report's labeled pairs | **every `auto_merge` edge in the whole corpus**, induced onto the labeled records afterwards |
-| **like-for-like** | this report's labeled pairs | the same labeled pairs, edge where the run chose to auto-merge |
+**The limit worth stating whenever the number is quoted:** this counts errors
+visible in the gold labels. A wrong merge between two records nobody ever
+labeled is not in it. Read `contaminated` as *"of the merges we can check"*; the
+synthetic set (declared `entity_id`) or human review of sampled clusters is what
+closes that gap.
 
-`as shipped` is not a like-for-like comparison: the prediction can join two
-labeled records through a chain of records the label set has never heard of, and
-truth structurally cannot. That is a property of one side having more edges, not
-of the clustering, and it inflates `contaminated`. `like-for-like` removes it —
-same records, same candidate pairs, same algorithm, same opportunity to chain,
-differing only in who decided each pair. **Quote `like-for-like`.** §3.7 prints
-the gap between the two views, which is the contribution of records outside the
-label set.
-
-Two artifacts still distort the section, and both inflate **`contaminated`**,
-never `incomplete`:
-
-- **Holdout fragmentation** (`as shipped` only). Under `holdout='strict'` the
-  truth groups are built from ~20% of the pairs, so a real 3-record patient
-  splits into `{R1,R2}` and `{R3}` — and a run that correctly keeps all three
-  together is scored as carrying a foreign record. It cannot inflate
-  `incomplete`: fewer truth edges means smaller truth groups, which are *easier*
-  to reproduce exactly.
-- **Label incompleteness** (both views). A record whose true links were never
-  labeled is a truth singleton, so a correct merge reads as contamination. The
-  difference between the non-singleton and all-groups `contaminated` counts is
-  entirely truth singletons, and is the least trustworthy number in the section.
-
-Prefer the `holdout='none'` report here, and the synthetic run for the number
-that has neither defect.
+A second cell breaks the wrong groups down by *how far off* they are — records
+missing and foreign records carried — because a group one record short and a
+group welded to three other patients are not the same failure.
 
 Every heatmap shades by **row share** rather than raw count — non-matches
 outnumber matches several to one, so a count-shaded grid is one dark corner and
 two invisible rows — while printing each cell's absolute count, because a rate
 without its denominator is not actionable.
+
+**§4 describes the population rather than scoring it.** Every number in §3 is
+against the *labeled* pairs, which are a sample; §4 reads the focused run's
+`RunManifest` and its `ClusterAssignments` and reports the whole corpus — records
+resolved, distinct patients identified, duplicate records absorbed and the
+resulting reduction, the group-size distribution, and the stage funnel. No labels
+are involved, so nothing there is an accuracy claim; they are descriptive counts
+of the shipped output, for a slide.
+
+One trap it avoids: `manifest.counts["clusters"]` is the **Stage-3 rules-only**
+figure (`stats["n_clusters"]` from the deterministic-rules stage), not the final
+patient count. §4 takes the patient count from the Stage-5 artifact instead and
+uses `counts` only for stage volumes. `total_clusters` is the trustworthy
+manifest field.
 
 ### `notebooks/evaluation/misclassified_pairs.ipynb` — the pairs
 

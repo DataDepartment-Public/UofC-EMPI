@@ -27,6 +27,12 @@ have different blind spots.
    exactly that (`n_contradicted` / `contradiction_rate`); when it is not near
    zero, trust (1) and treat (2) as directional.
 
+   `pair_confusion` is (2) reported in (1)'s shape — the familiar TP/FP/FN/TN,
+   but counted over every `C(n, 2)` pair in the universe instead of only the
+   labeled ones. It is the one view here in which an over-merge between two
+   never-adjudicated records is visible at all; read its docstring for what
+   that coverage costs.
+
 Both restrict themselves to a **universe** of PATIDs — normally the records
 that appear in the label set — and *induce* the predicted partition onto it
 (`induce`), since truth is undefined for records nobody labeled.
@@ -60,6 +66,7 @@ __all__ = [
     "truth_clusters_from_pairs",
     "ClosureDiagnostics",
     "bcubed",
+    "pair_confusion",
     "cluster_recovery",
     "size_distribution",
 ]
@@ -335,6 +342,57 @@ def bcubed(truth: Mapping[str, Hashable], pred: Mapping[str, Hashable]) -> dict:
         "n_records": n,
         "precision": round(prec, 4),
         "recall": round(rec, 4),
+        "f1": round(f1, 4) if f1 is not None else None,
+    }
+
+
+def pair_confusion(truth: Mapping[str, Hashable], pred: Mapping[str, Hashable]) -> dict:
+    """Pair-counting confusion over **every** pair of records both partitions cover.
+
+    The same four cells as `binary_metrics`, but the population is all
+    `C(n, 2)` record pairs in the universe rather than the pairs somebody
+    labeled. That difference is the whole point: `pairwise_against_clusters`
+    can only see labeled pairs, so a wrong merge between two records nobody
+    adjudicated is invisible to it — and transitive closure merges precisely
+    those. Here an over-merge shows up as `FP` whether or not it was labeled.
+
+    Computed from the contingency table, not by enumerating pairs: `TP` is
+    `sum C(n_ij, 2)` over cells, and the predicted/truth marginals give the
+    row and column totals. O(cells) instead of O(n^2), so a 30k-record
+    universe (~450M pairs) costs microseconds.
+
+    The cost of that coverage is that **`FP` now absorbs label
+    incompleteness**. Truth here is whatever partition the caller passes; when
+    it is the closure of a *sampled* pair-label set, a record whose true links
+    were never labeled is a truth singleton, and the pipeline correctly merging
+    it reads as a false positive. Precision is therefore a lower bound. Recall
+    is unaffected — every link truth asserts is a real one — so read recall as
+    an estimate and precision as a floor. With a declared truth partition (the
+    synthetic set's `entity_id`) neither caveat applies and both are exact.
+    """
+    joint, t_marg, p_marg, n = _contingency(truth, pred)
+
+    def n_choose_2(k: int) -> int:
+        return k * (k - 1) // 2
+
+    tp = sum(n_choose_2(c) for c in joint.values())
+    same_pred = sum(n_choose_2(c) for c in p_marg.values())
+    same_truth = sum(n_choose_2(c) for c in t_marg.values())
+    fp = same_pred - tp
+    fn = same_truth - tp
+    tn = n_choose_2(n) - tp - fp - fn
+
+    prec = tp / same_pred if same_pred else None
+    rec = tp / same_truth if same_truth else None
+    f1 = (2 * prec * rec / (prec + rec)) if (prec and rec) else None
+    return {
+        "n_records": n,
+        "n_pairs": n_choose_2(n),
+        "positives": same_truth,
+        "predicted_positive": same_pred,
+        "TP": tp, "FP": fp, "FN": fn, "TN": tn,
+        "precision": round(prec, 4) if prec is not None else None,
+        "recall": round(rec, 4) if rec is not None else None,
         "f1": round(f1, 4) if f1 is not None else None,
     }
 

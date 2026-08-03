@@ -482,52 +482,87 @@ def clean_birth_date(value, reference_date=None):
     return parsed
 
 
-def clean_ssn(value) -> Tuple[Optional[str], Optional[str]]:
-    """Clean an `SSN` value. Returns (clean_ssn, last_4_SSN)."""
-    if pd.isna(value):
-        return np.nan, np.nan
-
-    digits = re.sub(r'\D', '', str(value))
-
+def _validate_full_ssn(digits: str) -> Optional[str]:
+    """Return the canonical 9-digit SSN, or None if `digits` is not one."""
     if len(digits) in (7, 8):
         digits = digits.zfill(9)
 
     if len(digits) != 9:
-        return np.nan, np.nan
+        return None
 
     if len(set(digits)) == 1:
-        return np.nan, np.nan
+        return None
 
     if digits[:3] == digits[3:6] == digits[6:9]:
-        return np.nan, np.nan
+        return None
 
     area = digits[:3]
     if area == '000' or area == '666':
-        return np.nan, np.nan
+        return None
     if 900 <= int(area) <= 999:
-        return np.nan, np.nan
+        return None
     if digits[3:5] == '00':
-        return np.nan, np.nan
+        return None
     if digits[5:9] == '0000':
-        return np.nan, np.nan
+        return None
 
     if digits in JUNK_SSN_EXACT:
-        return np.nan, np.nan
+        return None
 
     # Low-entropy placeholders (e.g. 333333330) and full ascending/descending
     # digit runs (e.g. 012345678) pass every structural check above but are not
     # real identities — reject them before they create EXACT_SSN false-merges.
     if _is_placeholder_ssn(digits):
-        return np.nan, np.nan
+        return None
 
     # Final gate: stdnum's US SSN validator (known-bogus advertising SSNs,
     # invalid area/group/serial combinations the rules above don't enumerate).
     if not _us_ssn.is_valid(digits):
+        return None
+
+    return digits
+
+
+def _recover_partial_last4(digits: str) -> Optional[str]:
+    """Recover `last_4_SSN` from a value that stores *only* the last 4 digits.
+
+    Source systems that keep just the last four write them bare (`1234`) or
+    left-padded to some wider column (`01234`, `000001234`). Such a value can
+    never be a valid `SSN_clean` — it has no area/group digits — but its last
+    four are genuine, and they are the bulk of this field's coverage.
+
+    The test is that everything ahead of the final four digits is zeros (or
+    absent). That admits stored partials and nothing else: a malformed or junk
+    *full* SSN like 900112222 or 111223333 has informative leading digits, so
+    its trailing four are not a trustworthy last-4 and stay out of B9.
+    """
+    if len(digits) < 4:
+        return None
+    if digits[:-4].strip('0') != '':
+        return None
+    # A genuine SSN's serial (digits 6-9) is never 0000.
+    last_4 = digits[-4:]
+    return None if last_4 == '0000' else last_4
+
+
+def clean_ssn(value) -> Tuple[Optional[str], Optional[str]]:
+    """Clean an `SSN` value. Returns (clean_ssn, last_4_SSN).
+
+    The two outputs are independent: a stored partial yields a `last_4_SSN`
+    with no `SSN_clean`, so callers must not treat a populated last-4 as
+    evidence that the full SSN survived validation.
+    """
+    if pd.isna(value):
         return np.nan, np.nan
 
-    # Extract last 4 only from a fully validated SSN.
-    last_4 = digits[-4:]
-    return digits, last_4
+    digits = re.sub(r'\D', '', str(value))
+
+    full = _validate_full_ssn(digits)
+    if full is not None:
+        return full, full[-4:]
+
+    last_4 = _recover_partial_last4(digits)
+    return np.nan, np.nan if last_4 is None else last_4
 
 
 def clean_address_line1(value) -> Tuple[Optional[str], bool]:

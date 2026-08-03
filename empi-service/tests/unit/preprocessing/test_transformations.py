@@ -67,6 +67,37 @@ class TestCleanSSN:
         for junk in ("012345678", "123456789", "234567890", "987654321"):
             assert pd.isna(clean_ssn(junk)[0])
 
+    def test_recovers_last4_from_stored_partial(self):
+        # Sources that keep only the last 4 write them bare or left-padded to a
+        # wider column. None can be a valid SSN_clean, but the last 4 are real
+        # and are the bulk of last_4_SSN's coverage (B9 keys off it alone).
+        for partial in ("1234", "01234", "0001234", "000001234"):
+            clean, last4 = clean_ssn(partial)
+            assert pd.isna(clean), partial
+            assert last4 == "1234", partial
+
+    def test_recovery_preserves_leading_zero_in_last4(self):
+        clean, last4 = clean_ssn("0123")
+        assert pd.isna(clean)
+        assert last4 == "0123"
+
+    def test_recovery_rejects_informative_leading_digits(self):
+        # A malformed/junk *full* SSN is not a stored partial: its leading
+        # digits carry information, so its trailing 4 are not a trustworthy
+        # last-4 and must not seed a B9 block key.
+        for junk in ("900112222", "111223333", "123456789", "666123456"):
+            assert pd.isna(clean_ssn(junk)[1]), junk
+
+    def test_recovery_rejects_zero_serial(self):
+        # A real SSN's serial (digits 6-9) is never 0000.
+        for value in ("0000", "000000000", "00000000000"):
+            assert pd.isna(clean_ssn(value)[1]), value
+
+    def test_recovery_needs_four_digits(self):
+        for tooshort in ("123", "12", "0"):
+            clean, last4 = clean_ssn(tooshort)
+            assert pd.isna(clean) and pd.isna(last4), tooshort
+
 
 class TestCleanZip:
     def test_base_only(self):

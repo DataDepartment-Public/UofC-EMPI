@@ -129,7 +129,13 @@ Dependency: `pip install Unidecode`. Output is guaranteed ASCII, after which the
   - Serial number (digits 6–9) is `0000`
 - Nullify known exact junk values:
   - `010101010`, `090909090`, `000000001`, `999999998`, `111223333`, `219099999`, `457555462`, `333333330`, `003333333`, `333333300`, `033333333`, `333333339`, `099999999`, `333333000`
-- Extract in a new field `last_4_SSN` the last 4 digits of the cleaned SSN (only for values that survive all the junk/validity rules above; `NaN` otherwise)
+- Extract in a new field `last_4_SSN` the last 4 digits of the cleaned SSN (for values that survive all the junk/validity rules above)
+- **Partial-SSN recovery for `last_4_SSN`.** Some source systems store only the last 4 digits of the SSN, either bare (`1234`) or left-padded (`01234`, `000001234`). Such a value can never become a valid `SSN_clean` — it has no area/group digits — but its last 4 are genuine and are the field's main coverage win. When a value fails full-SSN validation above, still populate `last_4_SSN` if **every digit before the final four is a zero, or there are none**:
+  - Recovered: `1234`, `01234`, `0001234`, `000001234` → `1234`
+  - Not recovered: `900112222`, `111223333`, `123456789` — the leading digits carry information, so the value is a malformed or junk *full* SSN, not a stored partial, and its last 4 are not trustworthy
+  - Values shorter than 4 digits yield `NaN` (no last-4 to recover)
+  - `0000` is never emitted — a real SSN's serial (digits 6–9) is never `0000`
+  - `SSN_clean` stays `NaN` in every recovery case. `last_4_SSN` being populated does **not** imply `SSN_clean` is populated
 
 ---
 

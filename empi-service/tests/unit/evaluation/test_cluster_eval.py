@@ -12,7 +12,6 @@ from src.evaluation.cluster_eval import (
     cluster_map,
     cluster_recovery,
     induce,
-    pair_confusion,
     pair_keys,
     pairwise_against_clusters,
     predict_same_cluster,
@@ -143,65 +142,6 @@ def test_bcubed_ignores_records_the_prediction_does_not_cover():
     truth = {"a": 0, "b": 0, "c": 1}
     m = bcubed(truth, {"a": 0, "b": 0})
     assert m["n_records"] == 2
-
-
-# ── pair-counting confusion ──────────────────────────────────────────────────
-def test_pair_confusion_perfect_partition():
-    truth = pred = {"a": 0, "b": 0, "c": 1}
-    m = pair_confusion(truth, pred)
-    # 3 records -> 3 pairs; only (a, b) is a positive in either partition.
-    assert (m["n_pairs"], m["TP"], m["FP"], m["FN"], m["TN"]) == (3, 1, 0, 0, 2)
-    assert m["precision"] == 1.0 and m["recall"] == 1.0
-
-
-def test_pair_confusion_counts_an_over_merge_as_fp():
-    truth = {"a": 0, "b": 0, "c": 1}
-    pred = {"a": 0, "b": 0, "c": 0}  # c wrongly pulled in
-    m = pair_confusion(truth, pred)
-    assert (m["TP"], m["FP"], m["FN"]) == (1, 2, 0)  # (a,c) and (b,c) are wrong
-    assert m["precision"] == pytest.approx(1 / 3, abs=1e-4)
-    assert m["recall"] == 1.0
-
-
-def test_pair_confusion_counts_an_under_merge_as_fn():
-    truth = {"a": 0, "b": 0, "c": 1}
-    pred = {"a": 0, "b": 1, "c": 2}  # all singletons
-    m = pair_confusion(truth, pred)
-    assert (m["TP"], m["FP"], m["FN"]) == (0, 0, 1)
-    assert m["recall"] == 0.0
-
-
-def test_pair_confusion_sees_an_unlabeled_over_merge_that_pairwise_misses():
-    """The reason this function exists.
-
-    Truth says a~b and c~d; the run welds all four into one cluster. Only the
-    two positive pairs were ever labeled, so `pairwise_against_clusters` scores
-    a perfect 2/2 and reports no error at all — the four cross pairs it never
-    saw are exactly the over-merge.
-    """
-    labeled = _labeled([("a", "b", True), ("c", "d", True)])
-    truth, _ = truth_clusters_from_pairs(labeled, "label")
-    pred = {"a": 0, "b": 0, "c": 0, "d": 0}
-
-    restricted = pairwise_against_clusters(labeled, pred, "label")
-    assert restricted["FP"] == 0 and restricted["precision"] == 1.0
-
-    m = pair_confusion(truth, pred)
-    assert (m["TP"], m["FP"]) == (2, 4)
-    assert m["precision"] == pytest.approx(1 / 3, abs=1e-4)
-
-
-def test_pair_confusion_ignores_records_the_prediction_does_not_cover():
-    truth = {"a": 0, "b": 0, "c": 1}
-    m = pair_confusion(truth, {"a": 0, "b": 0})
-    assert m["n_records"] == 2 and m["n_pairs"] == 1
-
-
-def test_pair_confusion_cells_sum_to_every_pair_in_the_universe():
-    truth = {"a": 0, "b": 0, "c": 1, "d": 1, "e": 2}
-    pred = {"a": 0, "b": 0, "c": 0, "d": 1, "e": 1}
-    m = pair_confusion(truth, pred)
-    assert m["TP"] + m["FP"] + m["FN"] + m["TN"] == m["n_pairs"] == 10
 
 
 # ── cluster recovery ─────────────────────────────────────────────────────────

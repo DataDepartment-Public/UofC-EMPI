@@ -60,19 +60,6 @@ Both restrict to a universe of PATIDs (the records appearing in the labels) and
 *induce* the predicted partition onto it — truth is undefined for records nobody
 labeled.
 
-`cluster_eval.pair_confusion` reports this view in the *restricted pairwise*
-shape — the familiar TP/FP/FN/TN — but counted over **every `C(n, 2)` pair in
-the universe** rather than only the labeled ones, computed from the contingency
-table so a 30k-record universe costs microseconds rather than 450M comparisons.
-It is the only view in this project in which an over-merge between two
-never-adjudicated records is visible at all, which matters because transitive
-closure merges precisely those pairs. The cost of that coverage: **`FP` absorbs
-label incompleteness.** Gold is a *sample* of pairs, so a record whose true links
-were never labeled is a truth singleton and the pipeline correctly merging it
-reads as a false positive. Read its precision as a **floor** and its recall as an
-estimate — recall is unaffected, since every link the truth asserts is real.
-Against a declared truth partition (synthetic `entity_id`) both are exact.
-
 ### Three-class triage — the fair recall view
 
 Both views above are **binary**: merged or not. That scores an *ambiguous* pair
@@ -402,7 +389,7 @@ classification report:
 | 3.4 | Stage-4.5 matcher | auto-merged? vs. **confident match** | cumulative |
 | 3.5 | clustering | same cluster? vs. the match label | the shipped decision |
 | 3.6 | — | stage flow + loss attribution, from the stored report | — |
-| 3.7 | clustering | same cluster? vs. a truth **partition** | — |
+| 3.7 | clustering | **cluster**-level: how many groups came out right | — |
 
 **The two views answer different questions.** The two-class view scores a
 stage's own decision, on the pool it actually saw, against the target it was
@@ -418,17 +405,30 @@ A pair blocking never emitted sits in the `no_match` column from the first
 routing matrix onward. That is where the pipeline has in fact left it, and
 folding it anywhere else would make blocking misses invisible.
 
-**§3.5 vs. §3.7 — the same stage against two definitions of truth.** §3.5 scores
-each labeled pair against its own label, which charges the pipeline for a
-*correct* transitive merge: the label records what a human could tell from that
-pair in isolation, so a pair merged through a chain the labeler never saw reads
-as an error. §3.7 lifts the labels into a partition, which credits that merge —
-and, via `pair_confusion`, also exposes over-merges among pairs nobody labeled,
-which §3.5 cannot see. Neither is "the" answer: §3.5 understates over-merge
-because it is blind to unlabeled pairs, §3.7 overstates it because the closure
-inherits label incompleteness and (under `holdout='strict'`) fragmentation. Quote
-them together, and prefer the synthetic run for the number that has neither
-defect. §3.7 prints the caveat that applies to the report in focus.
+**§3.7 counts groups, not pairs.** Everything above scores *pairs*; §3.7 asks
+the question a reviewer asks — **of the patient groups we shipped, how many are
+right, and how are the wrong ones wrong?** It lifts the labels into truth
+clusters and reports `cluster_recovery`'s four-way split in that vocabulary:
+
+| §3.7 row | `cluster_recovery` key | meaning |
+|---|---|---|
+| correct | `exact` | the group is exactly this patient's records |
+| incomplete — records missing | `split` | under-merge: some of the patient's records landed elsewhere |
+| contaminated — foreign records | `merged` | over-merge: someone else's records are in the group |
+| both | `mixed` | missing some *and* carrying strangers |
+
+Read the **non-singleton** table. In a population that is mostly one-record
+patients the overall `exact_rate` is ~1.0 by construction and says nothing.
+
+§3.7 also reports *how far off* each wrong group is — records missing and
+foreign records carried — because one group short by a single record and one
+welded to three other patients are not the same failure.
+
+Its numbers inherit the §1 cluster-level caveats and one more: under
+`holdout='strict'` the truth clusters are built from ~20% of the pairs, so
+genuinely intact groups come out fragmented and `split` is inflated. The cell
+prints the warning when it applies; prefer the `holdout='none'` report here, and
+the synthetic run for the number that has neither defect.
 
 Every heatmap shades by **row share** rather than raw count — non-matches
 outnumber matches several to one, so a count-shaded grid is one dark corner and

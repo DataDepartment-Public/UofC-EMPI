@@ -54,7 +54,7 @@ _SCHEMAS: dict[str, list[str]] = {
     "record_raw": ["patid", "raw_json", "run_id"],
     "audit_log": [
         "id", "ts_utc", "user", "action", "patids", "mid",
-        "prev_state", "next_state", "run_id",
+        "prev_state", "next_state", "run_id", "prev_mid", "undo_of",
     ],
 }
 
@@ -100,9 +100,17 @@ class ParquetIndexBackend:
 
     def _load(self, name: str) -> pd.DataFrame:
         path = self._path(name)
-        if path.exists():
-            return pd.read_parquet(path)
-        return pd.DataFrame(columns=_SCHEMAS[name])
+        if not path.exists():
+            return pd.DataFrame(columns=_SCHEMAS[name])
+        df = pd.read_parquet(path)
+        # A column added to `_SCHEMAS[name]` after this file was last written
+        # (e.g. `audit_log.prev_mid`/`undo_of`) won't exist on disk yet —
+        # backfill it as all-missing rather than KeyError on first access,
+        # mirroring `sql_backend._ensure_columns`'s ALTER TABLE migration.
+        for col in _SCHEMAS[name]:
+            if col not in df.columns:
+                df[col] = None
+        return df
 
     # ── Transaction lifecycle ────────────────────────────────────────────────
     def begin(self) -> None:
@@ -448,6 +456,20 @@ class ParquetIndexBackend:
         hit = df.loc[df["patid"] == patid, "raw_json"]
         return None if hit.empty else str(hit.iloc[0])
 
+    def _deduped_review_candidates(self) -> pd.DataFrame:
+        """A pair can exist under more than one `run_id` — nothing deletes
+        an OLDER run's `review_candidate` rows for a pair that's still
+        unresolved when a later publish writes a fresh row for it (only
+        `replace_review_candidates_for_run` clears rows for its OWN run_id
+        first). Keep just the most-recently-created row per `(patid_a,
+        patid_b)` so a pair is never listed twice — mirrors
+        `sql_backend._DEDUPED_REVIEW_CANDIDATE`."""
+        rc = self._tables["review_candidate"]
+        return (
+            rc.sort_values("created_utc", ascending=False)
+            .drop_duplicates(subset=["patid_a", "patid_b"], keep="first")
+        )
+
     def review_candidates_for_patid(self, patid: str) -> list[dict]:
         """Pandas equivalent of `sql_backend.review_candidates_for_patid` — joins
         `record_attrs` on both sides of the pair so the UI has the other
@@ -455,7 +477,7 @@ class ParquetIndexBackend:
         (nulls last, pandas' default); `review_candidate` has no surrogate
         `id` column in Parquet mode (see its schema note), so `patid_a`/
         `patid_b` substitute as the deterministic tiebreak SQL gets from `id`."""
-        rc = self._tables["review_candidate"]
+        rc = self._deduped_review_candidates()
         hits = rc[(rc["patid_a"] == patid) | (rc["patid_b"] == patid)]
         attrs = self._tables["record_attrs"][_DISPLAY_ATTR_COLUMNS]
         a_attrs = attrs.add_prefix("a_").rename(columns={"a_patid": "patid_a"})
@@ -481,7 +503,7 @@ class ParquetIndexBackend:
         (one row per pair, not per cluster). "Reviewed" mirrors the SQL
         version: both sides sharing a `mid` today (merged), or a prior
         `dismiss` audit_log entry for the exact pair."""
-        rc = self._tables["review_candidate"]
+        rc = self._deduped_review_candidates()
         members = self._tables["entity_member"][["patid", "mid"]]
         attrs = self._tables["record_attrs"][_DISPLAY_ATTR_COLUMNS]
 
@@ -549,6 +571,8 @@ class ParquetIndexBackend:
         prev_state: str,
         next_state: str,
         run_id: str | None,
+        prev_mid: str | None = None,
+        undo_of: int | None = None,
     ) -> int:
         """Append-only insert. `id` is a synthetic auto-increment (scan
         existing max + 1) — same convention as `next_mid()` — since Parquet
@@ -559,16 +583,40 @@ class ParquetIndexBackend:
             "id": next_id, "ts_utc": ts_utc, "user": user, "action": action,
             "patids": patids, "mid": mid, "prev_state": prev_state,
             "next_state": next_state, "run_id": run_id,
+            "prev_mid": prev_mid, "undo_of": undo_of,
         }], columns=_SCHEMAS["audit_log"])
         self._tables["audit_log"] = pd.concat([df, new], ignore_index=True)
         return next_id
+
+    def _undone_ids(self) -> set[int]:
+        """Every audit_log id some other row's `undo_of` points at — `undone`
+        is derived, never stored (see `get_audit_log_row`)."""
+        undo_of = self._tables["audit_log"]["undo_of"].dropna()
+        return {int(v) for v in undo_of}
 
     def list_audit_log(self, *, limit: int = 100, since: str | None = None) -> list[dict]:
         df = self._tables["audit_log"]
         if since:
             df = df[df["ts_utc"] > since]
         df = df.sort_values("id", ascending=False).head(limit)
-        return [_row_to_dict(row) for _, row in df.iterrows()]
+        undone_ids = self._undone_ids()
+        rows = []
+        for _, row in df.iterrows():
+            d = _row_to_dict(row)
+            d["undone"] = int(d["id"]) in undone_ids
+            rows.append(d)
+        return rows
+
+    def get_audit_log_row(self, audit_id: int) -> dict | None:
+        """One audit_log row plus its derived `undone` flag — the reversal
+        target of `POST /audit/{audit_id}/undo` (`src/api/routers/audit.py`)."""
+        df = self._tables["audit_log"]
+        hit = df[df["id"] == audit_id]
+        if hit.empty:
+            return None
+        row = _row_to_dict(hit.iloc[0])
+        row["undone"] = audit_id in self._undone_ids()
+        return row
 
 
 __all__ = ["ParquetIndexBackend"]

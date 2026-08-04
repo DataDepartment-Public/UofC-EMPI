@@ -15,15 +15,16 @@ individual model decisions.
 
 ## Information architecture
 
-The application is a single-page app with **three top-level tabs**. Switching
-tabs never reloads or leaves the application. The **Model Explanation** view
-is a sub-page reached by clicking a match inside the Dataset tab — not a
+The application is a single-page app with **four top-level tabs** — three
+reviewer-workflow tabs plus an operator-facing Admin tab. Switching tabs
+never reloads or leaves the application. The **Model Explanation** view is a
+sub-page reached by clicking a match inside the Patient Registry tab — not a
 top-level tab.
 
 ```
 ┌─ Top nav: [AllianceChicago logo] [company name]  "Entity Matching Dashboard" ─┐
 │                                                                               │
-│   [ Dashboard ]   [ Review Queue ]   [ Patient Registry ]                     │
+│   [ Dashboard ]   [ Review Queue ]   [ Patient Registry ]   [ Admin ]         │
 └───────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       └─ click a match ─▶ Model Explanation (sub-page)
@@ -34,7 +35,8 @@ top-level tab.
 | **Dashboard** (tab) | KPIs, summary metric cards, and visual charts **only** — no interactive workflows |
 | **Review Queue** (tab) | Candidate-grain triage of pending review pairs only — two-panel layout (queue left, dynamic explanation right); see §5 |
 | **Patient Registry** (tab, `/dataset` route) | The final, resolved patient list **only** — one row per distinct patient, no in-progress candidates; see §3 |
-| **Model Explanation** (sub-page) | Per-pair "why was this a match?" detail; reached from a Patient Registry row, returns to it |
+| **Admin** (tab, `/admin` route) | Live ML decision-threshold tuning — operator configuration, not a reviewer workflow; see §7 |
+| **Model Explanation** (sub-page) | Per-pair "why was this a match?" detail; reached from a Patient Registry row, returns to the reviewer's prior Patient Registry view (search/filter/page), not necessarily that one row |
 
 Patient Registry and Review Queue split the old single Dataset tab's two
 concerns cleanly: Review Queue is where a reviewer decides on a pending
@@ -50,7 +52,7 @@ up as a resolved entry in Patient Registry.
 | ID | Requirement |
 |----|-------------|
 | FR-1 | Top navigation bar displays the AllianceChicago logo, company name, and the title **"Entity Matching Dashboard"**. |
-| FR-2 | Three main tabs, in order: **Dashboard**, **Review Queue**, **Patient Registry**. |
+| FR-2 | Four tabs, in order: **Dashboard**, **Review Queue**, **Patient Registry**, **Admin** (§7 — operator configuration, not a reviewer workflow). |
 | FR-3 | Users can switch between tabs without leaving the application (no full reload). |
 
 ---
@@ -79,7 +81,7 @@ lives on the Patient Registry tab (§3).
 |----|-------------|
 | FR-11 | Bar chart of patient counts across **Auto-match**, **Needs review**, **No match**. |
 | FR-12 | Dynamically update the match-status chart based on the active dataset or selected filters. |
-| FR-13 | Color-code categories — Auto-match: **green**, Needs review: **yellow/orange**, No match: **red**. |
+| FR-13 | Color-code categories — Auto-match: **green**, Needs review: **teal**, No match: **cyan**. Blues/greens only for these non-interactive status indicators; the four reviewer action buttons (Merge, Undo, Unmerge, Not a match) and system-error messages keep the original gold/red so they still read as actionable/alerting against the calmer status palette. |
 | FR-14 | Display model performance metrics over time. **Limited to label-free metrics — auto-match rate and review rate.** Precision/recall are out of scope (no ground-truth labels available to compute them). |
 | FR-15 | Visualize the auto-match-rate and review-rate trend as a line/bar chart with a metric-card group. |
 | FR-16 | Show the model version or training run used to generate the current match results. |
@@ -126,23 +128,27 @@ wrong.
 |----|-------------|
 | FR-30 | Record every manual or automatic merge action in an immutable audit log. |
 | FR-31 | Each audit entry tracks: User ID, timestamp, patient IDs merged, previous & new match status, final master patient ID. |
+| FR-52 | A merge or unmerge entry that hasn't already been reversed shows an **Undo** action; a reversed entry shows "Undone" instead. Undoing a merge unmerges every affected patid back out into its own standalone record; undoing an unmerge re-merges the patid into the mid it was split from. Undo is itself a new `merge`/`unmerge` audit-log entry (`undo_of` pointing at the entry it reverses) — the trail is append-only, nothing is deleted or rewritten. |
+| FR-53 | Audit entries are never deleted, including reversed ones — undoing an action adds a new row rather than removing the original. |
 
 ---
 
 ## 4. Model Explanation (sub-page)
 
-Reached by clicking a match inside a Dataset dropdown; returns to the originating
-row in the Dataset tab.
+Reached by clicking a match inside a Patient Registry row's expanded dropdown;
+back-navigation (FR-38) restores the reviewer's prior Patient Registry view
+rather than returning to that specific row.
 
 | ID | Requirement |
 |----|-------------|
 | FR-32 | Each patient-match item inside the dataset dropdown is clickable. |
 | FR-33 | Clicking a match navigates to the **Model Explanation** page for that specific decision. |
-| FR-34 | The page shows: patient IDs compared (de-emphasized, secondary line), overall match probability and final predicted class, match threshold and model version used, prediction date/time, and a Fellegi waterfall graph (if feasible). |
+| FR-34 | The page shows: patient IDs compared (de-emphasized, secondary line), the deterministic rule fired (if any) and its fixed confidence, the model/git version, and — when the pair was scored by the ML pipeline — a SHAP waterfall (FR-36/37a) from `GET /explanations/{model}/{patid_a}/{patid_b}`. A pair resolved purely by a deterministic rule (never reaching the gate/ML matcher) shows that rule as its explanation instead of a fabricated score. |
 | FR-35 | ~~Display a human-readable explanation of why the pair/cluster was predicted a match.~~ **Removed** — the "Plain-language summary" card was dropped per reviewer feedback: it restated the structured feature-comparison table (FR-37) in prose without adding information, and added visual clutter to the page reviewers scan quickly. |
 | FR-36 | Feature-level evaluations explicitly indicate which traits **increased** vs. **decreased** match probability. |
-| FR-37 | Show how the score was calculated via a structured per-feature comparison table (feature, Patient A, Patient B, result). |
-| FR-38 | Provide back-navigation from the Model Explanation page to the selected cluster in the Dataset tab. |
+| FR-37 | Show how the score was calculated via a structured per-feature comparison table (feature, Patient A, Patient B, result) — deterministic-rule fields, always shown. |
+| FR-37a | When the pair was scored by the non-match gate or ML matcher, additionally show an exact TreeSHAP waterfall (`ShapWaterfall.tsx`) of that model's feature contributions in log-odds, with the model's decision threshold marked — real, persisted per-run explanation data, never recomputed on the fly (see `empi-service/docs/Explanations-Guide.md`). |
+| FR-38 | Back-navigation from the Model Explanation page uses browser history (`router.back()`), returning the reviewer to their exact prior Patient Registry state (search, filters, page) rather than a fresh view re-filtered to the one pair they came from. |
 
 **Example feature-comparison table (FR-37):**
 
@@ -173,11 +179,11 @@ could work through top to bottom.
 | FR-44 | Left panel shows, per row: both patients' names, birthdate, masked SSN, match-confidence badge, rule tag (or "Blocking only — no rule" if unconfirmed), and a "+N in cluster" indicator when either side already belongs to a multi-member cluster. |
 | FR-45 | Left panel supports: a **Needs review** / **Already reviewed** toggle, a confidence-range filter, and a name/DOB search. Default sort is confidence descending, with unconfirmed (no-rule) candidates sorted last. |
 | FR-46 | A candidate counts as "reviewed" once it is either merged (both sides now share a master record) or explicitly dismissed (FR-49). |
-| FR-47 | Right panel shows: both patients' names and de-emphasized IDs, a confidence/rule/predicted-class/cluster-context summary, a **pipeline trail** (FR-48), the full field-by-field feature comparison (§4's FR-37 table), and the FS matcher signal card (§4 scope note). |
-| FR-48 | The pipeline trail shows the value's path through the pipeline: Raw → Cleaned → Deterministic rule → FS matcher signal → ML model. The first four stages show real data; the ML/GBT stage is a labeled "not yet in production" placeholder — no fabricated score, since no such model is deployed (see `empi-service/docs/FS-Matcher-Production-Guide.md`). |
+| FR-47 | Right panel shows: both patients' names and de-emphasized IDs, a confidence/rule/predicted-class/cluster-context summary, a **pipeline trail** (FR-48), and the full field-by-field feature comparison (§4's FR-37 table). |
+| FR-48 | The pipeline trail shows the value's path through the pipeline: Raw → Cleaned → Deterministic rule → ML signal (labeled **Non-match gate** or **ML matcher**, whichever actually scored the pair). All four stages show real data. The ML signal stage reads `GET /explanations/{model}/{patid_a}/{patid_b}` and shows the model's score, tier, and run id; a pair the deterministic rules resolved without reaching either model (or that the gate dropped before the ML matcher saw it) shows an honest "Not scored by the ML pipeline" state — never a fabricated score. The Fellegi-Sunter/Splink matcher (Stage 4 in the backend pipeline) is intentionally not part of this trail — it remains an audit-only candidate/feature generator kept in the backend for lineage, not a reviewer-facing decision signal (see `empi-service/docs/FS-Matcher-Production-Guide.md`). |
 | FR-49 | A **"Not a match"** action lets a reviewer explicitly dismiss a candidate as a false positive. Recorded as an audit-log entry (`action=dismiss`); the candidate moves to "Already reviewed" and does not reappear in the default queue. |
 | FR-50 | A **"Search manually for a different record"** action lets a reviewer propose a match blocking never surfaced as a candidate, sharing the same search/compare/merge flow as FR-27. |
-| FR-51 | SSN fields support a reveal-in-place toggle, sourced from the same raw-record data the "View raw data" drawer already fetches — no separate PII exposure surface. |
+| FR-51 | SSN fields support a reveal-in-place toggle, sourced from the same raw-record data the "View raw data" drawer already fetches — no separate PII exposure surface. Every fetch of that raw/unmasked data (from either affordance) is written to the backend audit log (`action=view_raw`) for PHI-access accountability; it's a compliance record, not a reviewer decision, so it's excluded from the Merge audit log table above (§3.3) and only queryable directly against the database. |
 
 ## 6. System Update & Sync Behavior
 
@@ -189,10 +195,21 @@ could work through top to bottom.
 
 ---
 
+## 7. Admin (tab)
+
+Operator configuration, not a reviewer workflow — no audit-log entry is written for a threshold change (§3.3's audit log is reviewer decisions on patient data; this is pipeline tuning). Explicitly built with **no authentication**; access control for this tab is out of scope for the dashboard build and is expected to be handled by whoever operationalizes the deployment.
+
+| ID | Requirement |
+|----|-------------|
+| FR-54 | Show the three live ML decision thresholds — gate threshold, ML auto-merge threshold, ML review floor — with their current values and a one-line description of what each controls. |
+| FR-55 | Let an operator edit and save all three thresholds; saving applies immediately to the running backend and persists across a restart (`empi-service/data/config/thresholds.json`), but only affects scoring done after the change — it never rewrites tiers a prior run already published. |
+| FR-56 | Show a success or error toast on save. |
+
+---
+
 ## Open items (REVIEW)
 
 - **FR-10** — confirm the auto-match-rate denominator (total candidate matches vs. total records).
 - **FR-14 / FR-15** — performance trend is limited to **auto-match rate** and **review rate** (both derivable from classification counts alone). Precision/recall are excluded because no ground-truth labels exist to compute them; revisit if gold labels become available. See [Deterministic-Rules-Guide.md](../../empi-service/docs/Deterministic-Rules-Guide.md).
-- **FR-30 / FR-31** — confirm audit-log retention, immutability guarantees, and access policy.
-- **FR-34** — the Fellegi-Sunter/Splink matcher is built and in production (Stage 4, `empi-service/docs/FS-Matcher-Production-Guide.md`), but deliberately runs as an audit-only candidate/feature generator for a future GBT, not as a scored decision on any reviewed pair — so the waterfall graph this FR describes has no real data to show yet. The Model Explanation page and the Review Queue's pipeline trail (FR-48) now do surface the FS match probability/tier where it exists (candidates scored via incremental scoring; null for full-batch-published candidates), always labeled "audit-only — does not decide matches," never presented as the page's predicted class.
-- **FR-48's ML/GBT stage** — genuinely not in production; the pipeline trail renders it as a placeholder only. Revisit once a GBT model is trained and deployed downstream of the FS matcher.
+- **FR-30 / FR-31 / FR-52 / FR-53** — confirm audit-log retention, immutability guarantees, and access policy (including for the newer `view_raw` PHI-access entries, FR-51).
+- **FR-54–56 (Admin tab)** — no authentication yet, by design for this build; must be gated before any non-local deployment. See the dashboard's `docs/Application-Architecture.md` §"Identity / auth" and `empi-service/src/api/routers/admin.py`'s own docstring.

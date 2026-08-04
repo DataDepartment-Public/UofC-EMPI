@@ -10,10 +10,16 @@
   --brand-green: #7dad5f;
   --brand-lime: #b7d433;
 
-  /* FR-13: fixed match-status color coding */
+  /* FR-13: fixed match-status color coding. --status-review/--status-nomatch
+     stay gold/red — they're what action buttons (Undo, Unmerge, Not a match)
+     use. Non-button status DISPLAY (badges, charts, table indicators) uses
+     the *-display blue/green variants below instead, so the same semantic
+     tier never renders two different colors depending on context. */
   --status-auto: #5bae5b;
   --status-review: #ed9f21;
   --status-nomatch: #d9534f;
+  --status-review-display: #00b5b3;
+  --status-nomatch-display: #06aad6;
 
   --ink: #2f3437;
   --ink-2: #424242;
@@ -39,6 +45,8 @@
   --color-status-auto: var(--status-auto);
   --color-status-review: var(--status-review);
   --color-status-nomatch: var(--status-nomatch);
+  --color-status-review-display: var(--status-review-display);
+  --color-status-nomatch-display: var(--status-nomatch-display);
 
   --color-ink: var(--ink);
   --color-ink-2: var(--ink-2);

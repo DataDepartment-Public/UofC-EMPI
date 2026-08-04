@@ -13,6 +13,8 @@ import {
   Entity,
   EntitySchema,
   MergeResponseSchema,
+  PairExplanation,
+  PairExplanationSchema,
   RawRecord,
   RawRecordSchema,
   RecordsPage,
@@ -25,6 +27,10 @@ import {
   RunDetailSchema,
   RunSummary,
   RunSummarySchema,
+  ThresholdSettings,
+  ThresholdSettingsSchema,
+  UndoResponse,
+  UndoResponseSchema,
   UnmergeResponseSchema,
 } from "./schemas";
 
@@ -43,6 +49,28 @@ async function call<T>(
   init?: RequestInit,
 ): Promise<T> {
   const res = await fetch(path, init);
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail =
+      body && typeof body === "object" && "detail" in body
+        ? String((body as { detail: unknown }).detail)
+        : res.statusText;
+    throw new ApiError(res.status, detail);
+  }
+  return schema.parse(body);
+}
+
+/** Like `call`, but a 404 means "not scored by this model" — a normal,
+ * expected outcome (a purely deterministic-rule pair, or one the gate
+ * dropped before it reached `ml_matcher`) — not an error, so it resolves to
+ * `null` instead of throwing. */
+async function callOr404Null<T>(
+  schema: z.ZodType<T>,
+  path: string,
+  init?: RequestInit,
+): Promise<T | null> {
+  const res = await fetch(path, init);
+  if (res.status === 404) return null;
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     const detail =
@@ -154,6 +182,36 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ patid_a: patidA, patid_b: patidB }),
     }),
+
+  undoAudit: (auditId: number) =>
+    call<UndoResponse>(
+      UndoResponseSchema,
+      `/api/audit/${encodeURIComponent(auditId)}/undo`,
+      { method: "POST" },
+    ),
+
+  getThresholds: () =>
+    call<ThresholdSettings>(ThresholdSettingsSchema, "/api/admin/thresholds"),
+
+  updateThresholds: (values: ThresholdSettings) =>
+    call<ThresholdSettings>(ThresholdSettingsSchema, "/api/admin/thresholds", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(values),
+    }),
+
+  getExplanation: (
+    model: "nonmatch_gate" | "ml_matcher",
+    patidA: string,
+    patidB: string,
+    runId?: string,
+  ) =>
+    callOr404Null<PairExplanation>(
+      PairExplanationSchema,
+      `/api/explanations/${model}/${encodeURIComponent(patidA)}/${encodeURIComponent(patidB)}${
+        runId ? `?run_id=${encodeURIComponent(runId)}` : ""
+      }`,
+    ),
 };
 
 export { ApiError };

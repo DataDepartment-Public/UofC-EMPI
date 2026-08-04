@@ -89,4 +89,21 @@ def get_reviewer_id(
     return x_reviewer_id
 
 
-__all__ = ["get_settings", "get_db", "get_backend", "get_reviewer_id"]
+def get_reviewer_id_optional(
+    x_reviewer_id: str | None = Header(default=None, alias="X-Reviewer-Id"),
+) -> str:
+    """Same trusted header as `get_reviewer_id`, but for read routes that log
+    who accessed sensitive data without gating access on it being present
+    (e.g. `GET /records/{patid}/raw` — see `records.py`). Callers that omit
+    the header (anything not going through the BFF's reviewer-tagged
+    requests) are recorded as `"unknown"` rather than rejected."""
+    return x_reviewer_id or "unknown"
+
+
+__all__ = [
+    "get_settings",
+    "get_db",
+    "get_backend",
+    "get_reviewer_id",
+    "get_reviewer_id_optional",
+]

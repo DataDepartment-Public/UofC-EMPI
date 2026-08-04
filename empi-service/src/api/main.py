@@ -13,8 +13,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.api import threshold_store
 from src.api.backends import sql_backend
-from src.api.routers import audit, dashboard, explanations, health, records, runs
+from src.api.routers import admin, audit, dashboard, explanations, health, records, runs
 from src.config import configure_logging, settings
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     configure_logging(settings)  # idempotent — see src/config.py
     settings.ensure_dirs()
+    threshold_store.apply_persisted_overrides(settings)
     conn = sql_backend.get_connection(settings.db_path)
     try:
         sql_backend.init_db(conn)
@@ -53,6 +55,7 @@ app.include_router(records.router)
 app.include_router(audit.router)
 app.include_router(dashboard.router)
 app.include_router(explanations.router)
+app.include_router(admin.router)
 
 
 __all__ = ["app"]

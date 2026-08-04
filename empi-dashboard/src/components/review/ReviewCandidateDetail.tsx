@@ -98,34 +98,7 @@ export function ReviewCandidateDetail({
 
       <div className="mb-5">
         <h4 className="mb-1 text-[13px] font-bold text-ink-2">Feature comparison</h4>
-        <p className="mb-3 text-[11.5px] text-gray">
-          Every field the deterministic rules consider, compared exactly as
-          the pipeline sees them.
-        </p>
         <FeatureComparisonTable rows={rows} patidA={item.patid_a} patidB={item.patid_b} />
-      </div>
-
-      <div className="mb-4 flex items-center justify-between gap-4 rounded-lg border border-[#cfe6f7] bg-[#f3f9fe] px-4 py-3">
-        <div>
-          <div className="text-[13px] font-semibold text-brand-blue">FS matcher signal</div>
-          <div className="text-[11px] text-gray-2">
-            {item.fs_match_probability != null
-              ? "Audit-only — feeds a future GBT model, not a scored decision on this pair."
-              : "Not scored for this run (full batch publish doesn't invoke the FS matcher yet)."}
-          </div>
-        </div>
-        {item.fs_match_probability != null && (
-          <div className="text-right">
-            <div className="tabular-nums text-xl font-extrabold text-brand-blue">
-              {Math.round(item.fs_match_probability * 100)}%
-            </div>
-            {item.fs_classification_tier && (
-              <div className="text-[11px] font-semibold text-gray-2">
-                {item.fs_classification_tier}
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       <button

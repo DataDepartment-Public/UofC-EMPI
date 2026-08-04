@@ -7,7 +7,9 @@ export async function GET(
 ) {
   const { patid } = await params;
   try {
-    const data = await apiGet(`/records/${encodeURIComponent(patid)}/raw`);
+    const data = await apiGet(`/records/${encodeURIComponent(patid)}/raw`, {
+      reviewer: true,
+    });
     return NextResponse.json(data);
   } catch (err) {
     if (err instanceof UpstreamError) {

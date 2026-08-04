@@ -14,10 +14,6 @@ export default function DashboardPage() {
       <div className="mb-5 flex flex-wrap items-end justify-between gap-2.5">
         <div>
           <h2 className="text-[22px] font-extrabold text-ink-2">Dashboard</h2>
-          <p className="mt-1 text-[13px] text-gray">
-            High-level KPIs and match-quality visualizations. All review and
-            merge workflows live on the Dataset tab.
-          </p>
         </div>
       </div>
 
@@ -51,17 +47,17 @@ export default function DashboardPage() {
               <KpiCard
                 label="Auto-match rate"
                 value={`${summary.auto_match_rate}%`}
-                accent="var(--brand-gold)"
+                accent="var(--status-auto)"
               />
               <KpiCard
                 label="Needs manual review"
                 value={summary.needs_review_records.toLocaleString()}
-                accent="var(--status-review)"
+                accent="var(--status-review-display)"
               />
               <KpiCard
                 label="Invalid records"
                 value={summary.invalid_records.toLocaleString()}
-                accent="var(--status-nomatch)"
+                accent="var(--status-nomatch-display)"
               />
               <KpiCard
                 label="Manually merged vs. unmerged"

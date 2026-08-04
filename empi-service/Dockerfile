@@ -39,6 +39,15 @@ RUN grep -vx postal requirements.txt > requirements.docker.txt \
 # ---- Runtime ----
 FROM python:3.13-slim AS runtime
 
+# libgomp1 is the OpenMP runtime LightGBM's native lib dlopen()s at import.
+# The slim base omits it, and the wheel doesn't vendor it — without this,
+# `import lightgbm` raises OSError: libgomp.so.1, which surfaces as a failed
+# run the first time Stage 4.25/4.5 unpickles its model (registry
+# load_model_artifact -> joblib.load), not at build or startup.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system empi \
     && useradd --system --gid empi --create-home --home-dir /home/empi empi
 

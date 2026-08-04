@@ -8,7 +8,7 @@ do in the pipeline.
 The served model is the LightGBM `nonmatch_gate` classifier trained in
 `notebooks/ml_model/confident_nonmatch/pair_classifier_lightgbm_nonmatch_gate_v1.ipynb`
 over the same 12 features as the Stage-4.5 ML matcher (it reuses
-`src.models.ml_matcher.lightgbm_v3.V3FeatureBuilder`), so `predict_proba[:, 1]`
+`src.models.ml_matcher.lightgbm_v5.FeatureBuilderV5`), so `predict_proba[:, 1]`
 is `P(plausible)` directly — no adapter. See `docs/Nonmatch-Gate-Guide.md`.
 """
 

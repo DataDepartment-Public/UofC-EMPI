@@ -1,6 +1,6 @@
 {
-  "model_file": "ml_model_20260719T141543Z.pkl",
-  "promoted_utc": "2026-07-19T14:15:43.358645+00:00",
+  "model_file": "ml_model_confident_match_v5_20260731T184743Z.pkl",
+  "promoted_utc": "2026-07-31T18:47:43.236892+00:00",
   "gate": "no active model \u2014 first promotion",
   "forced": false
 }

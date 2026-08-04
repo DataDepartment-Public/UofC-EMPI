@@ -23,7 +23,7 @@ raw → 1. clean → 2. blocking → 3. deterministic rules ─┬─► matches
                                               • emits per-pair FEATURES
                                               │
                                               ▼  the FS-plausible survivors only
-                                     4.5. ML matcher (src/models/ml_matcher/, LightGBM v3)
+                                     4.5. ML matcher (src/models/ml_matcher/, LightGBM v5)
                                               • classifies survivors: match vs ambiguous
                                               │
                                               ▼  (both feed clustering only if their
@@ -57,8 +57,8 @@ for every pair.
 > active, the pool reaches Stage 4.5 ungated with a warning.
 
 The plausible pairs the gate passes go to the downstream model (the
-LightGBM v3 ML matcher, Stage 4.5 — see `docs/ML-Matcher-Integration-Guide.md`
-and `docs/ML-Model-LightGBM-v3.md`), which makes the final call: confident match
+LightGBM v5 ML matcher, Stage 4.5 — see `docs/ML-Matcher-Integration-Guide.md`
+and `docs/ML-Model-LightGBM-v5.md`), which makes the final call: confident match
 (`auto_merge`) vs ambiguous (`human_review`). The ML model was trained only on
 *plausible* pairs (match ∪ ambiguous) and has no "true non-match" class, which
 is why some gate must remove the confident non-matches upstream.

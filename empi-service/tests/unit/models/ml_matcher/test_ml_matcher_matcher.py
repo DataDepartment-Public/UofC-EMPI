@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from src.contracts import ClassificationResults, validate
-from src.models.ml_matcher.base import ClassificationConfig
+from src.models.ml_matcher.base import MLClassificationConfig
 from src.models.ml_matcher.matcher import MLMatcher, MODEL_NAME
 
 
@@ -49,14 +49,14 @@ def _clean() -> pd.DataFrame:
     return pd.DataFrame({"PATID": ["A", "B", "C", "D"]})
 
 
-# ─── classify: tier thresholds (inclusive) — mirrors FSModel.classify() ───────
+# ─── classify: one threshold, two tiers ──────────────────────────────────────
 @pytest.mark.parametrize(
     "score, expected",
     [
-        (0.39, "no_match"),
-        (0.40, "human_review"),   # review_floor inclusive
-        (0.94, "human_review"),
-        (0.95, "auto_merge"),     # auto_merge_threshold inclusive
+        (0.0, "human_review"),
+        (0.39, "human_review"),
+        (0.699, "human_review"),
+        (0.70, "auto_merge"),     # auto_merge_threshold inclusive
         (0.999, "auto_merge"),
     ],
 )
@@ -65,8 +65,16 @@ def test_classify_thresholds_inclusive(score, expected):
     assert out["classification_tier"].iloc[0] == expected
 
 
-def test_classify_respects_custom_thresholds():
-    cfg = ClassificationConfig(auto_merge_threshold=0.8, review_floor=0.2)
+def test_classify_never_emits_no_match():
+    """THE structural guarantee of this stage: it cannot discard a pair. Only
+    the Stage-4.25 gate drops pairs, and only it records what it dropped."""
+    scores = pd.DataFrame({"match_probability": [0.0, 0.01, 0.5, 0.9, 1.0]})
+    tiers = MLMatcher().classify(scores)["classification_tier"]
+    assert set(tiers) <= {"auto_merge", "human_review"}
+
+
+def test_classify_respects_a_custom_threshold():
+    cfg = MLClassificationConfig(auto_merge_threshold=0.8)
     out = MLMatcher(classification_config=cfg).classify(
         pd.DataFrame({"match_probability": [0.5]})
     )
@@ -150,15 +158,19 @@ def _classified() -> pd.DataFrame:
 
 
 def test_to_ml_features_keeps_feature_columns():
-    out = MLMatcher().to_ml_features(_classified(), candidates_only=False)
+    out = MLMatcher().to_ml_features(_classified())
     assert "feat1" in out.columns
     assert len(out) == 2
 
 
-def test_to_ml_features_candidates_only_filters_below_review_floor():
-    out = MLMatcher().to_ml_features(_classified(), candidates_only=True)
-    assert len(out) == 1
-    assert out.iloc[0]["PATID_B"] == "b"
+def test_to_ml_features_keeps_every_scored_pair():
+    """No cutoff: the parquet is the complete record of the stage's scores,
+    which is what an offline threshold sweep reads. A filtered file would make
+    any threshold below the cutoff unevaluable."""
+    classified = _classified()
+    out = MLMatcher().to_ml_features(classified)
+    assert len(out) == len(classified)
+    assert out["match_probability"].min() == classified["match_probability"].min()
 
 
 def test_to_ml_features_raises_on_missing_columns():

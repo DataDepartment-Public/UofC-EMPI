@@ -424,7 +424,7 @@ union), keyed on `(PATID_A, PATID_B)`.
   gate makes no merge decision and never feeds clustering.
 - **Score:** `P(plausible)` = `P(match ∪ ambiguous)`; pairs at/above
   `settings.gate_threshold` (0.30) pass.
-- **Features:** reuses Stage 4.5's `V3FeatureBuilder` — the gate and the
+- **Features:** reuses Stage 4.5's `FeatureBuilderV5` — the gate and the
   matcher see identical inputs.
 - **Fallback:** with no active gate model (or `gate_supersedes_fs=false`), the
   legacy FS gate (`_fs_plausible_pool`) filters the pool instead; with neither
@@ -495,8 +495,10 @@ Full detail: `docs/Nonmatch-Gate-Guide.md`, `docs/Explanations-Guide.md`.
   column names/count are the implementer's choice; only the pair key is
   validated by name, via `validate_ml_features`).
 - **Location:** `data/ml_output/ml_features_<run_id>.parquet`
-- **Grain:** candidates only — filtered to `match_probability >=
-  settings.ml_review_floor` (0.40 default)
+- **Grain:** **every scored pair**, unfiltered. There is no candidate cutoff:
+  the file is the complete record of the stage's scores, which is what an
+  offline threshold sweep reads (a filtered file makes any threshold below the
+  cutoff unevaluable).
 
 ### 4.5c — ml_explanations (per-pair SHAP)
 

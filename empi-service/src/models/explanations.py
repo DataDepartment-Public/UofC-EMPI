@@ -28,11 +28,19 @@ geometry, and a `cumulative_prob` per step for a probability-labelled axis.
 SIGN CONVENTION
 ---------------
 Normalized so that **positive always pushes toward the model's positive
-decision** — plausible for the gate, confident-match for the ML matcher.
-The matcher's inner model is trained with class 1 = *ambiguous*, so its
-contributions mean the opposite; `MatchProbabilityAdapter.contributions`
-negates them (base value included) before they ever reach this module. No
-caller should have to know which model is inverted.
+decision** — plausible for the gate, confident-match for the ML matcher. This
+module never adjusts signs itself; the model wrapper is responsible for handing
+them over already normalized, so no caller has to know how a given model was
+trained.
+
+Both models served today train their class 1 *as* the served positive decision
+— the gate's is `plausible`, the ML matcher's (LightGBM v5,
+`lightgbm_v5.DirectMatchAdapter`) is `confident match` — so contributions pass
+through untouched. A future model whose positive class is the *opposite* of the
+served decision must negate its contributions **and** its base value inside its
+own wrapper. Skipping that yields a waterfall that reads plausibly and is
+exactly wrong; it was the sharpest edge in the previous (class 1 = *ambiguous*)
+generation of this model, and removing the inversion is why v5 exists.
 
 PHI / HIPAA: contributions are derived from similarity scores, never from
 field values, and nothing here is logged.

@@ -1,10 +1,11 @@
 """Standardized precision/recall for blocking and deterministic rules across
 all three label sources: synthetic data, silver labels, and gold labels.
 
-Gold labels (`data/gold_labels/final_gold_labels_v1_2026_07_05.csv`) are the first hand-adjudicated,
-independent ground truth available for the production candidate pair set
-(same 204,805 pairs as the silver labels, schema
-`PATID_A, PATID_B, ambiguous_pair, final_gold_label`). This script re-runs the
+Gold labels are the hand-adjudicated, independent ground truth for the
+production candidate pair set (the same pairs as the silver labels, schema
+`PATID_A, PATID_B, ambiguous_pair, final_gold_label`). Which round is current is
+defined once, in `src.evaluation.holdout.DEFAULT_GOLD_LABELS`, and is this
+script's `--gold` default. This script re-runs the
 same methodology as `eval_against_labels.py` against all three sources side by
 side, and reports rule precision/recall at both decision tiers:
 
@@ -32,6 +33,7 @@ if str(_ROOT_FOR_IMPORT) not in sys.path:
     sys.path.insert(0, str(_ROOT_FOR_IMPORT))
 
 from src.config import configure_logging
+from src.evaluation.holdout import DEFAULT_GOLD_LABELS
 from src.models.deterministic_rules import AUTO_MERGE_RULES, RULES, apply_rules
 from src.preprocessing.blocking import run_batch_blocking
 
@@ -218,8 +220,7 @@ def main() -> None:
                     "MDM_Population_cleaned_real_20260620.parquet")
     ap.add_argument("--silver", type=Path,
                     default=_ROOT / "data/silver_labels/silver_labels_v1_2026_06_21.csv")
-    ap.add_argument("--gold", type=Path,
-                    default=_ROOT / "data/gold_labels/final_gold_labels_v1_2026_07_05.csv")
+    ap.add_argument("--gold", type=Path, default=DEFAULT_GOLD_LABELS)
     ap.add_argument("--synthetic", type=Path,
                     default=_ROOT / "data/raw/synthetic_data.csv")
     ap.add_argument("--out", type=Path,

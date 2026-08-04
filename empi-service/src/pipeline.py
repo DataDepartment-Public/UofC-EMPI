@@ -471,8 +471,9 @@ def run_pipeline(
     # Scores the gated pool (ml_input_pool = the pairs the gate deemed
     # plausible), optionally enriched with Stage 4's FSFeatures. With the gate
     # removing confident non-matches upstream, this stage is a 2-tier
-    # classifier — confident match (auto_merge) vs ambiguous (human_review);
-    # no_match is not emitted (settings.ml_review_floor = 0.0). Feeds
+    # classifier — confident match (auto_merge) vs ambiguous (human_review).
+    # It emits no no_match tier by construction: discarding is the gate's job,
+    # and the gate is the only stage that records its drops. Feeds
     # clustering only when settings.ml_feeds_clustering is on. Skipped when no
     # active model resolves or the pool is empty.
     matches_ml_path: Path | None = None
@@ -496,22 +497,22 @@ def run_pipeline(
         # Lazy import mirrors Stage 4 — keeps whatever the implementer's model
         # framework needs (torch/xgboost/...) out of the import path when
         # Stage 4.5 is skipped.
-        from src.models.ml_matcher.base import ClassificationConfig as MLClassificationConfig
+        from src.models.ml_matcher.base import MLClassificationConfig
         from src.models.ml_matcher.matcher import MLMatcher
         # BYOM artifact loading is the implementer's extension point — see
         # docs/ML-Matcher-Integration-Guide.md. load_model_artifact deserializes
-        # whatever active.json points at; V3FeatureBuilder is the matching BYOF
-        # implementation for the served LightGBM v3 model. Both are imported
-        # lazily so Stage 4.5's deps stay off the import path when it's skipped.
-        from src.models.ml_matcher.lightgbm_v3 import V3FeatureBuilder
+        # whatever active.json points at; FeatureBuilderV5 is the matching BYOF
+        # implementation for the served LightGBM v5 model (the same 12 features
+        # v3/v4 used, so the gate shares the builder). Both are imported lazily
+        # so Stage 4.5's deps stay off the import path when it's skipped.
+        from src.models.ml_matcher.lightgbm_v5 import FeatureBuilderV5
         from src.models.ml_matcher.registry import load_model_artifact
 
         _ml_model = MLMatcher(
             model=load_model_artifact(active_ml_model),
-            feature_builder=V3FeatureBuilder(),
+            feature_builder=FeatureBuilderV5(),
             classification_config=MLClassificationConfig(
                 auto_merge_threshold=settings.ml_auto_merge_threshold,
-                review_floor=settings.ml_review_floor,
             ),
         )
         classified_ml = _ml_model.score(
@@ -526,7 +527,7 @@ def run_pipeline(
         matches_ml_path = settings.ml_output_dir / f"matches_ml_{run_id}.parquet"
         eval_frame_ml.to_parquet(matches_ml_path, index=False)
 
-        ml_features = _ml_model.to_ml_features(classified_ml, candidates_only=True)
+        ml_features = _ml_model.to_ml_features(classified_ml)
         validate_ml_features(ml_features)
         ml_features_path = settings.ml_output_dir / f"ml_features_{run_id}.parquet"
         ml_features.to_parquet(ml_features_path, index=False)

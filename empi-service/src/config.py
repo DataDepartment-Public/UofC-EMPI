@@ -263,16 +263,13 @@ class Settings(BaseSettings):
         "training set. Gitignored.",
     )
     ml_auto_merge_threshold: float = Field(
-        default=0.95,
-        description="Match-probability at/above which a scored pair is "
-        "tiered 'auto_merge'. Informational only unless ml_feeds_clustering "
-        "is on.",
-    )
-    ml_review_floor: float = Field(
-        default=0.40,
-        description="Match-probability at/above which a pair is tiered "
-        "'human_review'. Doubles as the CANDIDATE CUTOFF: only pairs at/above "
-        "this land in the MLFeatures candidate parquet.",
+        default=0.70,
+        description="Match-probability at/above which a scored pair is tiered "
+        "'auto_merge'; below it, 'human_review'. Stage 4.5 is a 2-tier "
+        "classifier with no floor — discarding confident non-matches is the "
+        "Stage-4.25 gate's job, and it is the only stage that records its "
+        "drops. Since ml_feeds_clustering is on, this bounds merge precision: "
+        "tune it against a held-out precision target, not a round number.",
     )
     ml_deploy_gate_margin: float = Field(
         default=0.02,

@@ -12,12 +12,14 @@ covers the modules that close that gap.
 |---|---|
 | `src/evaluation/cluster_eval.py` | Metric core — pair labels ↔ clusters. No I/O. |
 | `src/evaluation/pipeline_eval.py` | Scores one run's `RunManifest` against a label set. |
-| `src/evaluation/holdout.py` | Reproduces the training notebooks' test folds (leakage control). |
+| `src/evaluation/holdout.py` | Reproduces the training notebooks' test folds (leakage control). Must be updated whenever a served model's split changes. |
 | `src/evaluation/synthetic.py` | Rebuilds a record population from the synthetic *pair* file. |
 | `src/evaluation/report_io.py` | Reads stored reports back into tidy frames. |
+| `src/evaluation/stage_diagnostics.py` | Rebuilds a run's **per-pair** decisions (PHI) — the per-stage matrices and the misclassified listings both come from it. |
 | **`scripts/evaluate_all.py`** | **The entry point — runs everything and scores it.** |
 | `scripts/eval_end_to_end.py` | Granular: one existing run, one label file, one holdout. |
-| `notebooks/evaluation/end_to_end_eval.ipynb` | Tables + trend charts over stored reports. |
+| `notebooks/evaluation/end_to_end_eval.ipynb` | A confusion matrix + classification report per stage (§5). |
+| `notebooks/evaluation/misclassified_pairs.ipynb` | The pairs behind every error cell. **Outputs are PHI** — never commit them. |
 
 ---
 
@@ -103,28 +105,70 @@ slow.
 
 ## 2. Leakage — mandatory reading for gold
 
-**The Stage-4.25 gate and the served Stage-4.5 matcher were both trained on
-`data/gold_labels/final_gold_labels_v1_2026_07_05.csv`.** Both notebooks take a
-plain random stratified 60/20/20 split, so ~80% of the gold pairs are training
-data. Scoring the pipeline on all 204,805 gold pairs reports a number that is
+**The Stage-4.25 gate and the Stage-4.5 ML matcher are both trained on the gold
+labels.** Roughly 80% of the gold pairs are training data for those stages, so
+scoring the pipeline on all 204,805 gold pairs reports a number that is
 substantially memorized.
 
-Neither notebook persists its split, but the split depends on nothing except the
-gold label columns and the CSV's row order (`np.arange(n)`, `RANDOM_STATE=42`,
-stratified on the target), so `holdout.py` reproduces it exactly — no features,
-no model loading.
+**Which gold file is current is defined in exactly one place:**
+`DEFAULT_GOLD_LABELS` in `src/evaluation/holdout.py` — today
+`data/gold_labels/final_gold_labels_v2_2026_08_01.csv`. Every evaluation CLI,
+notebook and test imports that constant instead of spelling the filename, so a
+new labeling round is a one-line change. The served gate and v5 matcher were fit
+under **v1**; because the holdout is a hash of each pair's identity rather than a
+row split, they are still held out on the same pairs under v2 — the labels on
+those pairs are what changed, which is exactly what re-scoring measures.
 
-The two folds are **not the same pairs**:
+**Both models hold out the same pairs**, and there is exactly one definition of
+which: `src/evaluation/holdout.py`. Both training notebooks (§6) and both
+evaluation CLIs call it — no file, no per-notebook split, nothing to keep in
+sync.
 
-| Fold | Population | Stratified on | Size |
-|---|---|---|---|
-| `gate` | all 204,805 | `final_gold_label \| ambiguous_pair` | 40,961 |
-| `matcher` | the 62,610 plausible pairs | `ambiguous_pair` | 12,522 |
-| **`strict`** | gate-held-out ∧ (matcher-held-out ∨ never in the matcher's population) | — | the safe set |
+A pair is held out iff `sha256(PATID_A|PATID_B|salt)`, read as a fraction in
+[0, 1), is below `HOLDOUT_FRACTION` (0.20). Membership depends only on the pair's
+own identity, which buys three things:
 
-`--holdout strict` is the default and the only leakage-safe choice. `--holdout
-none` runs, but the report's `leakage` block will say so in writing, and its
-ML-stage numbers are memorization.
+| Property | Why it matters |
+|---|---|
+| **Order-invariant** | `train_test_split` is positional — re-saving the gold CSV in a different row order would silently change which pairs are held out, invalidating every already-trained model with nothing raised. |
+| **Stable under growth** | Appending new gold labels re-partitions nothing; existing pairs keep their side. |
+| **Stratified for free** | The hash ignores the label, so it takes ~20% of every class without being told the classes exist — measured on the real file: non-match 19.98%, ambiguous 20.18%, match 19.71%. |
+
+Size: **~40,900 pairs, ~12,500 of them positive.**
+
+`--holdout strict` (the default) restricts scoring to those pairs and is the
+only leakage-safe choice for gold. `--holdout none` runs, but the report's
+`leakage` block says so in writing and its ML-stage numbers are memorization.
+
+### Why one function, and not per-notebook splits
+
+Each notebook used to call `train_test_split` itself, and `holdout.py`
+*reconstructed* those splits by re-deriving each notebook's seed, ratio,
+stratification target and row order. Two failures came out of that duplication:
+
+1. **It drifted silently.** When the matcher's notebook changed its
+   stratification target, `holdout.py` kept returning *a* fold — just not the one
+   the model was actually held out on. Nothing raised; every "leakage-safe"
+   number downstream was simply wrong. One function called by every site cannot
+   disagree with itself.
+
+2. **The safe set was tiny.** The notebooks drew *different* 20% folds, so
+   "pairs neither model saw" was their intersection: ~8k of 204,805, about 4% —
+   and four fifths of each model's own test set was the other model's training
+   data. Sharing the split makes it the full ~41k, with roughly **5x the
+   positive labels**.
+
+### Changing the split, and the tripwire
+
+`HOLDOUT_SALT` and `HOLDOUT_FRACTION` *are* the definition. **Changing either
+redefines which pairs are held out and invalidates every model already trained
+against it** — both notebooks must be re-run.
+
+Each notebook records `holdout_spec()` in its model `.meta.json`. Both eval CLIs
+call `verify_model_provenance` and log a `WARNING` for any served model whose
+recorded spec is absent or different. **Treat that warning as invalidating the
+run's ML-stage numbers**: it means the model was fit under a different
+definition of "held out", so the "safe" pairs may be its training data.
 
 Stages **not** fit on gold — blocking and the deterministic rules — are clean at
 any holdout setting.
@@ -140,7 +184,7 @@ headline.**
 
 Turn both feed toggles off (`EMPI_ML_FEEDS_CLUSTERING=false`) and clustering
 unions only the deterministic auto-merge edges — never fit on gold — which makes
-`none` clean again, and preferable for having 8x the labeled positives.
+`none` clean again, and preferable for having 5x the labeled positives.
 
 | Configuration | Headline | Gate / ML rows |
 |---|---|---|
@@ -152,15 +196,14 @@ spells the consequence out in its `note`, so a stored number can always be read
 back correctly without knowing what the config was that day.
 
 `strict` is the safe default because it is correct under *every* configuration.
-But `strict` keeps
-only the ~20% of plausible pairs the matcher held out, so it is heavily depleted
-of positives (~2.5k of ~62.5k) and enriched in easy confident non-matches — fine
-for recall, mildly optimistic for precision. Cross-check against `--holdout
-none`.
+It is a stratified 20% sample of the gold file, so its class balance matches the
+file's rather than being skewed toward easy non-matches. Cross-check against
+`--holdout none`, keeping in mind what that number does and does not mean per
+the table above.
 
-`tests/unit/evaluation/test_holdout.py` pins the fold sizes and class balances
-the notebooks printed. If a notebook's seed, ratios, stratification target, or
-row ordering changes, those tests fail rather than the folds silently drifting.
+`tests/unit/evaluation/test_holdout.py` pins the split's order-invariance,
+its stability under added rows, its per-class sampling rate, and the provenance
+check.
 
 ---
 
@@ -324,27 +367,75 @@ reported separately because in a mostly-singleton population the overall rate is
 
 ---
 
-## 5. Comparing results over time — the notebook
+## 5. The notebooks — a report card per stage
 
-`notebooks/evaluation/end_to_end_eval.ipynb` renders the stored reports as
-tables and trend charts. **The JSON files in `data/evaluations/` are the
-history** — the notebook only reads them (`src/evaluation/report_io.py`), so
-comparing past sessions needs no re-running, which matters because a past run's
-artifacts may no longer exist.
+Two notebooks, same section order, driven by the same frame.
 
-Sections: what results exist → one report in detail (**triage**, **stage flow**, per-stage,
-funnel, loss attribution, transitivity, cluster-level) → trend across sessions →
-gold vs. synthetic side by side. §1 optionally shells out to `evaluate_all.py`
-to add a new session; everything else works offline.
+### `notebooks/evaluation/end_to_end_eval.ipynb` — the counts
 
-The triage section (§3.1) is the one to open first on a gold report: it renders
-`triage_report()` (the classification report), `triage_matrix()` (raw counts, or
-`normalize=True` for row shares), an annotated heatmap of the matrix, and
-`triage_history()` across sessions. The heatmap shades by **row share** rather
-than raw count — non-matches outnumber matches several to one, so a
-count-shaded grid is one dark corner and two invisible rows — while printing
-each cell's absolute count, because a rate without its denominator is not
-actionable.
+§1–§2 read the stored reports (`src/evaluation/report_io.py`), so listing what
+exists needs no re-running. **§3 recomputes from the focused run's artifacts**
+via `src/evaluation/stage_diagnostics.py`, so it needs that run's Parquet files
+still on disk plus the label file — it runs where the data lives.
+
+§3 walks the pipeline in order and gives each stage a confusion matrix and a
+classification report:
+
+| § | stage | two-class | three-class routing |
+|---|---|---|---|
+| 3.1 | blocking | emitted a candidate? vs. the match label | — |
+| 3.2 | deterministic rules | — | cumulative, plus a blocked-pool-only view |
+| 3.3 | Stage-4.25 gate | passed? vs. **plausible** | cumulative |
+| 3.4 | Stage-4.5 matcher | auto-merged? vs. **confident match** | cumulative |
+| 3.5 | clustering | same cluster? vs. the match label | the shipped decision |
+| 3.6 | — | stage flow + loss attribution, from the stored report | — |
+
+**The two views answer different questions.** The two-class view scores a
+stage's own decision, on the pool it actually saw, against the target it was
+built to hit — the gate against *plausible* (match ∪ ambiguous), the matcher
+against *confident match*. Scoring either against the bare match label reports a
+failure that is the design. The routing view scores where the pipeline had each
+pair after that stage, over **every** labeled pair, using the three-class
+vocabulary of §1.4 — so the four routing matrices are comparable cell for cell
+and the population can be watched settling stage by stage. §3.5's reproduces the
+stored report's `triage` block exactly.
+
+A pair blocking never emitted sits in the `no_match` column from the first
+routing matrix onward. That is where the pipeline has in fact left it, and
+folding it anywhere else would make blocking misses invisible.
+
+Every heatmap shades by **row share** rather than raw count — non-matches
+outnumber matches several to one, so a count-shaded grid is one dark corner and
+two invisible rows — while printing each cell's absolute count, because a rate
+without its denominator is not actionable.
+
+### `notebooks/evaluation/misclassified_pairs.ipynb` — the pairs
+
+The same stages in the same order, but showing the **pairs** in each off-diagonal
+cell so an error can be judged rather than only counted.
+
+`show()` renders them the way `gold_labeling.ipynb` does — the two records
+stacked, A above B, fields aligned column-wise, a blank row between pairs — with
+each cell coloured green (both present and equal), red (both present and
+different), yellow (one side missing) or grey (neither). Comparing down a column
+is how a reviewer actually reads a pair, and the colour answers "which fields
+agree" before any of them are read. The leading context columns (`gold_class`,
+`error`, the rule that fired, the model scores, the final route) repeat on both
+rows; `gold_class` is filled solid in its own colour. `table()` gives the same
+pairs one row each (`<field>_A` beside `<field>_B`) for sorting and export.
+
+Nothing is capped — `show()`/`table()` limit what is rendered, the underlying
+frame is always complete.
+
+It is a separate notebook because **its output is PHI**: PATIDs and identity
+fields. Clear outputs before saving. The counts notebook stays committable.
+
+Both notebooks call `stage_diagnostics.diagnostics_for_report(report)`, which
+rebuilds the pair-level frame under exactly the report's holdout — so a matrix
+cell in one and the rows listed in the other are always the same pairs, and
+neither can drift from the stored report's counts.
+
+### Sessions
 
 Re-evaluating the same (session, source, holdout) triple **overwrites** rather
 than accumulating — that is the same measurement, and keeping both would put a
@@ -363,3 +454,9 @@ predating sessions falls back to its `run_id` as the timeline key.
 The reports contain aggregate counts and metrics only — no PATIDs, no field
 values, no example rows — so a JSON report is safe to copy off the VM. The label
 files themselves are PHI and are gitignored.
+
+`stage_diagnostics.py` is the deliberate exception: it returns a frame of pair
+ids and, with `with_attributes`, cleaned identity fields. Nothing it produces is
+logged, written to `data/evaluations/`, or served by the API — it exists for a
+notebook running where the data lives. Anything derived from it, including
+`misclassified_pairs.ipynb`'s stored outputs, is PHI and stays on the VM.

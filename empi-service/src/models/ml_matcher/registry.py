@@ -8,12 +8,15 @@ three" refactor once a third model family needs the same pattern.
 
 Trained model artifacts live here:
 
-    ml_model_<ts>.pkl         # joblib dump of the served model (the LightGBM
-                               # v3 MatchProbabilityAdapter — see
-                               # docs/ML-Matcher-Integration-Guide.md)
-    ml_model_<ts>.meta.json   # provenance + held-out test metrics (this
-                               # module reads it)
-    active.json               # pointer to the currently-served model
+    ml_model_<name>_<ts>.pkl        # joblib dump of the served model — today a
+                                    # v5 DirectMatchAdapter, written by the
+                                    # notebook as
+                                    # ml_model_confident_match_v5_<ts>.pkl.
+                                    # Discovered by the ml_model_*.pkl glob, so
+                                    # the descriptive middle is free-form.
+    ml_model_<name>_<ts>.meta.json  # provenance + held-out test metrics (this
+                                    # module reads it)
+    active.json                     # pointer to the currently-served model
 
 The pipeline resolves the **active** model at serve time via
 `resolve_active_model`. Promotion is guarded by a **deploy-gate**: a
@@ -43,7 +46,7 @@ class DeployGateError(RuntimeError):
 
 # ── Artifact path helpers ────────────────────────────────────────────────────
 def meta_path_for(model_path: Path) -> Path:
-    """`ml_model_<ts>.json` -> `ml_model_<ts>.meta.json` (sibling sidecar)."""
+    """`<artifact>.pkl` -> `<artifact>.meta.json` (sibling sidecar)."""
     model_path = Path(model_path)
     return model_path.parent / f"{model_path.stem}.meta.json"
 
@@ -111,12 +114,19 @@ def load_model_artifact(model_path: Path) -> Any:
     """Load a serialized model from `model_path` into an `MLModel`-compatible
     object (`fit`/`predict_proba`).
 
-    The active ML model is the LightGBM v3 classifier, serialized with joblib
-    as a `ml_model_<ts>.pkl` artifact whose payload is a
-    `src.models.ml_matcher.lightgbm_v3.MatchProbabilityAdapter` (which wraps
-    the fitted estimator and exposes the inverted `predict_proba`). This
+    The active ML model is the LightGBM v5 confident-match classifier,
+    serialized with joblib as a `ml_model_confident_match_v5_<ts>.pkl` artifact
+    whose payload is a `src.models.ml_matcher.lightgbm_v5.DirectMatchAdapter`
+    (which wraps the fitted estimator and passes `predict_proba` through
+    unchanged, because its class 1 is already the confident match). This
     function is the pipeline's one call site for "load whatever `active.json`
-    points at." See `docs/ML-Matcher-Integration-Guide.md`.
+    points at."
+
+    Artifacts from the retired class-1-is-*ambiguous* generation pickled a
+    wrapper from a module that no longer exists, so they now raise
+    `ModuleNotFoundError` here rather than being served with inverted
+    semantics. That is intentional: a loud failure beats a silent one. See
+    `docs/ML-Model-LightGBM-v5.md`.
     """
     import joblib
 

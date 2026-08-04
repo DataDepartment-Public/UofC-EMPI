@@ -12,7 +12,7 @@ splits the pool in two:
 This is the job the FS matcher used to do via its `no_match` tier. The gate
 model is trained on the **whole** candidate pool (target `1` = match ∪
 ambiguous) rather than FS's probabilistic match score, and reuses the ML
-matcher's `V3FeatureBuilder` — the two models see identical features, so the
+matcher's `FeatureBuilderV5` — the two models see identical features, so the
 gate's decision and the matcher's are directly comparable.
 
 The dropped pairs are the costly error (unrecoverable downstream), so the
@@ -39,7 +39,7 @@ import pandas as pd
 from src.contracts import TIER_HUMAN_REVIEW, TIER_NO_MATCH
 from src.models.explanations import build_explanation_frame, compute_contributions
 from src.models.ml_matcher.base import FeatureBuilder
-from src.models.ml_matcher.lightgbm_v3 import V3FeatureBuilder
+from src.models.ml_matcher.lightgbm_v5 import FeatureBuilderV5
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class NonMatchGate:
         ``P(plausible)`` — the raw LightGBM classifier the notebook exports
         (no probability-swapping adapter, unlike the ML matcher's).
     feature_builder :
-        Defaults to `V3FeatureBuilder` — the same 12 features the gate model
+        Defaults to `FeatureBuilderV5` — the same 12 features the gate model
         was trained on.
     threshold :
         Pairs scoring at/above this pass the gate.
@@ -80,7 +80,7 @@ class NonMatchGate:
         threshold: float = DEFAULT_THRESHOLD,
     ):
         self.model = model
-        self.feature_builder = feature_builder or V3FeatureBuilder()
+        self.feature_builder = feature_builder or FeatureBuilderV5()
         self.threshold = float(threshold)
 
     # ── Scoring ───────────────────────────────────────────────────────────────

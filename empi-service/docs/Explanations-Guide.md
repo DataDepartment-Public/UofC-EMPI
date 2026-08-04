@@ -6,7 +6,7 @@ served read-only as a plot-ready waterfall payload.
 
 **Front-end readers: §2 is the contract. You do not need the rest of this document.**
 
-Related: `docs/Nonmatch-Gate-Guide.md`, `docs/ML-Model-LightGBM-v3.md`,
+Related: `docs/Nonmatch-Gate-Guide.md`, `docs/ML-Model-LightGBM-v5.md`,
 `docs/Data-Contract.md` (the artifact schema), `docs/API-Design.md`.
 
 ---
@@ -88,8 +88,9 @@ what a base value or a log-odd is.
 
 - **`direction` is already normalized.** Positive always pushes toward the model's
   positive decision — *plausible* for the gate, *confident match* for the matcher.
-  Never infer direction from the raw sign of anything else; the matcher's underlying
-  model is inverted and the API un-inverts it for you.
+  Never infer direction from the raw sign of anything else: whether a given model's
+  underlying class 1 matches the served decision is a per-model detail the serving
+  layer has already resolved for you (§6).
 - **Bars are log-odds** (`units`). They do **not** sum to the probability. If you want
   a probability axis, use `cumulative_prob` per step — do not add `shap` values as
   probabilities.
@@ -179,11 +180,19 @@ A BYOM model that exposes neither `contributions(X)` nor LightGBM's `pred_contri
 simply produces no explanations: the stage logs it and the run completes normally. A
 missing explanation must never fail a run whose scores are fine.
 
-To make a new model explainable, give it either shape. If its positive class is not
-the pipeline's positive decision, negate the contributions **and** the base value in
-that wrapper — see `MatchProbabilityAdapter.contributions`, and the regression test
-`test_adapter_negates_so_positive_means_confident_match`. Getting this backwards
-produces a waterfall that reads perfectly plausibly and is exactly wrong.
+To make a new model explainable, give it either shape. **If its positive class is not
+the pipeline's positive decision, negate the contributions *and* the base value in
+that wrapper.** Getting this backwards produces a waterfall that reads perfectly
+plausibly and is exactly wrong.
+
+Both models served today need no negation — the gate's class 1 is *plausible* and the
+ML matcher's (LightGBM v5, `lightgbm_v5.DirectMatchAdapter`) is *confident match*, so
+contributions pass through untouched; regression tests
+`test_gate_contributions_are_not_negated` and
+`test_v5_adapter_contributions_are_not_negated` pin that.
+`test_an_inverted_wrapper_must_negate_to_stay_consistent` covers the opposite case, so
+the contract stays tested even though nothing in the pipeline currently needs it. (The
+retired class-1-is-*ambiguous* matcher did; removing that inversion is why v5 exists.)
 
 ## HIPAA
 

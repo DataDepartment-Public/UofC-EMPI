@@ -36,18 +36,18 @@ import logging
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 _ROOT_FOR_IMPORT = Path(__file__).resolve().parents[1]
 if str(_ROOT_FOR_IMPORT) not in sys.path:
     sys.path.insert(0, str(_ROOT_FOR_IMPORT))
 
 from src.config import configure_logging, settings  # noqa: E402
 from src.evaluation.holdout import (  # noqa: E402
+    DEFAULT_GOLD_LABELS,
     GOLD_AMBIGUOUS_COL,
     GOLD_LABEL_COL,
-    gold_test_folds,
-    load_gold_labels,
+    holdout_keys,
+    load_labels,
+    verify_model_provenance,
 )
 from src.evaluation.pipeline_eval import (  # noqa: E402
     evaluate_run,
@@ -56,35 +56,27 @@ from src.evaluation.pipeline_eval import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
-_ROOT = Path(__file__).resolve().parents[1]
-
-DEFAULT_GOLD = _ROOT / "data" / "gold_labels" / "final_gold_labels_v1_2026_07_05.csv"
 
 
-def _load_labels(path: Path, label_col: str) -> pd.DataFrame:
-    """Read a label file, preserving PATID leading zeros.
+def _warn_if_models_predate_the_holdout() -> None:
+    """Surface any served model not trained under the current holdout spec.
+    A mismatch makes `--holdout strict` a fiction for that model — the "safe"
+    pairs may be its training data — so it is logged loudly rather than
+    silently trusted."""
+    from src.models.ml_matcher import registry as ml_registry
+    from src.models.nonmatch_gate import registry as gate_registry
 
-    Gold goes through `load_gold_labels` for the notebooks' exact boolean
-    coercion (the fold reconstruction depends on it); anything else gets a
-    generic truthy coercion.
-    """
-    if GOLD_LABEL_COL in pd.read_csv(path, nrows=0).columns:
-        return load_gold_labels(path)
+    metas = {}
+    for name, reg in (("ml_matcher", ml_registry), ("nonmatch_gate", gate_registry)):
+        try:
+            active = reg.resolve_active_model(settings)
+            metas[name] = reg.load_model_meta(active) if active is not None else None
+        except Exception:  # noqa: BLE001 - provenance must never break an eval
+            metas[name] = None
+    for problem in verify_model_provenance(metas):
+        logger.warning("HOLDOUT PROVENANCE — %s", problem)
 
-    df = pd.read_csv(path, dtype={"PATID_A": str, "PATID_B": str})
-    if label_col not in df.columns:
-        raise SystemExit(
-            f"Label column {label_col!r} not in {path.name} "
-            f"(columns: {list(df.columns)})"
-        )
-    if df[label_col].dtype != bool:
-        df[label_col] = (
-            df[label_col].astype(str).str.strip().str.lower()
-            .map({"true": True, "1": True, "1.0": True,
-                  "false": False, "0": False, "0.0": False})
-            .fillna(False).astype(bool)
-        )
-    return df
+DEFAULT_GOLD = DEFAULT_GOLD_LABELS
 
 
 def main() -> None:
@@ -97,10 +89,14 @@ def main() -> None:
                     help="Name for the label source in the report (default: "
                          "inferred from the filename).")
     ap.add_argument("--holdout", default="strict",
-                    choices=["strict", "gate", "matcher", "none"],
-                    help="Restrict to pairs the trained models never saw. "
-                         "'strict' (default) is the only leakage-safe choice "
-                         "for gold; ignored for non-gold label files.")
+                    choices=["strict", "none"],
+                    help="'strict' (the default) restricts to the shared "
+                         "holdout both models were held out on — computed by "
+                         "src.evaluation.holdout, the same function the "
+                         "training notebooks call. The only leakage-safe choice "
+                         "for gold. 'none' scores every labeled pair and its "
+                         "ML-stage numbers are memorization. Ignored for "
+                         "non-gold label files.")
     ap.add_argument("--session-id", default=None,
                     help="Group this report with others on one timeline point "
                          "(default: the run id). scripts/evaluate_all.py sets "
@@ -120,7 +116,10 @@ def main() -> None:
         )
 
     manifest = load_manifest(args.run_id, settings)
-    labels = _load_labels(args.labels, args.label_col)
+    try:
+        labels = load_labels(args.labels, args.label_col)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     source = args.source or args.labels.stem
 
     # Gold carries the extra columns that let the gate and the matcher be
@@ -142,10 +141,9 @@ def main() -> None:
                 "notebooks' folds are not defined over it.", args.holdout, args.labels.name,
             )
         else:
-            folds = gold_test_folds(labels)
-            holdout = {"strict": folds.strict, "gate": folds.gate,
-                       "matcher": folds.matcher}[args.holdout]
+            holdout = holdout_keys(labels)
             holdout_name = args.holdout
+            _warn_if_models_predate_the_holdout()
 
     report = evaluate_run(
         manifest, labels, args.label_col,

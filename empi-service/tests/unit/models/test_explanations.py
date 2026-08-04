@@ -4,10 +4,12 @@ The properties that matter here are not "does it run" but:
 
 * contributions + base value reconstruct the model's raw margin, and the
   sigmoid of that margin is the score the pipeline recorded;
-* the **sign convention** is normalized across both models — the ML matcher's
-  inner model is trained with class 1 = ambiguous, so un-negated contributions
-  would render a waterfall that reads exactly backwards while looking
-  entirely plausible;
+* the **sign convention** is normalized by the model wrapper, and this module
+  respects whatever the wrapper hands over. Both served models train class 1
+  *as* the served decision (the gate's is `plausible`, the v5 matcher's is
+  `confident match`), so neither negates; a wrapper whose positive class is the
+  opposite must. Getting either case wrong renders a waterfall that reads
+  exactly backwards while looking entirely plausible;
 * the payload's precomputed geometry is internally consistent, so the UI can
   draw rectangles without doing any arithmetic of its own.
 
@@ -21,11 +23,11 @@ import pandas as pd
 import pytest
 
 from src.models import explanations as E
-from src.models.ml_matcher.lightgbm_v3 import (
+from src.models.ml_matcher.lightgbm_v5 import (
     CATEGORICAL_FEATURES,
     COMPARE_LEVELS,
     FEATURE_COLS,
-    MatchProbabilityAdapter,
+    DirectMatchAdapter,
 )
 
 pytest.importorskip("lightgbm")
@@ -81,21 +83,32 @@ def test_contributions_shape_is_features_plus_base(model, X):
     assert contrib.shape == (len(X), len(FEATURE_COLS) + 1)
 
 
-def test_adapter_negates_so_positive_means_confident_match(model, X):
-    """THE regression test for the ML matcher.
+class _InvertedAdapter:
+    """A wrapper whose inner model's positive class is the OPPOSITE of the
+    served decision — the case that must negate. No model in the pipeline is
+    shaped this way today; this exists to keep the contract in
+    `explanations.compute_contributions` covered for whoever plugs one in."""
 
-    The inner model's class 1 is *ambiguous*; the served score is
-    `P(confident match) = 1 - P(ambiguous)`. So the served margin is the
-    negation of the inner margin, and every contribution must flip with it.
-    Without the flip, a feature pushing a pair toward review renders as
-    pushing it toward auto-merge.
-    """
-    adapter = MatchProbabilityAdapter(model)
-    inner = np.asarray(model.predict_proba(X, pred_contrib=True))
+    def __init__(self, model):
+        self.model = model
+
+    def predict_proba(self, X):
+        return np.asarray(self.model.predict_proba(X))[:, ::-1]
+
+    def contributions(self, X):
+        # Served margin is -f, so every contribution AND the base value flip.
+        return -np.asarray(self.model.predict_proba(X, pred_contrib=True))
+
+
+def test_an_inverted_wrapper_must_negate_to_stay_consistent(model, X):
+    """The general contract: whatever a wrapper reports as its served
+    probability, its contributions must reconstruct THAT number. An inverted
+    wrapper that forgot to negate would fail this while still producing a
+    perfectly plausible-looking waterfall."""
+    adapter = _InvertedAdapter(model)
     served = E.compute_contributions(adapter, X)
 
-    assert np.allclose(served, -inner)
-    # And the reconstruction still holds against the *served* probability.
+    assert np.allclose(served, -np.asarray(model.predict_proba(X, pred_contrib=True)))
     assert np.allclose(
         _sigmoid(served.sum(axis=1)), adapter.predict_proba(X)[:, 1], atol=1e-6,
     )
@@ -110,6 +123,20 @@ def test_gate_contributions_are_not_negated(model, X):
     )
 
 
+def test_v5_adapter_contributions_are_not_negated(model, X):
+    """The served ML matcher (v5) trains class 1 = confident match, so — like
+    the gate — its contributions are already in served-score space. The
+    reconstruction must hold against the *served* probability, which for v5 is
+    the inner probability unchanged."""
+    adapter = DirectMatchAdapter(model)
+    served = E.compute_contributions(adapter, X)
+
+    assert np.allclose(served, np.asarray(model.predict_proba(X, pred_contrib=True)))
+    assert np.allclose(
+        _sigmoid(served.sum(axis=1)), adapter.predict_proba(X)[:, 1], atol=1e-6,
+    )
+
+
 def test_model_without_contribution_support_returns_none():
     class _Plain:
         def predict_proba(self, X):
@@ -121,7 +148,7 @@ def test_model_without_contribution_support_returns_none():
 
 def test_supports_contributions_detects_both_shapes(model):
     assert E.supports_contributions(model)
-    assert E.supports_contributions(MatchProbabilityAdapter(model))
+    assert E.supports_contributions(DirectMatchAdapter(model))
     assert not E.supports_contributions(object())
 
 

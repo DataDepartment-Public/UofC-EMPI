@@ -11,7 +11,7 @@ unidecode
 # library installed on the system (e.g. `brew install libpostal` on macOS, or
 # build from https://github.com/openvenues/libpostal). If libpostal is not
 # installed the cleaning pipeline still runs — `Address_normalized` stays NaN.
-postal
+# postal
 jellyfish
 phonetics
 # python-stdnum: structural US SSN validation (area/group/serial + known-bogus

@@ -11,10 +11,23 @@ services:
     volumes:
       # data/empi.db and data/local_index/ are the durable state — without
       # this volume every `docker compose up` starts from an empty resolved
-      # output. models/ holds the trained FS matcher artifact (if any).
+      # output.
       - empi-data:/app/data
-      - empi-models:/app/models
       - empi-logs:/app/logs
+      # Inputs come from the host; everything the container *writes* stays in
+      # the named volumes above. Both mounts are read-only, so the container
+      # keeps writing as its own non-root `empi` user and there's no host-uid
+      # mapping to get right. Nested-under-empi-data is fine — Docker mounts
+      # the longer path last.
+      #
+      # data/raw/ is the pipeline input (real MDM_Population.csv is
+      # gitignored). Read-only also means a run can't touch the source data.
+      - ./empi-service/data/raw:/app/data/raw:ro
+      # models/ holds the served gate + ML artifacts. The .pkl files are
+      # gitignored while models/*/active.json is tracked, so a fresh clone has
+      # pointers to files that only exist on the host — and .dockerignore keeps
+      # models/ out of the build context, so this mount is the only way in.
+      - ./empi-service/models:/app/models:ro
     restart: unless-stopped
 
   empi-dashboard:
@@ -33,5 +46,4 @@ services:
 
 volumes:
   empi-data:
-  empi-models:
   empi-logs:

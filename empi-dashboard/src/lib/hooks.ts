@@ -132,6 +132,14 @@ export function useDismissMutation() {
   });
 }
 
+export function useHealth() {
+  return useQuery({
+    queryKey: ["health"],
+    queryFn: api.getHealth,
+    refetchInterval: 15_000,
+  });
+}
+
 export function useThresholds() {
   return useQuery({
     queryKey: ["admin-thresholds"],

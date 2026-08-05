@@ -107,7 +107,6 @@ from src.preprocessing.stacked_blocking import run_stacked_blocking  # noqa: E40
 from src.models.base import to_edges  # noqa: E402
 from src.models.clustering import assign_clusters, build_cluster_assignments  # noqa: E402
 from src.models.deterministic_rules import (  # noqa: E402
-    AUTO_MERGE_RULES,
     apply_rules,
     classify_non_matches,
     get_match_stats,
@@ -282,57 +281,36 @@ def run_pipeline(
     confirmed = apply_rules(
         candidate_pairs, cleaned, ssn_fanout_threshold=settings.ssn_fanout_threshold
     )
-    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; the rest
-    # (NAME_DOB_SEX / NAME_DOB_ADDRESS) are confirmed but routed to review.
-    is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
-    matches = confirmed[is_auto].reset_index(drop=True)
-    review_confirmed = confirmed[~is_auto].reset_index(drop=True)
+    # Every rule is auto-merge — a rule fires only when it will confirm the pair
+    # outright, so there is no tier split here. Pairs no rule confirmed are
+    # decided by `classify_non_matches` below.
+    matches = confirmed.reset_index(drop=True)
     if not matches.empty:
         clusters = assign_clusters(matches)
         matches = matches.copy()
         matches["cluster_id"] = matches["PATID_A"].map(clusters)
     validate(matches, Matches)
-    # Three-way split. `confirmed` (both tiers) is removed from the contradiction
-    # split so review-tier pairs are never reject-scored; they join review below.
+    # Three-way split. `confirmed` is removed from the contradiction split — a
+    # rule-confirmed pair is already decided and is never reject-scored.
     decided = classify_non_matches(candidate_pairs, confirmed, cleaned)
     pair_cols = list(candidate_pairs.columns)
-    non_matches = pd.concat(
-        [
-            review_confirmed[pair_cols],
-            decided[decided["decision"] == TIER_HUMAN_REVIEW][pair_cols],
-        ]
-    ).reset_index(drop=True)
+    non_matches = (
+        decided[decided["decision"] == TIER_HUMAN_REVIEW][pair_cols]
+        .reset_index(drop=True)
+    )
     rejects = decided[decided["decision"] == TIER_NO_MATCH].reset_index(drop=True)
     validate(non_matches, NonMatches)
     validate(rejects, Rejects)
-    stats = get_match_stats(
-        matches,
-        n_records=len(cleaned),
-        decided=decided,
-        review_matches=review_confirmed,
-    )
+    stats = get_match_stats(matches, n_records=len(cleaned), decided=decided)
     logger.info(
-        "[3/7] RULES — %d auto-merge, %d review (%d rule-confirmed), %d reject, "
-        "%d clusters",
-        len(matches), len(non_matches), len(review_confirmed), len(rejects),
+        "[3/7] RULES — %d auto-merge, %d review, %d reject, %d clusters",
+        len(matches), len(non_matches), len(rejects),
         stats.get("n_clusters", 0),
     )
     matches_path = settings.auto_merge_dir / f"matches_{run_id}.parquet"
     matches.to_parquet(matches_path, index=False)
     non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
-    # Review-tier rule provenance (match_rule/confidence/rules_fired) does not
-    # survive the `non_matches_path` write above — `non_matches` is trimmed to
-    # the closed NonMatches/CandidatePairs schema. Keep the full
-    # `review_confirmed` columns in a companion artifact so a consumer (the API
-    # publish step) can show *why* a review-tier pair was flagged, not just
-    # that it was. Not part of the documented Data-Contract stage boundaries;
-    # no strict pandera contract, since nothing else in the pipeline depends
-    # on it.
-    review_evidence_path = (
-        settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
-    )
-    review_confirmed.to_parquet(review_evidence_path, index=False)
     rejects_path = settings.no_match_dir / f"rejects_{run_id}.parquet"
     rejects.to_parquet(rejects_path, index=False)
 
@@ -587,7 +565,6 @@ def run_pipeline(
         non_matches=_artifact_ref(non_matches_path, non_matches, root),
         rejects=_artifact_ref(rejects_path, rejects, root),
         clusters=_artifact_ref(clusters_path, cluster_assignments, root),
-        review_evidence=_artifact_ref(review_evidence_path, review_confirmed, root),
         matches_model=(
             _artifact_ref(matches_model_path, prob_matches, root)
             if matches_model_path is not None else None

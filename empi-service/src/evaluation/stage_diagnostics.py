@@ -286,7 +286,6 @@ def build_diagnostics(
     cand_df = _read(manifest.candidate_pairs, settings)
     match_df = _read(manifest.matches, settings)
     reject_df = _read(manifest.rejects, settings)
-    review_df = _read(manifest.review_evidence, settings)
     gate_df = _read(manifest.gate_results, settings)
     ml_df = _read(manifest.matches_ml, settings)
 
@@ -303,7 +302,6 @@ def build_diagnostics(
     match_rule = _key_column(match_df, "match_rule")
     reject_rule = _key_column(reject_df, "reject_rule")
     n_contra = _key_column(reject_df, "n_contradictions")
-    review_rule = _key_column(review_df, "match_rule")
     gate_score = _key_column(gate_df, "score")
     ml_score = _key_column(ml_df, "score")
 
@@ -348,9 +346,10 @@ def build_diagnostics(
         np.where(flags(matches), TIER_AUTO_MERGE,
                  np.where(flags(rejects), TIER_NO_MATCH, TIER_HUMAN_REVIEW)),
     )
+    # A rule name only ever comes from a confirmation or a rejection — the
+    # deterministic stage has no third, review-tier rule set any more.
     out["rules_rule"] = [
-        m or rv or rj for m, rv, rj in
-        zip(lookup(match_rule), lookup(review_rule), lookup(reject_rule))
+        m or rj for m, rj in zip(lookup(match_rule), lookup(reject_rule))
     ]
     out["rules_n_contradictions"] = lookup(n_contra)
 

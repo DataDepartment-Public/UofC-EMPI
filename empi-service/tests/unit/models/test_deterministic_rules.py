@@ -3,9 +3,9 @@ Unit tests for the deterministic matching-rule engine in
 src/models/deterministic_rules.py.
 
 Coverage:
-    - Each of the five rules fires on a constructed agreeing pair.
-    - Rule tiers: NAME_DOB_SEX / NAME_DOB_ADDRESS are confirmed but review-tier
-      (routed to review, not auto-merged); the others auto-merge.
+    - Each of the three rules fires on a constructed agreeing pair.
+    - Rule tiers: every rule is auto-merge. The former review-tier rules
+      (NAME_DOB_SEX / NAME_DOB_ADDRESS) were removed and no longer confirm.
     - The winning rule is the highest-confidence rule that fired; rules_fired
       lists every rule that fired.
     - Null / missing fields never count as agreement; missing attribute columns
@@ -32,7 +32,6 @@ from src.contracts import (
 from src.models.deterministic_rules import (
     AUTO_MERGE_RULES,
     REJECT_RULES,
-    REVIEW_RULES,
     RULES,
     apply_rules,
     classify_non_matches,
@@ -121,58 +120,34 @@ class TestEachRuleFires:
         assert _one(apply_rules(_pairs(("A", "B")), df))["match_rule"] \
             == "NAME_DOB_PHONE"
 
-    def test_name_dob_sex(self):
-        df = _clean_df([
-            {COL_PATID: "A", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
-             "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE"},
-            {COL_PATID: "B", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
-             "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE"},
-        ])
-        row = _one(apply_rules(_pairs(("A", "B")), df))
-        assert row["match_rule"] == "NAME_DOB_SEX"
-        assert bool(row["is_suspicious"]) is False
-
-    def test_name_dob_address(self):
-        df = _clean_df([
-            {COL_PATID: "A", "FirstNM_clean": "JOE", "LastNM_clean": "ROE",
-             "BirthDT_clean": pd.Timestamp("1975-03-03"),
-             "AddressLine1_clean": "123 MAIN ST"},
-            {COL_PATID: "B", "FirstNM_clean": "JOE", "LastNM_clean": "ROE",
-             "BirthDT_clean": pd.Timestamp("1975-03-03"),
-             "AddressLine1_clean": "123 MAIN ST"},
-        ])
-        assert _one(apply_rules(_pairs(("A", "B")), df))["match_rule"] \
-            == "NAME_DOB_ADDRESS"
-
 
 # ── Fuzzy name matching ─────────────────────────────────────────────────────────
 class TestFuzzyNames:
     def test_single_typo_first_name_still_matches(self):
-        # MEGAN vs MEAGAN (one inserted letter) → NAME_DOB_SEX still fires.
+        # MEGAN vs MEAGAN (one inserted letter) → the name predicate still
+        # agrees, so NAME_DOB_PHONE fires.
         df = _clean_df([
             {COL_PATID: "A", "FirstNM_clean": "MEGAN", "LastNM_clean": "DOE",
              "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE"},
+             "Phones_set": "{'3125551234'}"},
             {COL_PATID: "B", "FirstNM_clean": "MEAGAN", "LastNM_clean": "DOE",
              "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE"},
+             "Phones_set": "{'3125551234'}"},
         ])
         row = _one(apply_rules(_pairs(("A", "B")), df))
-        assert row["match_rule"] == "NAME_DOB_SEX"
+        assert row["match_rule"] == "NAME_DOB_PHONE"
 
     def test_single_typo_last_name_still_matches(self):
         df = _clean_df([
             {COL_PATID: "A", "FirstNM_clean": "JOHN", "LastNM_clean": "SMITH",
              "BirthDT_clean": pd.Timestamp("1980-05-05"),
-             "SexAtBirthDSC_clean": "MALE"},
+             "Phones_set": "{'3125551234'}"},
             {COL_PATID: "B", "FirstNM_clean": "JOHN", "LastNM_clean": "SMYTH",
              "BirthDT_clean": pd.Timestamp("1980-05-05"),
-             "SexAtBirthDSC_clean": "MALE"},
+             "Phones_set": "{'3125551234'}"},
         ])
         assert _one(apply_rules(_pairs(("A", "B")), df))["match_rule"] \
-            == "NAME_DOB_SEX"
+            == "NAME_DOB_PHONE"
 
     def test_unrelated_names_do_not_match(self):
         # A real name difference (not a typo) must not fuzzy-match.
@@ -331,48 +306,52 @@ class TestClassifyNonMatches:
 # ── Rule precedence ────────────────────────────────────────────────────────────
 class TestPrecedence:
     def test_highest_confidence_wins(self):
-        # SSN + name + DOB + sex all agree → SSN_DOB (1.000, listed first) is the
-        # winning rule; EXACT_SSN and NAME_DOB_SEX also fire and are recorded.
+        # SSN + name + DOB + email all agree → SSN_DOB (1.000, listed first) is
+        # the winning rule; NAME_DOB_EMAIL also fires and is recorded.
         df = _clean_df([
             {COL_PATID: "A", "SSN_clean": "123456789", "FirstNM_clean": "JANE",
              "LastNM_clean": "DOE", "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE"},
+             "Email_clean": "jane@x.com"},
             {COL_PATID: "B", "SSN_clean": "123456789", "FirstNM_clean": "JANE",
              "LastNM_clean": "DOE", "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE"},
+             "Email_clean": "jane@x.com"},
         ])
         row = _one(apply_rules(_pairs(("A", "B")), df))
         assert row["match_rule"] == "SSN_DOB"
-        assert set(row["rules_fired"].split("|")) == {"SSN_DOB", "NAME_DOB_SEX"}
+        assert set(row["rules_fired"].split("|")) == {"SSN_DOB", "NAME_DOB_EMAIL"}
 
     def test_rules_are_confidence_sorted(self):
         confidences = [r.confidence for r in RULES]
         assert confidences == sorted(confidences, reverse=True)
 
 
-# ── Rule tiers: auto-merge vs review demotion ───────────────────────────────────
+# ── Rule tiers: every rule is auto-merge ────────────────────────────────────────
 class TestRuleTiers:
-    """NAME_DOB_SEX / NAME_DOB_ADDRESS are demoted to the review tier — they still
-    fire and keep provenance, but a pair confirmed *only* by them is routed to
-    review, never auto-merged. These tests mirror the split the pipeline performs
-    on `match_rule` membership in `AUTO_MERGE_RULES`.
+    """The deterministic stage makes only two confident statements: a rule
+    confirmed the pair (auto_merge) or >=3 strong identifiers contradict
+    (no_match). NAME_DOB_SEX / NAME_DOB_ADDRESS — the former review-tier rules
+    that fired without deciding anything — were removed; these tests pin that
+    they no longer confirm, and that such pairs are now reject-scored like any
+    other unconfirmed pair.
     """
 
-    def test_tier_sets_partition_the_rules(self):
+    def test_every_rule_is_auto_merge(self):
         assert AUTO_MERGE_RULES == {"SSN_DOB", "NAME_DOB_EMAIL", "NAME_DOB_PHONE"}
-        assert REVIEW_RULES == {"NAME_DOB_SEX", "NAME_DOB_ADDRESS"}
-        # Every rule is in exactly one tier; the two tiers are disjoint and total.
-        assert AUTO_MERGE_RULES.isdisjoint(REVIEW_RULES)
-        assert AUTO_MERGE_RULES | REVIEW_RULES == {r.name for r in RULES}
+        assert AUTO_MERGE_RULES == {r.name for r in RULES}
+
+    def test_removed_rules_are_gone(self):
+        names = {r.name for r in RULES}
+        assert "NAME_DOB_SEX" not in names
+        assert "NAME_DOB_ADDRESS" not in names
 
     def _confirmed(self, records, *pairs):
         df = _clean_df(records)
         pair_df = _pairs(*pairs)
         return apply_rules(pair_df, df), pair_df, df
 
-    def test_sex_only_is_confirmed_but_review_tier(self):
-        # Name+DOB+sex only → NAME_DOB_SEX fires (still returned by apply_rules)
-        # but its winning rule is review-tier, so it is NOT auto-merged.
+    def test_name_dob_sex_no_longer_confirms(self):
+        # Name+DOB+sex agreement used to fire NAME_DOB_SEX (review tier). It now
+        # confirms nothing — the pair falls through to the probabilistic stages.
         confirmed, _, _ = self._confirmed([
             {COL_PATID: "A", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
              "BirthDT_clean": pd.Timestamp("1990-01-01"),
@@ -381,12 +360,9 @@ class TestRuleTiers:
              "BirthDT_clean": pd.Timestamp("1990-01-01"),
              "SexAtBirthDSC_clean": "FEMALE"},
         ], ("A", "B"))
-        row = _one(confirmed)
-        assert row["match_rule"] == "NAME_DOB_SEX"
-        assert row["match_rule"] in REVIEW_RULES
-        assert row["match_rule"] not in AUTO_MERGE_RULES
+        assert confirmed.empty
 
-    def test_address_only_is_review_tier(self):
+    def test_name_dob_address_no_longer_confirms(self):
         confirmed, _, _ = self._confirmed([
             {COL_PATID: "A", "FirstNM_clean": "JOE", "LastNM_clean": "ROE",
              "BirthDT_clean": pd.Timestamp("1975-03-03"),
@@ -395,7 +371,7 @@ class TestRuleTiers:
              "BirthDT_clean": pd.Timestamp("1975-03-03"),
              "AddressLine1_clean": "123 MAIN ST"},
         ], ("A", "B"))
-        assert _one(confirmed)["match_rule"] in REVIEW_RULES
+        assert confirmed.empty
 
     def test_ssn_dob_stays_auto_merge(self):
         confirmed, _, _ = self._confirmed([
@@ -406,9 +382,8 @@ class TestRuleTiers:
         ], ("A", "B"))
         assert _one(confirmed)["match_rule"] in AUTO_MERGE_RULES
 
-    def test_phone_plus_sex_auto_merges_on_phone(self):
-        # A pair that ALSO fires an auto-merge rule still auto-merges: the
-        # higher-confidence NAME_DOB_PHONE wins over the review-tier NAME_DOB_SEX.
+    def test_phone_pair_fires_phone_rule_only(self):
+        # Sex agreement no longer contributes a fired rule of its own.
         confirmed, _, _ = self._confirmed([
             {COL_PATID: "A", "FirstNM_clean": "JOHN", "LastNM_clean": "LEE",
              "BirthDT_clean": pd.Timestamp("1980-05-05"),
@@ -419,32 +394,45 @@ class TestRuleTiers:
         ], ("A", "B"))
         row = _one(confirmed)
         assert row["match_rule"] == "NAME_DOB_PHONE"
-        assert row["match_rule"] in AUTO_MERGE_RULES
-        assert set(row["rules_fired"].split("|")) == {"NAME_DOB_PHONE", "NAME_DOB_SEX"}
+        assert set(row["rules_fired"].split("|")) == {"NAME_DOB_PHONE"}
 
-    def test_review_tier_pair_is_never_reject_scored(self):
-        # Mirrors the pipeline: passing the full confirmed set to
-        # classify_non_matches keeps a review-tier pair out of the
-        # contradiction split entirely (so it can never be rejected), even when
-        # the pair carries enough strong-id conflicts to otherwise reject.
+    def test_name_dob_sex_pair_is_now_reject_scored(self):
+        # BEHAVIOR CHANGE. This pair (same name+DOB+sex, but conflicting SSN)
+        # was previously confirmed by review-tier NAME_DOB_SEX and therefore
+        # excluded from the contradiction split entirely. Nothing confirms it
+        # now, so it IS reject-scored — and with 3 strong-id contradictions it
+        # is dropped as a confident non-match instead of reaching review.
         records = [
             {COL_PATID: "A", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
              "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE", "SSN_clean": "111111111",
-             "AddressLine1_clean": "1 A ST", "Email_clean": "a@x.com"},
-            {COL_PATID: "B", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
-             "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE", "SSN_clean": "222222222",
-             "AddressLine1_clean": "2 B ST", "Email_clean": "b@x.com"},
+             "SexAtBirthDSC_clean": "FEMALE", "SSN_clean": "111111111"},
+            {COL_PATID: "B", "FirstNM_clean": "JANE", "LastNM_clean": "DOW",
+             "BirthDT_clean": pd.Timestamp("1991-02-02"),
+             "SexAtBirthDSC_clean": "FEMALE", "SSN_clean": "222222222"},
         ]
         confirmed, pair_df, df = self._confirmed(records, ("A", "B"))
-        assert _one(confirmed)["match_rule"] == "NAME_DOB_SEX"
+        assert confirmed.empty
         decided = classify_non_matches(pair_df, confirmed, df)
-        # The review-tier pair was removed from the split, so nothing remains.
-        assert decided.empty
+        assert _one(decided)["decision"] == TIER_NO_MATCH
 
-    def test_stats_count_review_tier_in_review_not_match(self):
-        # One auto-merge pair (SSN_DOB) + one review-tier pair (NAME_DOB_SEX).
+    def test_undecided_pair_routes_to_review(self):
+        # The same shape with only one contradiction stays in review — the
+        # destination those pairs had before, now reached by falling through
+        # rather than by a rule confirming them.
+        records = [
+            {COL_PATID: "A", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
+             "BirthDT_clean": pd.Timestamp("1990-01-01"),
+             "SexAtBirthDSC_clean": "FEMALE", "SSN_clean": "111111111"},
+            {COL_PATID: "B", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
+             "BirthDT_clean": pd.Timestamp("1990-01-01"),
+             "SexAtBirthDSC_clean": "FEMALE", "SSN_clean": "222222222"},
+        ]
+        confirmed, pair_df, df = self._confirmed(records, ("A", "B"))
+        assert confirmed.empty
+        decided = classify_non_matches(pair_df, confirmed, df)
+        assert _one(decided)["decision"] == TIER_HUMAN_REVIEW
+
+    def test_stats_have_no_review_rule_distribution(self):
         df = _clean_df([
             {COL_PATID: "A", "SSN_clean": "123456789",
              "BirthDT_clean": pd.Timestamp("1990-01-01")},
@@ -459,18 +447,14 @@ class TestRuleTiers:
         ])
         pairs = _pairs(("A", "B"), ("C", "D"))
         confirmed = apply_rules(pairs, df)
-        is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
-        matches = confirmed[is_auto].reset_index(drop=True)
-        review_confirmed = confirmed[~is_auto].reset_index(drop=True)
         decided = classify_non_matches(pairs, confirmed, df)
-        stats = get_match_stats(
-            matches, n_records=4, decided=decided, review_matches=review_confirmed
-        )
+        stats = get_match_stats(confirmed, n_records=4, decided=decided)
         assert stats["total_matches"] == 1
+        # The C/D pair is undecided now, not rule-confirmed — same review bucket.
         assert stats["decision_distribution"] == {
             TIER_AUTO_MERGE: 1, TIER_HUMAN_REVIEW: 1, TIER_NO_MATCH: 0
         }
-        assert stats["review_match_distribution"] == {"NAME_DOB_SEX": 1}
+        assert "review_match_distribution" not in stats
 
 
 # ── SSN_DOB (SSN corroborated by date of birth) ─────────────────────────────────
@@ -566,8 +550,8 @@ class TestAgreementEdges:
         assert apply_rules(_pairs(("A", "B")), df).empty
 
     def test_missing_attribute_column_degrades_gracefully(self):
-        # df_clean lacks SexAtBirthDSC_clean entirely — NAME_DOB_SEX cannot fire,
-        # but the call must not crash and other rules still work.
+        # df_clean lacks several optional attribute columns entirely — the
+        # call must not crash and the rules that can fire still work.
         df = pd.DataFrame([
             {COL_PATID: "A", "SSN_clean": "123456789",
              "BirthDT_clean": pd.Timestamp("1990-01-01")},
@@ -619,13 +603,13 @@ class TestSuspiciousFlag:
         assert bool(self._ssn_pair(LastNM_clean="SMITH")["is_suspicious"]) is True
 
     def test_suspicious_when_both_ssn_present_differ(self):
-        # Match via NAME_DOB_SEX, but both SSNs present and differing.
+        # Match via NAME_DOB_PHONE, but both SSNs present and differing.
         a = {COL_PATID: "A", "FirstNM_clean": "JANE", "LastNM_clean": "DOE",
              "BirthDT_clean": pd.Timestamp("1990-01-01"),
-             "SexAtBirthDSC_clean": "FEMALE", "SSN_clean": "111111111"}
+             "Phones_set": "{'3125551234'}", "SSN_clean": "111111111"}
         b = {**a, COL_PATID: "B", "SSN_clean": "222222222"}
         row = _one(apply_rules(_pairs(("A", "B")), _clean_df([a, b])))
-        assert row["match_rule"] == "NAME_DOB_SEX"
+        assert row["match_rule"] == "NAME_DOB_PHONE"
         assert bool(row["is_suspicious"]) is True
 
 

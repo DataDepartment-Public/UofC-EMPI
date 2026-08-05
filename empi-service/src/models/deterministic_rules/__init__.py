@@ -35,10 +35,9 @@ PUBLIC API:
 
 SUBMODULES (mirrors the shape of `src/models/fs_matcher/` and
 `src/models/ml_matcher/` — a thin package with focused submodules):
-    rules.py       — MatchRule definitions, tier membership (RULES,
-                     AUTO_MERGE_RULES, REVIEW_RULES), and the
-                     confirm-or-fall-through decision (apply_rules,
-                     get_non_matches).
+    rules.py       — MatchRule definitions (RULES, all auto-merge —
+                     AUTO_MERGE_RULES) and the confirm-or-fall-through
+                     decision (apply_rules, get_non_matches).
     classifier.py  — the reject/review three-way decision
                      (classify_non_matches), the audit report
                      (get_match_stats), and DeterministicRulesClassifier.
@@ -49,16 +48,16 @@ SUBMODULES (mirrors the shape of `src/models/fs_matcher/` and
 THREE-WAY DECISION:
     Each candidate pair lands in one of three buckets — the same vocabulary
     used by every classifier stage (`src.contracts.CLASSIFICATION_TIERS`):
-      * auto_merge   — confirmed by an AUTO-MERGE-tier rule (`apply_rules`)
+      * auto_merge   — a rule confirmed it (`apply_rules`)
       * no_match     — a confident non-match (>= 3 strong contradictions), dropped
-      * human_review — confirmed only by a REVIEW-tier rule, OR unconfirmed
-                       with < 3 contradictions -> probabilistic stage
-    `apply_rules` returns every pair any rule confirmed (both tiers, with the
-    winning `match_rule`); the caller routes them by tier via `AUTO_MERGE_RULES` /
-    `REVIEW_RULES`. `classify_non_matches` assigns no_match/human_review to the
-    pairs no rule confirmed. NAME_DOB_SEX and NAME_DOB_ADDRESS are REVIEW-tier
-    (~65% / ~67% silver precision) — they fire and keep provenance but never
-    auto-merge on their own. See docs/Deterministic-Rules-Guide.md.
+      * human_review — unconfirmed with < 3 contradictions -> probabilistic stage
+    This stage makes only the two confident statements; every rule is
+    auto-merge, so `apply_rules` output IS the merge set (with the winning
+    `match_rule`) and needs no tier routing. `classify_non_matches` assigns
+    no_match/human_review to the pairs no rule confirmed — human_review here
+    means "undecided", not "a rule flagged it". The review-tier rules
+    NAME_DOB_SEX / NAME_DOB_ADDRESS were removed; see the RULES comment in
+    rules.py and docs/Deterministic-Rules-Guide.md.
 
 OUTPUT SCHEMA (matches DataFrame):
     PATID_A        str   — canonical first PATID (carried from blocking)
@@ -91,7 +90,6 @@ from src.models.deterministic_rules.rules import (
     NAME_JW_THRESHOLD,
     NAME_LEV_MAX,
     AUTO_MERGE_RULES,
-    REVIEW_RULES,
     RULES,
     MatchRule,
     _parse_phone_set,
@@ -114,7 +112,7 @@ __all__ = [
     "DEFAULT_SSN_FANOUT_THRESHOLD", "DEFAULT_REJECT_MIN_CONTRADICTIONS",
     "NAME_JW_THRESHOLD", "NAME_LEV_MAX",
     "MatchRule", "RejectRule",
-    "RULES", "AUTO_MERGE_RULES", "REVIEW_RULES", "REJECT_RULES", "REJECT_RULE_NAMES",
+    "RULES", "AUTO_MERGE_RULES", "REJECT_RULES", "REJECT_RULE_NAMES",
     "apply_rules", "get_non_matches", "classify_non_matches", "get_match_stats",
     "DeterministicRulesClassifier",
     "_parse_phone_set",

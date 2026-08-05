@@ -55,17 +55,18 @@ CLEANED_REQUIRED_COLUMNS: tuple[str, ...] = (
 )
 
 #: Deterministic rule names — keep in sync with deterministic_rules.RULES.
+#: Every rule is auto-merge, so this equals AUTO_MERGE_RULE_NAMES; both names
+#: are kept because they answer different questions ("is this a rule?" vs
+#: "may this pair be merged?"). The former review-tier NAME_DOB_SEX /
+#: NAME_DOB_ADDRESS were removed — see the RULES comment in
+#: deterministic_rules/rules.py.
 RULE_NAMES: tuple[str, ...] = (
-    "SSN_DOB", "NAME_DOB_EMAIL",
-    "NAME_DOB_PHONE", "NAME_DOB_SEX", "NAME_DOB_ADDRESS",
+    "SSN_DOB", "NAME_DOB_EMAIL", "NAME_DOB_PHONE",
 )
 
 #: Auto-merge-tier rule names — keep in sync with
-#: deterministic_rules.AUTO_MERGE_RULES. NAME_DOB_SEX / NAME_DOB_ADDRESS are
-#: review-tier and must never appear in the (auto-merge) Matches artifact.
-AUTO_MERGE_RULE_NAMES: tuple[str, ...] = (
-    "SSN_DOB", "NAME_DOB_EMAIL", "NAME_DOB_PHONE",
-)
+#: deterministic_rules.AUTO_MERGE_RULES.
+AUTO_MERGE_RULE_NAMES: tuple[str, ...] = RULE_NAMES
 
 #: Reject-rule names — keep in sync with deterministic_rules.REJECT_RULES.
 REJECT_RULE_NAMES: tuple[str, ...] = ("STRONG_ID_CONFLICT",)
@@ -579,7 +580,6 @@ class RunManifest(BaseModel):
     non_matches: ArtifactRef
     rejects: ArtifactRef | None = None
     clusters: ArtifactRef | None = None
-    review_evidence: ArtifactRef | None = None
     # Stage-4 FS artifacts (present only when an active FS model scored the run):
     matches_model: ArtifactRef | None = None  # ProbabilisticMatches audit frame
     fs_features: ArtifactRef | None = None     # FSFeatures GBT candidate parquet

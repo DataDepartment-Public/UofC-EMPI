@@ -108,15 +108,6 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
     non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
 
-    review_evidence = pd.DataFrame({
-        "PATID_A": ["P4"], "PATID_B": ["P5"],
-        "match_rule": ["NAME_DOB_SEX"], "confidence": [0.98],
-        "rules_fired": ["NAME_DOB_SEX"], "is_suspicious": [False],
-        "high_fanout_ssn": [False], "source_blocks": ["B3"], "n_blocks": [1],
-    })
-    review_evidence_path = settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
-    review_evidence.to_parquet(review_evidence_path, index=False)
-
     clusters = pd.DataFrame({
         "PATID": ["P1", "P2", "P3", "P4", "P5"], "cluster_id": [0, 0, 1, 2, 3],
     })
@@ -133,7 +124,6 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
         raw_input=ref(cleaned_path, 5), cleaned=ref(cleaned_path, 5),
         candidate_pairs=ref(matches_path, 1), matches=ref(matches_path, 1),
         non_matches=ref(non_matches_path, 1),
-        review_evidence=ref(review_evidence_path, 1),
         clusters=ref(clusters_path, 5),
         counts={
             "raw_rows": 5, "valid_records": 5, "candidate_pairs": 2, "matches": 1,
@@ -219,7 +209,7 @@ class TestRecords:
         assert body["total"] == 2
         entity = body["items"][0]
         assert len(entity["review_candidates"]) == 1
-        assert entity["review_candidates"][0]["match_rule"] == "NAME_DOB_SEX"
+        assert entity["review_candidates"][0]["match_rule"] is None
 
     def test_get_raw_record(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
@@ -657,7 +647,7 @@ class TestRecordsAndDashboardAgainstParquetBackend:
         assert body["total"] == 2
         entity = body["items"][0]
         assert len(entity["review_candidates"]) == 1
-        assert entity["review_candidates"][0]["match_rule"] == "NAME_DOB_SEX"
+        assert entity["review_candidates"][0]["match_rule"] is None
 
     def test_get_raw_record(self, client, parquet_test_settings):
         _publish_fixture_run(parquet_test_settings, "r1")

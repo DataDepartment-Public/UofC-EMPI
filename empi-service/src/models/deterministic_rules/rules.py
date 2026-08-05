@@ -3,7 +3,7 @@
 The rule-definition + confirm-or-fall-through half of
 `src.models.deterministic_rules` — see the package's `__init__.py` for the
 full module overview. This module owns the `MatchRule` definitions
-(`RULES`), tier membership (`AUTO_MERGE_RULES`/`REVIEW_RULES`), and
+(`RULES`, all of them auto-merge — `AUTO_MERGE_RULES`) and
 `apply_rules`/`get_non_matches`. The three-way reject/review classification
 and the `PairClassifier` adapter live in `classifier.py`.
 """
@@ -20,7 +20,6 @@ import numpy as np
 import pandas as pd
 
 from src.config import settings
-from src.contracts import TIER_AUTO_MERGE, TIER_HUMAN_REVIEW
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +62,16 @@ _ATTR_COLS = (
 
 
 # ── Rule definitions ──────────────────────────────────────────────────────────
-# A rule's tier decides what a confirmed pair *does*, not whether it fires:
-#   * "auto_merge"   — the pair is auto-merged (the `auto_merge` decision).
-#   * "human_review" — the pair is routed to the downstream probabilistic /
-#                      clerical review stage instead of being auto-merged.
-# Every rule still fires and records full provenance regardless of tier; only the
-# routing differs. See `AUTO_MERGE_RULES` / `REVIEW_RULES` below.
-# TIER_AUTO_MERGE / TIER_HUMAN_REVIEW / TIER_NO_MATCH are imported from
-# src.contracts — the single source of truth for this vocabulary, shared with
-# the FS matcher and the ML matcher (src.models.base.PairClassifier).
+# Every rule here is an AUTO-MERGE rule: a rule fires only when it is willing to
+# confirm the pair outright. The deterministic stage makes exactly two positive
+# statements — "confidently the same patient" (a rule confirmed it) and
+# "confidently not" (>=3 strong contradictions, see classifier.REJECT_RULES).
+# Everything else is left undecided and flows to the probabilistic stages, which
+# is where graded evidence belongs. There is deliberately no review tier here;
+# see the "Three-way decision" section of docs/Deterministic-Rules-Guide.md.
+# The tier vocabulary itself (TIER_AUTO_MERGE / TIER_HUMAN_REVIEW /
+# TIER_NO_MATCH) lives in src.contracts, shared with the FS and ML matchers
+# (src.models.base.PairClassifier); classifier.py is what assigns it here.
 
 
 @dataclass(frozen=True)
@@ -80,14 +80,14 @@ class MatchRule:
 
     `fields` names the per-pair agreement predicates (keys of the agreement
     map built in `_build_agreement`) that must all be True for the rule to
-    fire. Confidence values are taken verbatim from the guide. `tier` decides
-    whether a pair the rule confirms is auto-merged or routed to review.
+    fire. `confidence` orders the rules — it resolves which rule wins when
+    several fire on one pair — and is NOT a calibrated probability; a
+    confirmed pair is auto-merged regardless of which rule won.
     """
 
     name: str
     confidence: float
     fields: tuple[str, ...]
-    tier: str = TIER_AUTO_MERGE
 
 
 # Ordered by confidence (descending) — the order the winning rule is resolved in.
@@ -106,33 +106,35 @@ class MatchRule:
 # docs/Deterministic-Rules-Guide.md "Evaluation"). Email is only trustworthy when
 # corroborated by name + DOB, which is exactly NAME_DOB_EMAIL.
 #
-# NAME_DOB_SEX and NAME_DOB_ADDRESS are tier "human_review", NOT auto-merge. Against the
-# silver labels they adjudicate at only ~65% / ~67% precision and carry essentially
-# all of the false merges: name + DOB + sex is not a unique identity (a common
-# name, shared birthday, and sex collide on real data), and a shared street address
-# links co-resident relatives who share a birthday. They still fire and keep their
-# provenance, but a pair whose *only* confirming rule is one of these is routed to
-# review rather than auto-merged. A pair that also fires an auto-merge rule still
-# auto-merges (the higher-confidence auto-merge rule wins). See the "Evaluation"
-# and "Three-way decision" sections of docs/Deterministic-Rules-Guide.md.
+# NAME_DOB_SEX and NAME_DOB_ADDRESS were REMOVED. They were review-tier rules —
+# they fired, carried provenance, but never auto-merged — and against the silver
+# labels they adjudicated at only ~65% / ~67% precision, carrying essentially all
+# of the false merges: name + DOB + sex is not a unique identity (a common name,
+# shared birthday, and sex collide on real data), and a shared street address
+# links co-resident relatives who share a birthday. Two reasons they are gone
+# rather than demoted:
+#   1. They decided nothing. A pair they confirmed went to the same place an
+#      unconfirmed pair went — the non_matches pool — so the tier bought only a
+#      provenance label.
+#   2. That label actively misled. The reviewer UI rendered the rule's ordering
+#      confidence as "98% confidence" on a class of pair that is wrong about a
+#      third of the time, arguing hardest for the merges that deserved the most
+#      scrutiny.
+# Those pairs now flow to the gate + ML matcher as ordinary undecided pairs and
+# are scored on their merits. Consequence: unlike before, they are also
+# reject-scored, so a name+DOB+sex pair with >=3 strong contradictions is now
+# dropped as a confident non-match instead of reaching review.
 RULES: tuple[MatchRule, ...] = (
     MatchRule("SSN_DOB", 1.000, ("ssn", "dob")),
     MatchRule("NAME_DOB_EMAIL", 0.990, ("first", "last", "dob", "email")),
     MatchRule("NAME_DOB_PHONE", 0.985, ("first", "last", "dob", "phone")),
-    MatchRule("NAME_DOB_SEX", 0.980, ("first", "last", "dob", "sex"), TIER_HUMAN_REVIEW),
-    MatchRule(
-        "NAME_DOB_ADDRESS", 0.970, ("first", "last", "dob", "address"), TIER_HUMAN_REVIEW
-    ),
 )
 
-# Rule-name sets by tier — the routing key the pipeline uses to split confirmed
-# pairs into auto-merge vs review. Derived from RULES so they never drift.
-AUTO_MERGE_RULES: frozenset[str] = frozenset(
-    r.name for r in RULES if r.tier == TIER_AUTO_MERGE
-)
-REVIEW_RULES: frozenset[str] = frozenset(
-    r.name for r in RULES if r.tier == TIER_HUMAN_REVIEW
-)
+# Every rule is auto-merge (see the RULES comment above), so this is just every
+# rule name. Kept as a named set because clustering and the classifier adapter
+# assert merge edges against it — membership is the check that a `match_rule`
+# value came from this engine at all. Derived from RULES so it never drifts.
+AUTO_MERGE_RULES: frozenset[str] = frozenset(r.name for r in RULES)
 
 
 # ── Phone-set parsing (kept in sync with src/preprocessing/blocking._parse_phone_set)
@@ -371,10 +373,9 @@ def apply_rules(
     -------
     pd.DataFrame
         One row per *confirmed* pair (at least one rule fired) with the output
-        schema documented at module level — including REVIEW-tier confirmations
-        (their winning `match_rule` is in `REVIEW_RULES`). The caller splits
-        auto-merge from review by membership in `AUTO_MERGE_RULES`. Pairs that no
-        rule confirmed are dropped.
+        schema documented at module level. Every confirmation is auto-merge —
+        the caller merges the lot. Pairs that no rule confirmed are dropped;
+        `classify_non_matches` decides those.
     """
     required = {"PATID_A", "PATID_B"}
     missing = required - set(candidate_pairs.columns)
@@ -526,6 +527,6 @@ __all__ = [
     "COL_PATID", "COL_FIRST_NM", "COL_LAST_NM", "COL_BIRTH_DT", "COL_SSN",
     "COL_EMAIL", "COL_ADDRESS", "COL_SEX", "COL_PHONES",
     "DEFAULT_SSN_FANOUT_THRESHOLD", "NAME_JW_THRESHOLD", "NAME_LEV_MAX",
-    "MatchRule", "RULES", "AUTO_MERGE_RULES", "REVIEW_RULES",
+    "MatchRule", "RULES", "AUTO_MERGE_RULES",
     "apply_rules", "get_non_matches",
 ]

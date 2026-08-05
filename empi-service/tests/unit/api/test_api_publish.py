@@ -23,7 +23,9 @@ from src.api.backends import sql_backend
 from src.api.backends.index_backend import SqlIndexBackend
 from src.api.backends.parquet_backend import ParquetIndexBackend
 from src.config import Settings
-from src.contracts import ArtifactRef, RunManifest
+from src.contracts import (
+    ArtifactRef, RunManifest, TIER_AUTO_MERGE, TIER_HUMAN_REVIEW, TIER_NO_MATCH,
+)
 
 
 @pytest.fixture
@@ -94,16 +96,6 @@ def _write_run(settings: Settings, run_id: str):
     non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
 
-    review_evidence = pd.DataFrame({
-        "PATID_A": ["P4"], "PATID_B": ["P5"],
-        "match_rule": ["NAME_DOB_SEX"], "confidence": [0.98],
-        "rules_fired": ["NAME_DOB_SEX"], "is_suspicious": [False],
-        "high_fanout_ssn": [False],
-        "source_blocks": ["B3"], "n_blocks": [1],
-    })
-    review_evidence_path = settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
-    review_evidence.to_parquet(review_evidence_path, index=False)
-
     clusters = pd.DataFrame({
         "PATID": ["P1", "P2", "P3", "P4", "P5"], "cluster_id": [0, 0, 1, 2, 3],
     })
@@ -118,7 +110,6 @@ def _write_run(settings: Settings, run_id: str):
         raw_input=ref(cleaned_path, 5), cleaned=ref(cleaned_path, 5),
         candidate_pairs=ref(matches_path, 1), matches=ref(matches_path, 1),
         non_matches=ref(non_matches_path, 1),
-        review_evidence=ref(review_evidence_path, 1),
         clusters=ref(clusters_path, 5),
         counts={},
     )
@@ -160,8 +151,11 @@ class TestPublishRun:
 
         candidates = sql_backend.review_candidates_for_patid(conn, "P4")
         assert len(candidates) == 1
-        assert candidates[0]["match_rule"] == "NAME_DOB_SEX"
-        assert candidates[0]["confidence"] == 0.98
+        # No deterministic rule confirmed a review candidate — by construction
+        # the rule/confidence slots are NULL. A reviewer UI must render them as
+        # absent, never as a 0% score.
+        assert candidates[0]["match_rule"] is None
+        assert candidates[0]["confidence"] is None
 
     def test_record_attrs_denormalized(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -282,8 +276,8 @@ class TestPublishAgainstParquetBackend:
         rc = parquet_backend._tables["review_candidate"]
         candidates = rc[(rc["patid_a"] == "P4") | (rc["patid_b"] == "P4")]
         assert len(candidates) == 1
-        assert candidates.iloc[0]["match_rule"] == "NAME_DOB_SEX"
-        assert candidates.iloc[0]["confidence"] == 0.98
+        assert candidates.iloc[0]["match_rule"] is None
+        assert candidates.iloc[0]["confidence"] is None
         # Batch publish never FS-scores a run — only incremental scoring does.
         assert pd.isna(candidates.iloc[0]["fs_match_probability"])
 
@@ -318,3 +312,73 @@ class TestPublishAgainstParquetBackend:
     def test_missing_manifest_raises(self, parquet_backend, fixture_settings):
         with pytest.raises(FileNotFoundError):
             publish.publish_run(parquet_backend, "does-not-exist", fixture_settings)
+
+
+# ── The review queue reflects the LAST stage to decide ──────────────────────────
+class TestReviewQueueIsPostGateAndML:
+    """Stage 3 writes `non_matches` before Stages 4.25/4.5 run, so publishing it
+    as-is would queue pairs the gate discarded and pairs the ML matcher already
+    merged (its auto_merge tier forms real merge edges). The queue must be the
+    last stage's human_review tier."""
+
+    def _pool(self, pairs, gate=None, ml=None):
+        nm = pd.DataFrame({
+            "PATID_A": [a for a, _ in pairs], "PATID_B": [b for _, b in pairs],
+            "source_blocks": ["B3"] * len(pairs), "n_blocks": [1] * len(pairs),
+        })
+        return publish._final_review_pool(nm, gate, ml)
+
+    def _results(self, rows):
+        return pd.DataFrame({
+            "PATID_A": [a for a, _, _, _ in rows],
+            "PATID_B": [b for _, b, _, _ in rows],
+            "model_name": ["m"] * len(rows),
+            "score": [s for _, _, _, s in rows],
+            "predicted_tier": [t for _, _, t, _ in rows],
+        })
+
+    def test_gate_drops_are_excluded(self):
+        gate = self._results([
+            ("P1", "P2", TIER_HUMAN_REVIEW, 0.8), ("P3", "P4", TIER_NO_MATCH, 0.01),
+        ])
+        kept, scores = self._pool([("P1", "P2"), ("P3", "P4")], gate=gate)
+        assert list(zip(kept["PATID_A"], kept["PATID_B"])) == [("P1", "P2")]
+        # The gate's score is P(plausible), a different question — not surfaced.
+        assert scores == {}
+
+    def test_ml_auto_merges_are_excluded_and_ml_wins_over_the_gate(self):
+        gate = self._results([
+            ("P1", "P2", TIER_HUMAN_REVIEW, 0.8), ("P3", "P4", TIER_HUMAN_REVIEW, 0.7),
+        ])
+        ml = self._results([
+            ("P1", "P2", TIER_AUTO_MERGE, 0.97), ("P3", "P4", TIER_HUMAN_REVIEW, 0.42),
+        ])
+        kept, scores = self._pool([("P1", "P2"), ("P3", "P4")], gate=gate, ml=ml)
+        # P1/P2 passed the gate but the ML matcher merged it — it is not a
+        # review candidate, it is already an entity.
+        assert list(zip(kept["PATID_A"], kept["PATID_B"])) == [("P3", "P4")]
+        assert scores == {frozenset(("P3", "P4")): 0.42}
+
+    def test_pair_order_does_not_matter(self):
+        ml = self._results([("P2", "P1", TIER_HUMAN_REVIEW, 0.5)])
+        kept, scores = self._pool([("P1", "P2")], ml=ml)
+        assert len(kept) == 1
+        assert scores == {frozenset(("P1", "P2")): 0.5}
+
+    def test_ungated_run_publishes_stage3_unfiltered(self):
+        # No gate or ML model active: Stage 3's pool is all the information the
+        # run has, so it is published whole rather than emptied.
+        kept, scores = self._pool([("P1", "P2"), ("P3", "P4")])
+        assert len(kept) == 2
+        assert scores == {}
+
+    def test_ml_score_reaches_the_review_candidate_row(self):
+        ml = self._results([("P4", "P5", TIER_HUMAN_REVIEW, 0.42)])
+        kept, scores = self._pool([("P4", "P5")], ml=ml)
+        rows, patids = publish._review_candidate_rows(kept, scores, "r1", "t0")
+        assert len(rows) == 1
+        a, b, match_rule, confidence, evidence, blocks, run_id, now = rows[0]
+        assert (a, b) == ("P4", "P5")
+        assert match_rule is None and evidence is None  # no rule confirmed it
+        assert confidence == 0.42
+        assert patids == {"P4", "P5"}

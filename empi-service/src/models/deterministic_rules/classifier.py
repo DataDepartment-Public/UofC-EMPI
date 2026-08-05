@@ -19,7 +19,6 @@ import pandas as pd
 from src.contracts import TIER_AUTO_MERGE, TIER_HUMAN_REVIEW, TIER_NO_MATCH
 from src.models.clustering import assign_clusters
 from src.models.deterministic_rules.rules import (
-    AUTO_MERGE_RULES,
     COL_BIRTH_DT,
     COL_FIRST_NM,
     COL_LAST_NM,
@@ -185,16 +184,15 @@ def get_match_stats(
     matches: pd.DataFrame,
     n_records: int | None = None,
     decided: pd.DataFrame | None = None,
-    review_matches: pd.DataFrame | None = None,
 ) -> dict:
     """Compute the audit statistics described in the guide's Results Summary.
 
     Parameters
     ----------
     matches : pd.DataFrame
-        The AUTO-MERGE matches (`apply_rules` output filtered to
-        `AUTO_MERGE_RULES`). All distribution / coverage / cluster stats are
-        computed over this auto-merge set.
+        The rule confirmations (`apply_rules` output). Every confirmation is
+        auto-merge, so this is the whole auto-merge set; all distribution /
+        coverage / cluster stats are computed over it.
     n_records : int, optional
         Total patient count in the source dataset, used for the coverage rate.
         When omitted, coverage is computed against the number of matched
@@ -202,12 +200,7 @@ def get_match_stats(
     decided : pd.DataFrame, optional
         Output of `classify_non_matches`. When given, the result includes a
         `decision_distribution` with the three-way `match` / `review` / `reject`
-        counts. Review-tier rule confirmations (`review_matches`) are counted in
-        the `review` bucket, not `match`.
-    review_matches : pd.DataFrame, optional
-        The REVIEW-tier rule confirmations (`apply_rules` output filtered to
-        `REVIEW_RULES`). When given, adds a `review_match_distribution` (per-rule
-        counts) and rolls these pairs into the `review` decision count.
+        counts.
 
     Returns
     -------
@@ -218,13 +211,12 @@ def get_match_stats(
     if matches.empty:
         return {}
 
-    n_review_confirmed = 0 if review_matches is None else len(review_matches)
     decision_distribution = None
     if decided is not None:
         dvc = decided["decision"].value_counts() if not decided.empty else {}
         decision_distribution = {
             TIER_AUTO_MERGE: len(matches),
-            TIER_HUMAN_REVIEW: int(dvc.get(TIER_HUMAN_REVIEW, 0)) + n_review_confirmed,
+            TIER_HUMAN_REVIEW: int(dvc.get(TIER_HUMAN_REVIEW, 0)),
             TIER_NO_MATCH: int(dvc.get(TIER_NO_MATCH, 0)),
         }
 
@@ -272,19 +264,6 @@ def get_match_stats(
         **(
             {"decision_distribution": decision_distribution}
             if decision_distribution is not None
-            else {}
-        ),
-        **(
-            {
-                "review_match_distribution": dict(
-                    sorted(
-                        review_matches["match_rule"].value_counts().items(),
-                        key=lambda kv: kv[1],
-                        reverse=True,
-                    )
-                )
-            }
-            if review_matches is not None and not review_matches.empty
             else {}
         ),
     }
@@ -353,19 +332,13 @@ class DeterministicRulesClassifier:
         decided = classify_non_matches(
             candidate_pairs, confirmed, df_clean, self.min_contradictions
         )
-        is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
-        auto = confirmed[is_auto]
-        review_confirmed = confirmed[~is_auto]
-
+        # Every rule is auto-merge, so a confirmation is a merge. The remaining
+        # two tiers come from `decided` (no_match / human_review).
         return pd.concat(
             [
                 _to_classification_results(
-                    auto, model_name=self.model_name,
+                    confirmed, model_name=self.model_name,
                     tier=TIER_AUTO_MERGE, score_col="confidence",
-                ),
-                _to_classification_results(
-                    review_confirmed, model_name=self.model_name,
-                    tier=TIER_HUMAN_REVIEW, score_col="confidence",
                 ),
                 _to_classification_results(
                     decided, model_name=self.model_name, tier_col="decision",

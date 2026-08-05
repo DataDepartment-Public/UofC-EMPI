@@ -418,7 +418,6 @@ def evaluate_run(
     candidates = _keyset(_read(manifest.candidate_pairs, settings))
     matches = _keyset(_read(manifest.matches, settings))
     rejects = _keyset(_read(manifest.rejects, settings))
-    review_evidence = _keyset(_read(manifest.review_evidence, settings))
 
     gate_df = _read(manifest.gate_results, settings)
     gate_pass = _tier_keys(gate_df, TIER_HUMAN_REVIEW)
@@ -494,7 +493,6 @@ def evaluate_run(
     stage_pairwise = {
         "blocking": _stage(candidates, y_true, label_col),
         "rules_auto_merge": _stage(matches, y_true, label_col),
-        "rules_any_confirmed": _stage(matches | review_evidence, y_true, label_col),
         "gate_pass": _stage(
             gate_pass,
             y_plausible if y_plausible is not None else y_true,

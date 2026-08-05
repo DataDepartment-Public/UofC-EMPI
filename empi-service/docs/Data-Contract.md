@@ -182,8 +182,8 @@ columns the contract validates (what downstream depends on):
 | `last_4_SSN` | string (4 digits) | yes | blocking (B9) |
 | `Email_clean` | string | yes | blocking (B6), rules |
 | `ZipCD_clean_base` | string (5 digits) | yes | blocking (B7) |
-| `AddressLine1_clean` | string | yes | rules (NAME_DOB_ADDRESS) |
-| `SexAtBirthDSC_clean` | string ∈ {MALE,FEMALE,OTHER} | yes | rules (NAME_DOB_SEX) |
+| `AddressLine1_clean` | string | yes | ML/gate features |
+| `SexAtBirthDSC_clean` | string ∈ {MALE,FEMALE,OTHER} | yes | ML/gate features |
 | `Phones_set` | list&lt;string&gt; (see serialization) | yes | blocking (B5), rules (phone agreement) |
 
 ### Other cleaned / derived columns (produced, not yet consumed downstream)
@@ -273,51 +273,54 @@ routing below differs by tier.
 | `SSN_DOB` | 1.000 | auto-merge | `SSN_clean` + `BirthDT_clean` |
 | `NAME_DOB_EMAIL` | 0.990 | auto-merge | First + Last + DOB + Email |
 | `NAME_DOB_PHONE` | 0.985 | auto-merge | First + Last + DOB + phone-set intersection |
-| `NAME_DOB_SEX` | 0.980 | **review** | First + Last + DOB + Sex |
-| `NAME_DOB_ADDRESS` | 0.970 | **review** | First + Last + DOB + `AddressLine1_clean` |
+
+Every rule is auto-merge: a rule fires only when it will confirm the pair
+outright. `confidence` orders the rules (it resolves which one wins when
+several fire) and is **not** a calibrated probability.
+
+`NAME_DOB_SEX` (0.980) and `NAME_DOB_ADDRESS` (0.970) were **removed**. They
+were review-tier — they fired, carried provenance, and then routed the pair to
+exactly where an unconfirmed pair already went, so they decided nothing while
+labelling ~65%/~67%-precision pairs with a 98%/97% "confidence" the reviewer UI
+rendered as certainty. Those pairs are now ordinary undecided pairs scored by
+the gate and the ML matcher.
 
 ### 3a — Matches (auto-merge tier only)
 
 - **Contract:** `contracts.Matches` (`strict=True`; empty frames skip validation).
 - **Location:** `data/auto_merge/matches_*.parquet`
-- **Grain:** one row per pair confirmed by an **auto-merge-tier** rule
-  (`contracts.AUTO_MERGE_RULE_NAMES` = `SSN_DOB`, `NAME_DOB_EMAIL`,
-  `NAME_DOB_PHONE`). **`NAME_DOB_SEX` and `NAME_DOB_ADDRESS` never appear
-  here** — they're review-tier; a pair they confirm routes to `non_matches` +
-  `review_evidence` instead (see 3b).
+- **Grain:** one row per rule-confirmed pair (`contracts.AUTO_MERGE_RULE_NAMES`
+  = `SSN_DOB`, `NAME_DOB_EMAIL`, `NAME_DOB_PHONE` — every rule there is).
+  A frame carrying `NAME_DOB_SEX` / `NAME_DOB_ADDRESS` is from a pre-removal
+  pipeline and fails validation.
 
 | Column | Dtype | Nullable | Notes |
 |---|---|---|---|
 | `PATID_A` | string | no | Carried unchanged from blocking. |
 | `PATID_B` | string | no | Carried unchanged from blocking. |
 | `match_rule` | string | no | Highest-confidence **auto-merge-tier** rule that fired (∈ `AUTO_MERGE_RULE_NAMES`). |
-| `confidence` | float64 | no | Confidence of `match_rule`, in **`[0.985, 1.000]`** — the auto-merge floor, not the full 5-rule range. |
-| `rules_fired` | string | no | Pipe-delimited list of **every** rule that fired (any tier). |
+| `confidence` | float64 | no | Ordering weight of `match_rule`, in **`[0.985, 1.000]`**. Not a probability — see the rule table above. |
+| `rules_fired` | string | no | Pipe-delimited list of **every** rule that fired. |
 | `is_suspicious` | bool | no | `True` if DOB, last name, or (both-present) SSN disagree. |
 | `high_fanout_ssn` | bool | no | `True` if the pair's shared SSN is carried by ≥ `EMPI_SSN_FANOUT_THRESHOLD` patients. |
 | `cluster_id` | int64 | no | Connected-component id, stamped by the writer. |
 | `source_blocks` | string | no | Passthrough from blocking. |
 | `n_blocks` | int64 | no | Passthrough from blocking. |
 
-### 3b — Non-matches (the Stage 4 FS matcher's input — a union of two provenances)
+### 3b — Non-matches (the undecided pool — Stage 4/4.25/4.5 input)
 
 - **Contract:** `contracts.NonMatches` (identical schema to `CandidatePairs`).
 - **Location:** `data/non_matches/non_matches_*.parquet`
-- **Grain:** `non_matches` is a **union of two distinct provenances**, and
-  Stage 4's FS matcher scores both **indistinguishably** — this is easy to
-  miss if you only look at the `review_evidence` companion artifact below:
-  1. **Review-tier rule-confirmed pairs** — `NAME_DOB_SEX` (~65% adjudicated
-     precision) or `NAME_DOB_ADDRESS` (~67%) fired, but the rule's own tier
-     means it's routed here rather than auto-merged.
-  2. **Genuine rule-undecided pairs** — no rule fired at all, and
-     `classify_non_matches` found **fewer than 3** strong-identifier
-     contradictions (so not confident enough to reject either).
-- **`review_evidence_<run_id>.parquet`** (companion, same directory): the
-  full column set for provenance (1) above — `match_rule`, `confidence`,
-  `rules_fired`, etc. — that the closed `NonMatches`/`CandidatePairs` schema
-  trims. Not part of a strict pandera contract (nothing in the pipeline reads
-  it back), but it has exactly one consumer: `src/api/ingest/publish.py`, which
-  surfaces *why* a review-tier pair was flagged rather than just that it was.
+- **Grain:** one row per **rule-undecided** pair — no rule confirmed it, and
+  `classify_non_matches` found **fewer than 3** strong-identifier
+  contradictions (so not confident enough to reject either). One provenance,
+  not two: the deterministic stage either decides a pair or passes it here.
+- The `review_evidence_<run_id>.parquet` companion artifact is **gone**,
+  along with the review-tier rules that populated it. Consequence for
+  `src/api/ingest/publish.py`: a `review_candidate` row's `match_rule` /
+  `confidence` / `rules_fired` are always NULL, because no deterministic rule
+  confirmed these pairs by definition. The columns are retained NULL-able so a
+  probabilistic stage can fill them with its own provenance.
 
 ### 3c — Rejects (terminal, audit-only)
 
@@ -514,8 +517,8 @@ matcher scored. Contributions are sign-normalized to the **served** score
 
 `src/models/clustering.py` is the terminal stage of `src/pipeline.py`, run
 once per pipeline invocation after stages 3, 4, and 4.5. **By default it
-clusters deterministic auto-merge matches only** (`AUTO_MERGE_RULES`-tier
-pairs) — review-tier confirmations and non-matches are excluded, and the
+clusters deterministic rule confirmations only** (every rule is
+`AUTO_MERGE_RULES`) — the undecided `non_matches` pool is excluded, and the
 Stage 4/4.5 classifier output is excluded too *unless explicitly turned on*.
 Stage 3 still stamps a per-pair `cluster_id` onto `matches` (via
 `clustering.assign_clusters`, used internally by
@@ -572,7 +575,7 @@ FastAPI service and the `empi-dashboard/` Next.js app actually read and write
 
 - **Producers:**
   `src/api/ingest/publish.py::publish_run` — one `RunManifest`'s `clusters` /
-  `matches` / `non_matches` / `cleaned` (+ `review_evidence` if present) →
+  `matches` / `non_matches` / `cleaned` →
   resolved entities. Batch-only, run once per full pipeline run.
   `src/api/ingest/incremental.py::score_records` — one or a few new records scored
   against the *existing* resolved population, no full pipeline re-run. Used
@@ -642,13 +645,13 @@ Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED (same split as
 ### 6b — Review & reconciliation
 
 `review_candidate` — an unresolved pair the pipeline routed to human review
-(review-tier rule-confirmed, or uncertain-but-not-rejected).
+(uncertain-but-not-rejected).
 
 | Column | Dtype | Nullable | Notes |
 |---|---|---|---|
 | `id` | int64 | no (key, SQLite only — `AUTOINCREMENT`) | Parquet dedups on the 3-column key below instead of a surrogate id. |
 | `patid_a`, `patid_b` | string | no | Canonical pair, `patid_a < patid_b` (same ordering as `contracts.CandidatePairs`). |
-| `match_rule` | string | yes | Set only for the review-tier rule-confirmed subset (`NAME_DOB_SEX` / `NAME_DOB_ADDRESS`); `None` for uncertain pairs. |
+| `match_rule` | string | yes | Always `None` — no deterministic rule confirmed a review candidate. Retained for a probabilistic stage to populate. |
 | `confidence` | float64 | yes | |
 | `evidence` | string | yes | `rules_fired`, when `match_rule` is set. |
 | `source_blocks` | string | yes | Pipe-delimited block IDs, passthrough from stage 2. |
@@ -809,7 +812,7 @@ specifically to replace fragile "latest version in the directory" resolution —
 | `created_utc` | string | Run start time. |
 | `git_sha` | string, optional | Commit the run executed against. |
 | `raw_input`, `cleaned`, `candidate_pairs`, `matches`, `non_matches` | `ArtifactRef` | Always populated. |
-| `rejects`, `clusters`, `review_evidence` | `ArtifactRef`, optional | Populated by every current run; optional for backward-compat with older manifest shapes. |
+| `rejects`, `clusters` | `ArtifactRef`, optional | Populated by every current run; optional for backward-compat with older manifest shapes. A pre-removal manifest's `review_evidence` key is ignored on load. |
 | `matches_model`, `fs_features` | `ArtifactRef`, optional | Populated **only** when an active FS model scored the run (null if Stage 4 was skipped). |
 | `gate_results` | `ArtifactRef`, optional | Populated **only** when an active gate model gated the run (null when Stage 4.25 fell back to the legacy FS gate or ran ungated). |
 | `gate_explanations`, `ml_explanations` | `ArtifactRef`, optional | Per-pair SHAP frames. Null when `explanations_enabled` is off, the stage was skipped, or the served model exposes no contributions. |
@@ -832,7 +835,7 @@ whether that's by design.
 | `data/processed/` | Stage 1 | Stage 2, Stage 3 (attribute join), `fs_matcher/train.py` | Active |
 | `data/blocking/` | Stage 2 (stacked, production) / standalone `run_blocking.py` (8-block-only, dev — see warning) | Stage 3, `fs_matcher/train.py` | Active |
 | `data/auto_merge/` | Stage 3 (auto-merge tier) | `src/api/ingest/publish.py`, `src/evaluation/rule_eval.py` | Active |
-| `data/non_matches/` | Stage 3 (`non_matches_*` + `review_evidence_*` companion) | Stage 4 (scores `non_matches`), `src/api/ingest/publish.py` (both files) | Active |
+| `data/non_matches/` | Stage 3 (`non_matches_*`) | Stage 4 (scores `non_matches`), `src/api/ingest/publish.py` | Active |
 | `data/no_match/` | Stage 3 | *(none)* | Terminal — audit only, no reader |
 | `data/fs_output/` | Stage 4 (`ProbabilisticMatches` audit frame + pipeline candidates + `train.py` labeled training set — merged folder, was `matches_model/`+`FS_output/`) | Stage 4.5 (`fs_features` enrichment input, optional); audit frame feeds Stage 5's edge union when `fs_feeds_clustering` is on | Active — audit-only since Stage 4.25 took over gating |
 | `data/gate_output/` | Stage 4.25 (`ClassificationResults` audit frame + `PairExplanations` SHAP frame) | `GET /explanations/nonmatch_gate/...` (SHAP frame); the survivors pass to Stage 4.5 in memory | Active — sole record of the pairs the gate dropped |

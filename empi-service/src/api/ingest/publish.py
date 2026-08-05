@@ -22,10 +22,12 @@ smallest existing `mid`), else mint a fresh one.
 highest-confidence deterministic pair connecting its *unlocked* members — the
 pipeline's evidence for the grouping actually being written.
 
-Review-tier data (FR-7/8/19/20/21 in the Dashboard FR doc): `non_matches`
-(the full review queue — review-tier rule-confirmed pairs + uncertain pairs)
-and the companion `review_evidence` artifact (rule provenance for the
-rule-confirmed subset — see `src/pipeline.py`) become `review_candidate` rows.
+Review-tier data (FR-7/8/19/20/21 in the Dashboard FR doc): the pairs still
+awaiting a *human* decision become `review_candidate` rows. That is Stage 3's
+`non_matches` narrowed to what the gate (4.25) and ML matcher (4.5) left in
+their `human_review` tier — see `_final_review_pool`. Publishing Stage 3's
+pool directly would queue up pairs the gate already discarded and pairs the
+ML matcher already merged.
 A singleton entity whose sole member appears in the review queue gets
 `origin='review'` instead of `'none'`.
 
@@ -78,6 +80,7 @@ from src.contracts import (
     SEX,
     SSN,
     SSN_LAST4,
+    TIER_HUMAN_REVIEW,
     VALID_RECORD,
     ZIP_BASE,
 )
@@ -226,27 +229,88 @@ def _raw_row(patid: str, raw_by_patid: dict[str, dict], run_id: str) -> tuple | 
     return (patid, json.dumps(payload), run_id)
 
 
+def _final_review_pool(
+    non_matches: pd.DataFrame,
+    gate_results: pd.DataFrame | None,
+    matches_ml: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, dict[frozenset, float]]:
+    """Narrow Stage 3's undecided pool to the pairs still awaiting a *human*
+    decision after the later stages ran, and return the ML score for each.
+
+    `non_matches` is Stage 3's output, written before Stages 4.25/4.5 execute.
+    Publishing it as-is puts pairs in front of reviewers that nothing will ever
+    act on: the gate discards its `no_match` tier outright, and the ML matcher's
+    `auto_merge` tier forms real merge edges (`ml_feeds_clustering`), so those
+    pairs are *already merged* in the entity table. The queue must be what each
+    stage left undecided, which is the last stage's `human_review` tier.
+
+    Precedence mirrors the pipeline: ML matcher -> gate -> ungated Stage 3.
+    Whichever ran last is authoritative, because each stage only ever sees the
+    previous one's survivors.
+
+    The score map is populated only from the ML matcher, whose score is
+    P(confident match) — a probability about the question the reviewer is
+    answering. The gate's score is P(plausible), a different question, so a
+    gate-only fallback leaves the score NULL rather than presenting the two
+    interchangeably in one column.
+    """
+    if non_matches.empty:
+        return non_matches, {}
+
+    def _review_keys(frame: pd.DataFrame | None) -> set[frozenset] | None:
+        if frame is None or frame.empty or "predicted_tier" not in frame.columns:
+            return None
+        rows = frame[frame["predicted_tier"] == TIER_HUMAN_REVIEW]
+        return {frozenset((a, b)) for a, b in zip(rows[PATID_A], rows[PATID_B])}
+
+    scores: dict[frozenset, float] = {}
+    keys = _review_keys(matches_ml)
+    if keys is not None:
+        ml_review = matches_ml[matches_ml["predicted_tier"] == TIER_HUMAN_REVIEW]
+        scores = {
+            frozenset((a, b)): float(s)
+            for a, b, s in zip(ml_review[PATID_A], ml_review[PATID_B], ml_review["score"])
+        }
+    else:
+        keys = _review_keys(gate_results)
+
+    if keys is None:
+        logger.info(
+            "Review queue: no gate/ML output for this run — publishing Stage 3's "
+            "%d undecided pairs unfiltered.", len(non_matches)
+        )
+        return non_matches, scores
+
+    pair_keys = [
+        frozenset((a, b))
+        for a, b in zip(non_matches[PATID_A], non_matches[PATID_B])
+    ]
+    kept = non_matches[[k in keys for k in pair_keys]].reset_index(drop=True)
+    logger.info(
+        "Review queue: %d of Stage 3's %d undecided pairs still need a human "
+        "decision after the gate/ML stages.", len(kept), len(non_matches)
+    )
+    return kept, scores
+
+
 def _review_candidate_rows(
     non_matches: pd.DataFrame,
-    review_evidence: pd.DataFrame | None,
+    scores: dict[frozenset, float],
     run_id: str,
     now: str,
 ) -> tuple[list[tuple], set[str]]:
-    """`non_matches` is the full review queue (review-tier rule-confirmed +
-    uncertain pairs); `review_evidence` (may be `None` for pre-existing
-    manifests without it) carries `match_rule`/`rules_fired` for the
-    rule-confirmed subset. Returns (rows, {every PATID in the queue})."""
+    """`non_matches` is the final review queue (see `_final_review_pool`).
+    Returns (rows, {every PATID in the queue}).
+
+    `match_rule`/`evidence` are always NULL: by definition no deterministic
+    rule confirmed these pairs. (They were populated from a `review_evidence`
+    artifact while NAME_DOB_SEX / NAME_DOB_ADDRESS existed as review-tier
+    rules — see the RULES comment in deterministic_rules/rules.py for why that
+    went away.) `confidence` carries the ML matcher's P(confident match) when
+    Stage 4.5 scored the pair, else NULL — a reviewer UI must render an absent
+    score as absent, never as 0%."""
     if non_matches.empty:
         return [], set()
-
-    evidence_by_pair: dict[frozenset, tuple[str, float, str]] = {}
-    if review_evidence is not None and not review_evidence.empty:
-        for a, b, rule, conf, fired in zip(
-            review_evidence[PATID_A], review_evidence[PATID_B],
-            review_evidence["match_rule"], review_evidence["confidence"],
-            review_evidence["rules_fired"],
-        ):
-            evidence_by_pair[frozenset((a, b))] = (rule, float(conf), fired)
 
     rows: list[tuple] = []
     patids: set[str] = set()
@@ -255,8 +319,7 @@ def _review_candidate_rows(
     ):
         patids.add(a)
         patids.add(b)
-        rule, conf, fired = evidence_by_pair.get(frozenset((a, b)), (None, None, None))
-        rows.append((a, b, rule, conf, fired, blocks, run_id, now))
+        rows.append((a, b, None, scores.get(frozenset((a, b))), None, blocks, run_id, now))
     return rows, patids
 
 
@@ -321,10 +384,14 @@ def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
     matches = pd.read_parquet(_resolve(manifest.matches.path, settings))
     non_matches = pd.read_parquet(_resolve(manifest.non_matches.path, settings))
     cleaned = pd.read_parquet(_resolve(manifest.cleaned.path, settings))
-    review_evidence = (
-        pd.read_parquet(_resolve(manifest.review_evidence.path, settings))
-        if manifest.review_evidence is not None
-        else None
+    # Stage 4.25/4.5 artifacts — absent when no gate/ML model was active.
+    gate_results = (
+        pd.read_parquet(_resolve(manifest.gate_results.path, settings))
+        if manifest.gate_results is not None else None
+    )
+    matches_ml = (
+        pd.read_parquet(_resolve(manifest.matches_ml.path, settings))
+        if manifest.matches_ml is not None else None
     )
 
     attrs_by_patid = _attrs_index(cleaned)
@@ -336,8 +403,11 @@ def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
     next_seq = backend.max_mid_sequence() + 1
     now = _now()
 
+    review_pool, review_scores = _final_review_pool(
+        non_matches, gate_results, matches_ml
+    )
     review_candidate_rows, review_patids = _review_candidate_rows(
-        non_matches, review_evidence, run_id, now
+        review_pool, review_scores, run_id, now
     )
 
     # Incremental-scoring index rebuild — pure Python/pandas, no DB round-trips

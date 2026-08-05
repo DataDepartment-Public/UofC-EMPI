@@ -77,7 +77,6 @@ from src.contracts import (
 )
 from src.api.backends.index_backend import IndexBackend
 from src.models.deterministic_rules import (
-    AUTO_MERGE_RULES,
     apply_rules,
     classify_non_matches,
 )
@@ -212,7 +211,6 @@ def _score_one_record(
 
     matches = pd.DataFrame(columns=["PATID_A", "PATID_B", "match_rule", "confidence", "rules_fired"])
     non_matches = pd.DataFrame(columns=["PATID_A", "PATID_B", "source_blocks", "n_blocks"])
-    review_confirmed = matches
     mini_clean: pd.DataFrame | None = None
 
     if candidates:
@@ -229,21 +227,21 @@ def _score_one_record(
             candidate_pairs, mini_clean,
             ssn_fanout_threshold=settings.ssn_fanout_threshold,
         )
-        is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
-        matches = confirmed[is_auto].reset_index(drop=True)
-        review_confirmed = confirmed[~is_auto].reset_index(drop=True)
+        # Every rule is auto-merge, so a confirmation is a merge — no tier split.
+        matches = confirmed.reset_index(drop=True)
 
         decided = classify_non_matches(candidate_pairs, confirmed, mini_clean)
         pair_cols = ["PATID_A", "PATID_B", "source_blocks", "n_blocks"]
-        non_matches = pd.concat(
-            [review_confirmed[pair_cols], decided[decided["decision"] == TIER_HUMAN_REVIEW][pair_cols]]
-        ).reset_index(drop=True)
+        non_matches = (
+            decided[decided["decision"] == TIER_HUMAN_REVIEW][pair_cols]
+            .reset_index(drop=True)
+        )
 
     target_mid = _resolve_auto_merge(backend, patid, matches, run_id, now, outcome)
     has_review = not non_matches.empty
     if has_review:
         _persist_review_candidates(
-            backend, settings, non_matches, review_confirmed, mini_clean, run_id, now,
+            backend, settings, non_matches, mini_clean, run_id, now,
         )
 
     if target_mid is None:
@@ -327,9 +325,12 @@ def _resolve_auto_merge(
 
 def _persist_review_candidates(
     backend: IndexBackend, settings: Settings, non_matches: pd.DataFrame,
-    review_confirmed: pd.DataFrame, mini_clean: pd.DataFrame | None,
-    run_id: str, now: str,
+    mini_clean: pd.DataFrame | None, run_id: str, now: str,
 ) -> None:
+    """Persist the undecided pairs as review candidates, with the FS score
+    when a model is active. `match_rule`/`confidence`/`rules_fired` are always
+    NULL here — no deterministic rule confirmed these pairs, by definition.
+    See `publish._review_candidate_rows` for why the columns stay."""
     fs_scores: dict[tuple[str, str], tuple[float, str]] = {}
     active_model = resolve_active_model(settings)
     if active_model is not None and mini_clean is not None:
@@ -347,22 +348,12 @@ def _persist_review_candidates(
         ):
             fs_scores[(a, b)] = (float(score), str(tier))
 
-    evidence_by_pair: dict[tuple[str, str], tuple[str, float, str]] = {}
-    if not review_confirmed.empty:
-        for a, b, rule, conf, fired in zip(
-            review_confirmed["PATID_A"], review_confirmed["PATID_B"],
-            review_confirmed["match_rule"], review_confirmed["confidence"],
-            review_confirmed["rules_fired"],
-        ):
-            evidence_by_pair[(a, b)] = (rule, float(conf), fired)
-
     rows = []
     for a, b, blocks in zip(
         non_matches["PATID_A"], non_matches["PATID_B"], non_matches["source_blocks"]
     ):
-        rule, conf, fired = evidence_by_pair.get((a, b), (None, None, None))
         fs_prob, fs_tier = fs_scores.get((a, b), (None, None))
-        rows.append((a, b, rule, conf, fired, blocks, run_id, now, fs_prob, fs_tier))
+        rows.append((a, b, None, None, None, blocks, run_id, now, fs_prob, fs_tier))
 
     backend.insert_review_candidates(rows)
 

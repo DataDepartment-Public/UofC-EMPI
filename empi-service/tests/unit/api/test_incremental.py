@@ -96,16 +96,6 @@ def _seed_population(settings: Settings, conn) -> None:
     non_matches_path = settings.non_matches_dir / "non_matches_r0.parquet"
     non_matches.to_parquet(non_matches_path, index=False)
 
-    review_evidence = pd.DataFrame({
-        "PATID_A": ["P4"], "PATID_B": ["P5"],
-        "match_rule": ["NAME_DOB_SEX"], "confidence": [0.98],
-        "rules_fired": ["NAME_DOB_SEX"], "is_suspicious": [False],
-        "high_fanout_ssn": [False],
-        "source_blocks": ["B3"], "n_blocks": [1],
-    })
-    review_evidence_path = settings.non_matches_dir / "review_evidence_r0.parquet"
-    review_evidence.to_parquet(review_evidence_path, index=False)
-
     clusters = pd.DataFrame({
         "PATID": ["P1", "P2", "P3", "P4", "P5"], "cluster_id": [0, 0, 1, 2, 3],
     })
@@ -122,7 +112,6 @@ def _seed_population(settings: Settings, conn) -> None:
         raw_input=ref(cleaned_path, 5), cleaned=ref(cleaned_path, 5),
         candidate_pairs=ref(matches_path, 1), matches=ref(matches_path, 1),
         non_matches=ref(non_matches_path, 1),
-        review_evidence=ref(review_evidence_path, 1),
         clusters=ref(clusters_path, 5),
         counts={},
     )

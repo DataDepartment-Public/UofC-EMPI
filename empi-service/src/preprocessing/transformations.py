@@ -10,7 +10,9 @@ pipeline consumes (`last_4_SSN`, `ZipCD_clean_base`/`_ext`,
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from collections import Counter
 from typing import Optional, Tuple
 
@@ -24,6 +26,10 @@ try:
     _LIBPOSTAL_AVAILABLE = True
 except Exception:
     _LIBPOSTAL_AVAILABLE = False
+
+# PHI: aggregate counts only — never field values. See the convention in
+# `src/preprocessing/blocking.py`.
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -839,11 +845,49 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out = _rename_to_raw(out)
 
-    valid = pd.Series(True, index=out.index)
+    n_rows = len(out)
+    t_start = time.perf_counter()
+    logger.info("CLEAN — %d rows × %d columns in", n_rows, len(out.columns))
 
-    def _flag(series: pd.Series) -> None:
+    valid = pd.Series(True, index=out.index)
+    invalidated: dict[str, int] = {}
+    field_started = t_start
+
+    def _flag(series: pd.Series, field: str) -> None:
+        """AND the record-level validity with `series` (True = invalid) and
+        record how many rows this field alone flagged, for the summary."""
         nonlocal valid
-        valid = valid & ~series.fillna(False).astype(bool)
+        flagged = series.fillna(False).astype(bool)
+        n_flagged = int(flagged.sum())
+        if n_flagged:
+            invalidated[field] = invalidated.get(field, 0) + n_flagged
+        valid = valid & ~flagged
+
+    def _log_field(field: str, *clean_cols: str, note: str = "") -> None:
+        """One aggregate progress line per cleaned field: how many rows came
+        out populated, how many the rules nulled, and how long it took."""
+        nonlocal field_started
+        elapsed = time.perf_counter() - field_started
+        field_started = time.perf_counter()
+        present = [c for c in clean_cols if c in out.columns]
+        if not present or not n_rows:
+            return
+        n_clean = int(out[present[0]].notna().sum())
+        raw_col = f'{field}_raw'
+        nulled = ''
+        if raw_col in out.columns:
+            # Negative when a field gains values (SuffixNM absorbs generational
+            # suffixes moved off the name fields) — report only true losses.
+            n_lost = int(out[raw_col].notna().sum()) - n_clean
+            if n_lost > 0:
+                nulled = f", {n_lost:d} nulled by cleaning"
+        flagged = invalidated.get(field, 0)
+        flagged_txt = f", {flagged:d} invalid" if flagged else ""
+        logger.info(
+            "  %-18s %8d/%d populated (%5.1f%%)%s%s%s [%.1fs]",
+            field, n_clean, n_rows, 100.0 * n_clean / n_rows,
+            nulled, flagged_txt, f", {note}" if note else "", elapsed,
+        )
 
     # Generational suffixes moved out of FirstNM/LastNM/MiddleNM, merged into
     # SuffixNM_clean below. The first non-null suffix in field order (First,
@@ -855,25 +899,28 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     if 'FirstNM_raw' in out.columns:
         res = out['FirstNM_raw'].apply(clean_first_name)
         out['FirstNM_clean'] = res.apply(lambda x: x[0])
-        _flag(res.apply(lambda x: x[1]))
+        _flag(res.apply(lambda x: x[1]), 'FirstNM')
         first_suffix = res.apply(lambda x: x[2])
         moved_suffix = moved_suffix.where(moved_suffix.notna(), first_suffix)
+        _log_field('FirstNM', 'FirstNM_clean')
 
     # ---- LastNM ----
     if 'LastNM_raw' in out.columns:
         res = out['LastNM_raw'].apply(clean_last_name)
         out['LastNM_clean'] = res.apply(lambda x: x[0])
-        _flag(res.apply(lambda x: x[1]))
+        _flag(res.apply(lambda x: x[1]), 'LastNM')
         last_suffix = res.apply(lambda x: x[2])
         moved_suffix = moved_suffix.where(moved_suffix.notna(), last_suffix)
+        _log_field('LastNM', 'LastNM_clean')
 
     # ---- MiddleNM ----
     if 'MiddleNM_raw' in out.columns:
         res = out['MiddleNM_raw'].apply(clean_middle_name)
         out['MiddleNM_clean'] = res.apply(lambda x: x[0])
-        _flag(res.apply(lambda x: x[1]))
+        _flag(res.apply(lambda x: x[1]), 'MiddleNM')
         mid_suffix = res.apply(lambda x: x[2])
         moved_suffix = moved_suffix.where(moved_suffix.notna(), mid_suffix)
+        _log_field('MiddleNM', 'MiddleNM_clean')
 
     # ---- SuffixNM ----
     if 'SuffixNM_raw' in out.columns:
@@ -885,42 +932,59 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     # only filling rows where SuffixNM_clean is still null.
     out['SuffixNM_clean'] = out['SuffixNM_clean'].where(
         out['SuffixNM_clean'].notna(), moved_suffix)
+    _log_field(
+        'SuffixNM', 'SuffixNM_clean',
+        note=f"{int(moved_suffix.notna().sum())} moved off name fields",
+    )
 
     # ---- BirthDT ----
     if 'BirthDT_raw' in out.columns:
         out['BirthDT_clean'] = out['BirthDT_raw'].apply(clean_birth_date)
+        _log_field('BirthDT', 'BirthDT_clean')
 
     # ---- SSN ----
     if 'SSN_raw' in out.columns:
         res = out['SSN_raw'].apply(clean_ssn)
         out['SSN_clean'] = res.apply(lambda x: x[0])
         out['last_4_SSN'] = res.apply(lambda x: x[1])
+        _log_field(
+            'SSN', 'SSN_clean',
+            note=f"{int(out['last_4_SSN'].notna().sum())} with last_4_SSN",
+        )
 
     # ---- AddressLine1 ----
     if 'AddressLine1_raw' in out.columns:
         res = out['AddressLine1_raw'].apply(clean_address_line1)
         out['AddressLine1_clean'] = res.apply(lambda x: x[0])
-        _flag(res.apply(lambda x: x[1]))
+        _flag(res.apply(lambda x: x[1]), 'AddressLine1')
+        _log_field('AddressLine1', 'AddressLine1_clean')
 
     # ---- AddressLine2 ----
     if 'AddressLine2_raw' in out.columns:
         res = out['AddressLine2_raw'].apply(clean_address_line2)
         out['AddressLine2_clean'] = res.apply(lambda x: x[0])
-        _flag(res.apply(lambda x: x[1]))
+        _flag(res.apply(lambda x: x[1]), 'AddressLine2')
+        _log_field('AddressLine2', 'AddressLine2_clean')
 
     # ---- CityNM ----
     if 'CityNM_raw' in out.columns:
         out['CityNM_clean'] = out['CityNM_raw'].apply(clean_city)
+        _log_field('CityNM', 'CityNM_clean')
 
     # ---- ZipCD ----
     if 'ZipCD_raw' in out.columns:
         res = out['ZipCD_raw'].apply(clean_zip)
         out['ZipCD_clean_base'] = res.apply(lambda x: x[0])
         out['ZipCD_clean_ext'] = res.apply(lambda x: x[1])
+        _log_field(
+            'ZipCD', 'ZipCD_clean_base',
+            note=f"{int(out['ZipCD_clean_ext'].notna().sum())} with +4 ext",
+        )
 
     # ---- StateCD ----
     if 'StateCD_raw' in out.columns:
         out['StateCD_clean'] = out['StateCD_raw'].apply(clean_state)
+        _log_field('StateCD', 'StateCD_clean')
 
     # ---- ZIP × State cross-check ----
     if 'ZipCD_clean_base' in out.columns and 'StateCD_clean' in out.columns:
@@ -934,24 +998,35 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         mask = out.apply(_zip_state_mismatch, axis=1)
         out.loc[mask, 'ZipCD_clean_base'] = np.nan
         out.loc[mask, 'ZipCD_clean_ext'] = np.nan
+        logger.info(
+            "  %-18s %8d rows nulled (ZIP prefix inconsistent with state) [%.1fs]",
+            'ZIP×State', int(mask.sum()), time.perf_counter() - field_started,
+        )
+        field_started = time.perf_counter()
 
     # ---- Phone slots ----
     for slot in ('PrimaryPhoneNBR', 'Phone01NBR', 'Phone02NBR', 'Phone03NBR'):
         raw = f'{slot}_raw'
         if raw in out.columns:
             out[f'{slot}_clean'] = out[raw].apply(clean_phone)
+            _log_field(slot, f'{slot}_clean')
 
     # ---- Email ----
     if 'Email_raw' in out.columns:
         out['Email_clean'] = out['Email_raw'].apply(clean_email)
+        _log_field('Email', 'Email_clean')
 
     # ---- SexAtBirthDSC ----
     if 'SexAtBirthDSC_raw' in out.columns:
         out['SexAtBirthDSC_clean'] = out['SexAtBirthDSC_raw'].apply(clean_sex_at_birth)
+        _log_field('SexAtBirthDSC', 'SexAtBirthDSC_clean')
 
     # ---- Global cross-field: both names null → invalid ----
     if 'FirstNM_clean' in out.columns and 'LastNM_clean' in out.columns:
         both_null = out['FirstNM_clean'].isna() & out['LastNM_clean'].isna()
+        n_both_null = int(both_null.sum())
+        if n_both_null:
+            invalidated['both names null'] = n_both_null
         valid = valid & ~both_null
 
     # ---- Derived: full_name_tokens / full_name_compact ----
@@ -965,6 +1040,7 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             derive_full_name_compact(first, mid, last)
             for first, mid, last in zip(out['FirstNM_clean'], middle, out['LastNM_clean'])
         ]
+        _log_field('full_name', 'full_name_compact')
 
     # ---- Derived: Phones_set ----
     phone_clean_cols = [
@@ -977,9 +1053,24 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             derive_phones_set(*row)
             for row in zip(*(out[c] for c in phone_clean_cols))
         ]
+        n_with_phone = int(sum(1 for v in out['Phones_set'] if len(v) > 0))
+        n_phones = int(sum(len(v) for v in out['Phones_set']))
+        logger.info(
+            "  %-18s %8d/%d rows with ≥1 phone (%d distinct phones total) [%.1fs]",
+            'Phones_set', n_with_phone, n_rows, n_phones,
+            time.perf_counter() - field_started,
+        )
+        field_started = time.perf_counter()
 
     # ---- Derived: Address_normalized (libpostal) ----
     if 'AddressLine1_clean' in out.columns:
+        if not _LIBPOSTAL_AVAILABLE:
+            # Expected in most environments — `postal` is commented out of
+            # requirements.txt and needs the native lib. INFO, not WARNING.
+            logger.info(
+                "  libpostal unavailable — Address_normalized stays null for "
+                "every row (install the native lib + `postal` to enable it)"
+            )
         line2 = out['AddressLine2_clean'] if 'AddressLine2_clean' in out.columns else pd.Series(np.nan, index=out.index)
         city = out['CityNM_clean'] if 'CityNM_clean' in out.columns else pd.Series(np.nan, index=out.index)
         state = out['StateCD_clean'] if 'StateCD_clean' in out.columns else pd.Series(np.nan, index=out.index)
@@ -989,7 +1080,22 @@ def transform_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             derive_address_normalized(a1, a2, c, s, zb, ze)
             for a1, a2, c, s, zb, ze in zip(out['AddressLine1_clean'], line2, city, state, zip_b, zip_e)
         ]
+        _log_field('Address_normalized', 'Address_normalized')
 
     out['valid_record'] = valid
+
+    n_valid = int(valid.sum())
+    logger.info(
+        "CLEAN — %d rows: %d valid (%.1f%%), %d invalid, in %.1fs",
+        n_rows, n_valid, 100.0 * n_valid / n_rows if n_rows else 0.0,
+        n_rows - n_valid, time.perf_counter() - t_start,
+    )
+    if invalidated:
+        # Counts overlap: one row can be flagged by several fields.
+        detail = ", ".join(
+            f"{field}={count}" for field, count in
+            sorted(invalidated.items(), key=lambda kv: -kv[1])
+        )
+        logger.info("CLEAN — invalidating flags by source (rows may overlap): %s", detail)
 
     return out

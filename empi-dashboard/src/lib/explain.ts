@@ -21,10 +21,6 @@ export interface ExplainPayload {
   confidence: number | null;
   evidence: string | null;
   updated: string | null;
-  // Audit-only FS matcher signal (docs/FS-Matcher-Production-Guide.md) — only
-  // present for candidates scored via the incremental path.
-  fsMatchProbability?: number | null;
-  fsClassificationTier?: string | null;
 }
 
 export function encodeExplainPayload(payload: ExplainPayload): string {

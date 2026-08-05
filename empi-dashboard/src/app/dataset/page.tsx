@@ -7,6 +7,7 @@ import { useRecords, useUnmergeMutation } from "@/lib/hooks";
 import { DatasetFilters } from "@/components/dataset/DatasetFilters";
 import { DatasetRow } from "@/components/dataset/DatasetRow";
 import { UnmergeModal } from "@/components/dataset/UnmergeModal";
+import { AuditLog } from "@/components/shared/AuditLog";
 import { RawDataDrawer } from "@/components/shared/RawDataDrawer";
 import { Toast } from "@/components/shared/Toast";
 
@@ -111,10 +112,6 @@ function DatasetPageContent() {
     <div>
       <div className="mb-5">
         <h2 className="text-[22px] font-extrabold text-ink-2">Patient Registry</h2>
-        <p className="mt-1 text-[13px] text-gray">
-          The final, resolved patient list — one row per distinct patient.
-          Records still awaiting a match decision live on the Review Queue tab.
-        </p>
       </div>
 
       <DatasetFilters value={filters} onChange={setFilters} />
@@ -143,9 +140,10 @@ function DatasetPageContent() {
             </p>
           ) : (
             <>
-              <div className="mb-1.5 grid grid-cols-[20px_1.7fr_1fr_1fr_0.8fr_1fr] gap-3 px-4 text-[10px] font-bold tracking-wide text-gray uppercase">
+              <div className="mb-1.5 grid grid-cols-[20px_1.5fr_0.9fr_1fr_1fr_0.8fr_1fr] gap-3 px-4 text-[10px] font-bold tracking-wide text-gray uppercase">
                 <span />
                 <span>Patient name</span>
+                <span>Match status</span>
                 <span>Masked SSN</span>
                 <span>Birthdate</span>
                 <span># of entries</span>
@@ -182,6 +180,10 @@ function DatasetPageContent() {
           </div>
         </>
       )}
+
+      <div className="mt-8">
+        <AuditLog onFlash={flash} />
+      </div>
 
       <RawDataDrawer patid={rawPatid} onClose={() => setRawPatid(null)} />
 

@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, RecordsFilters, ReviewQueueFilters } from "./api-client";
+import type { ThresholdSettings } from "./schemas";
 
 /** FR-40: any workflow action must refresh Dashboard KPIs, the status
  * chart, and the dataset list. Centralizing the query keys + this
@@ -49,6 +50,23 @@ export function useRawRecord(patid: string | null) {
     queryKey: ["raw", patid],
     queryFn: () => api.getRaw(patid as string),
     enabled: patid !== null,
+  });
+}
+
+/** The ML matcher only ever scores a pair the gate let through, so a gate
+ * drop has no `ml_matcher` explanation — try it first and fall back to the
+ * gate's own explanation (the only record of *why* it was dropped). `null`
+ * (neither model scored this pair — e.g. a purely deterministic-rule match)
+ * is a normal, successful result, not a query error. */
+export function usePairExplanation(patidA: string | null, patidB: string | null) {
+  return useQuery({
+    queryKey: ["explanation", patidA, patidB],
+    queryFn: async () => {
+      const ml = await api.getExplanation("ml_matcher", patidA as string, patidB as string);
+      if (ml) return ml;
+      return api.getExplanation("nonmatch_gate", patidA as string, patidB as string);
+    },
+    enabled: patidA !== null && patidB !== null,
   });
 }
 
@@ -102,6 +120,29 @@ export function useDismissMutation() {
   return useMutation({
     mutationFn: ({ patidA, patidB }: { patidA: string; patidB: string }) =>
       api.dismiss(patidA, patidB),
+    onSuccess: refresh,
+  });
+}
+
+export function useThresholds() {
+  return useQuery({
+    queryKey: ["admin-thresholds"],
+    queryFn: api.getThresholds,
+  });
+}
+
+export function useUpdateThresholds() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (values: ThresholdSettings) => api.updateThresholds(values),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-thresholds"] }),
+  });
+}
+
+export function useUndoMutation() {
+  const refresh = useRefreshAll();
+  return useMutation({
+    mutationFn: (auditId: number) => api.undoAudit(auditId),
     onSuccess: refresh,
   });
 }

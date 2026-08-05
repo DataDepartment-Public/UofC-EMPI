@@ -11,7 +11,7 @@ import {
 } from "recharts";
 
 /** FR-11/12/13: Auto-match / Needs review / No match bar chart, fixed
- * green/yellow/red color coding. */
+ * green/teal/cyan color coding. */
 export function MatchStatusChart({
   autoMatch,
   needsReview,
@@ -23,8 +23,8 @@ export function MatchStatusChart({
 }) {
   const data = [
     { name: "Auto-match", value: autoMatch, color: "var(--status-auto)" },
-    { name: "Needs review", value: needsReview, color: "var(--status-review)" },
-    { name: "No match", value: noMatch, color: "var(--status-nomatch)" },
+    { name: "Needs review", value: needsReview, color: "var(--status-review-display)" },
+    { name: "No match", value: noMatch, color: "var(--status-nomatch-display)" },
   ];
 
   return (
@@ -66,8 +66,8 @@ export function MatchStatusChart({
       </ResponsiveContainer>
       <div className="mt-3 flex flex-wrap gap-4">
         <Legend color="var(--status-auto)" label="Auto-match" />
-        <Legend color="var(--status-review)" label="Needs review" />
-        <Legend color="var(--status-nomatch)" label="No match" />
+        <Legend color="var(--status-review-display)" label="Needs review" />
+        <Legend color="var(--status-nomatch-display)" label="No match" />
       </div>
     </div>
   );

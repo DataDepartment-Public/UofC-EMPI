@@ -39,6 +39,7 @@ data/evaluations/*
 data/local_index/*
 data/silver_labels/*
 data/gold_labels?*
+data/config/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/blocking/.gitkeep

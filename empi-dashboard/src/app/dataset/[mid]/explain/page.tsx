@@ -1,44 +1,43 @@
 "use client";
 
-import { Suspense, use } from "react";
-import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { compareRecords } from "@/lib/compare";
 import { decodeExplainPayload } from "@/lib/explain";
 import { fullName } from "@/lib/format";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
-import { useDashboardSummary } from "@/lib/hooks";
+import { ShapWaterfall } from "@/components/shared/ShapWaterfall";
+import { useDashboardSummary, usePairExplanation } from "@/lib/hooks";
 
 /** FR-31..FR-38: per-pair "why was this a match?" detail, reached from a
- * Dataset dropdown. Scope note: FR-34's Fellegi-Sunter waterfall and a
- * calibrated match probability need the probabilistic model stage, which
- * docs/Application-Architecture.md explicitly defers ("Model Explanation
- * sub-page once the probabilistic stage lands") — only deterministic rules
- * run in production today. This page shows what's real: the rule that
- * fired (or didn't), its fixed confidence, and a genuine field-by-field
- * comparison — no fabricated probability or waterfall. */
-export default function ExplainPage({
-  params,
-}: {
-  params: Promise<{ mid: string }>;
-}) {
-  const { mid } = use(params);
+ * Dataset dropdown. The deterministic side (rule fired, fixed confidence,
+ * field-by-field comparison) is always real. The probabilistic side — a
+ * calibrated match probability and SHAP waterfall — comes from
+ * `GET /explanations/{model}/{a}/{b}` (the gate + ML matcher's persisted,
+ * exact-TreeSHAP contributions); it's `null` for a pair neither model ever
+ * scored (a purely deterministic-rule match), which this page shows
+ * honestly rather than fabricating a probability. */
+export default function ExplainPage() {
   return (
     <Suspense fallback={<p className="text-sm text-gray">Loading…</p>}>
-      <ExplainPageContent mid={mid} />
+      <ExplainPageContent />
     </Suspense>
   );
 }
 
-function ExplainPageContent({ mid }: { mid: string }) {
+function ExplainPageContent() {
   const searchParams = useSearchParams();
   const payload = decodeExplainPayload(searchParams.get("d"));
   const { data: summary } = useDashboardSummary();
+  const { data: explanation, isLoading: explanationLoading } = usePairExplanation(
+    payload?.patientA.patid ?? null,
+    payload?.patientB.patid ?? null,
+  );
 
   if (!payload) {
     return (
       <div>
-        <BackLink mid={mid} />
+        <BackLink />
         <p className="card mt-4 p-6 text-sm text-status-nomatch">
           This explanation link is missing its comparison data. Go back to the
           Dataset tab and click a match again.
@@ -47,22 +46,13 @@ function ExplainPageContent({ mid }: { mid: string }) {
     );
   }
 
-  const {
-    patientA,
-    patientB,
-    rule,
-    confidence,
-    evidence,
-    updated,
-    fsMatchProbability,
-    fsClassificationTier,
-  } = payload;
+  const { patientA, patientB, rule, confidence, evidence, updated } = payload;
   const rows = compareRecords(patientA, patientB);
   const predictedClass = rule ? "Confirmed duplicate (rule-matched)" : "Uncertain — pending review";
 
   return (
     <div>
-      <BackLink mid={mid} />
+      <BackLink />
 
       <div className="mb-5 mt-3">
         <h2 className="text-[22px] font-extrabold text-ink-2">
@@ -116,27 +106,47 @@ function ExplainPageContent({ mid }: { mid: string }) {
       <div className="card mt-5 flex items-center justify-between gap-4 border-[#cfe6f7] bg-[#f3f9fe] p-5">
         <div>
           <h4 className="text-[15px] font-semibold text-brand-blue">
-            FS matcher signal
+            {explanation
+              ? explanation.model === "ml_matcher"
+                ? "ML matcher signal"
+                : "Non-match gate signal"
+              : "ML pipeline signal"}
           </h4>
           <p className="mt-1 max-w-md text-xs text-gray-2">
-            {fsMatchProbability != null
-              ? "Audit-only signal from the Fellegi-Sunter matcher — feeds a future GBT model, not a scored decision on this pair."
-              : "Not scored for this run. The FS matcher only runs on candidates scored via incremental scoring; this pair came from a full batch publish, which doesn't invoke it yet."}
+            {explanationLoading
+              ? "Loading model explanation…"
+              : explanation
+                ? `Scored by ${explanation.model}${explanation.run_id ? ` (run ${explanation.run_id})` : ""}.`
+                : "Not scored by the ML pipeline — this pair was resolved by deterministic rules alone."}
           </p>
         </div>
-        {fsMatchProbability != null && (
+        {explanation && (
           <div className="text-right">
             <div className="text-2xl font-extrabold text-brand-blue tabular-nums">
-              {Math.round(fsMatchProbability * 100)}%
+              {Math.round(explanation.decision.score * 100)}%
             </div>
-            {fsClassificationTier && (
-              <div className="text-xs font-semibold text-gray-2">
-                {fsClassificationTier}
-              </div>
-            )}
+            <div className="text-xs font-semibold text-gray-2">
+              {explanation.decision.tier}
+            </div>
           </div>
         )}
       </div>
+
+      {explanation && (
+        <div className="card mt-5 p-5">
+          <h4 className="mb-1 text-[15px] font-semibold text-ink-2">
+            Feature contributions (SHAP)
+          </h4>
+          <p className="mb-4 text-xs text-gray">
+            Exact TreeSHAP contributions from the{" "}
+            {explanation.model === "ml_matcher" ? "ML matcher" : "non-match gate"}{" "}
+            model, in log-odds. The dashed line marks the model&apos;s base
+            rate; each bar shows how one feature moved the decision from
+            there.
+          </p>
+          <ShapWaterfall explanation={explanation} />
+        </div>
+      )}
     </div>
   );
 }
@@ -162,13 +172,19 @@ function MetaCard({
   );
 }
 
-function BackLink({ mid }: { mid: string }) {
+/** Uses browser history rather than a constructed href so the reviewer
+ * lands back on whatever Patient Registry search/filter/page they were on
+ * — not a fresh view refiltered to this one pair. Safe because this page
+ * is only ever reached via a same-tab push from that list. */
+function BackLink() {
+  const router = useRouter();
   return (
-    <Link
-      href={`/dataset?search=${encodeURIComponent(mid)}`}
+    <button
+      type="button"
+      onClick={() => router.back()}
       className="text-sm font-semibold text-brand-blue hover:underline"
     >
-      ‹ Back to {mid} in Dataset
-    </Link>
+      ‹ Back to Patient Registry
+    </button>
   );
 }

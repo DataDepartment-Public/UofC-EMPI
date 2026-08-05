@@ -5,6 +5,8 @@ import { compareRecords } from "@/lib/compare";
 import { fullName } from "@/lib/format";
 import type { ReviewQueueItem } from "@/lib/schemas";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
+import { ShapWaterfall } from "@/components/shared/ShapWaterfall";
+import { usePairExplanation } from "@/lib/hooks";
 import { ManualMatchModal } from "./ManualMatchModal";
 import { PipelineTrail } from "./PipelineTrail";
 
@@ -26,6 +28,7 @@ export function ReviewCandidateDetail({
 }) {
   const [manualMatchOpen, setManualMatchOpen] = useState(false);
   const rows = compareRecords(item.patient_a, item.patient_b);
+  const { data: explanation } = usePairExplanation(item.patid_a, item.patid_b);
   const predictedClass = item.match_rule
     ? "Confirmed duplicate (rule-matched)"
     : "Uncertain — pending review";
@@ -90,9 +93,6 @@ export function ReviewCandidateDetail({
 
       <div className="mb-5">
         <h4 className="mb-1 text-[13px] font-bold text-ink-2">Pipeline trail</h4>
-        <p className="mb-2 text-[11.5px] text-gray">
-          How this pair moved through the pipeline, stage by stage.
-        </p>
         <PipelineTrail item={item} />
       </div>
 
@@ -100,6 +100,15 @@ export function ReviewCandidateDetail({
         <h4 className="mb-1 text-[13px] font-bold text-ink-2">Feature comparison</h4>
         <FeatureComparisonTable rows={rows} patidA={item.patid_a} patidB={item.patid_b} />
       </div>
+
+      {explanation && (
+        <div className="mb-5">
+          <h4 className="mb-1 text-[13px] font-bold text-ink-2">
+            Feature contributions (SHAP)
+          </h4>
+          <ShapWaterfall explanation={explanation} />
+        </div>
+      )}
 
       <button
         onClick={() => setManualMatchOpen(true)}

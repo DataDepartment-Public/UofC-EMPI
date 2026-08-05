@@ -86,7 +86,7 @@ export function ShapWaterfall({ explanation, maxFeatures = 8 }: Props) {
                 fill={
                   d.direction === "positive"
                     ? "var(--status-auto)"
-                    : "var(--status-nomatch-display)"
+                    : "var(--status-nomatch)"
                 }
               />
             ))}
@@ -99,7 +99,7 @@ export function ShapWaterfall({ explanation, maxFeatures = 8 }: Props) {
           Pushes toward match
         </span>
         <span className="flex items-center gap-1.5 font-semibold">
-          <i className="inline-block h-2.5 w-2.5 rounded-sm bg-status-nomatch-display" />
+          <i className="inline-block h-2.5 w-2.5 rounded-sm bg-status-nomatch" />
           Pushes toward non-match
         </span>
       </div>

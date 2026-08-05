@@ -81,17 +81,12 @@ export function PipelineTrail({ item }: { item: ReviewQueueItem }) {
           {explanation.isLoading ? (
             <Row muted>Loading…</Row>
           ) : explanation.data ? (
-            <>
-              <Row>
-                <span className="font-bold">
-                  {Math.round(explanation.data.decision.score * 100)}%
-                </span>
-                {` · ${explanation.data.decision.tier}`}
-              </Row>
-              <Row muted>
-                {explanation.data.run_id ? `Run ${explanation.data.run_id}` : "Scored"}
-              </Row>
-            </>
+            <Row>
+              <span className="font-bold">
+                {Math.round(explanation.data.decision.score * 100)}%
+              </span>
+              {` · ${explanation.data.decision.tier}`}
+            </Row>
           ) : (
             <Row muted>Not scored by the ML pipeline</Row>
           )}

@@ -281,6 +281,56 @@ class TestRecords:
         assert resp.status_code == 200
         assert all(row["action"] != "view_raw" for row in resp.json())
 
+    def test_get_clean_ssn(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.get("/records/P1/ssn-clean")
+        assert resp.status_code == 200
+        # SSN_raw is "123-45-6789"; clean_ssn strips formatting -> the
+        # pipeline-matched value, distinct from the raw source string.
+        assert resp.json() == {"patid": "P1", "ssn": "123456789"}
+
+    def test_get_clean_ssn_unknown_404s(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.get("/records/P-nope/ssn-clean")
+        assert resp.status_code == 404
+
+    def test_get_clean_ssn_logs_view_ssn_clean_audit_entry(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.get(
+            "/records/P1/ssn-clean", headers={"X-Reviewer-Id": "reviewer.jclark"}
+        )
+        assert resp.status_code == 200
+
+        backend = build_index_backend(real_settings)
+        try:
+            rows = backend.list_audit_log(limit=10)
+        finally:
+            backend.close()
+        view_rows = [r for r in rows if r["action"] == "view_ssn_clean"]
+        assert len(view_rows) == 1
+        assert view_rows[0]["user"] == "reviewer.jclark"
+        assert view_rows[0]["patids"] == "P1"
+
+    def test_get_clean_ssn_unknown_404_not_logged(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        client.get("/records/P-nope/ssn-clean")
+
+        backend = build_index_backend(real_settings)
+        try:
+            rows = backend.list_audit_log(limit=10)
+        finally:
+            backend.close()
+        assert [r for r in rows if r["action"] == "view_ssn_clean"] == []
+
+    def test_view_ssn_clean_excluded_from_list_audit(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        client.get(
+            "/records/P1/ssn-clean", headers={"X-Reviewer-Id": "reviewer.jclark"}
+        )
+        resp = client.get("/audit")
+        assert resp.status_code == 200
+        assert all(row["action"] != "view_ssn_clean" for row in resp.json())
+
     def test_search_filters(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
         resp = client.get("/records", params={"search": "Smith"})
@@ -664,6 +714,12 @@ class TestRecordsAndDashboardAgainstParquetBackend:
         resp = client.get("/records/P1/raw")
         assert resp.status_code == 200
         assert resp.json()["fields"]["FirstNM_raw"] == "JANE"
+
+    def test_get_clean_ssn(self, client, parquet_test_settings):
+        _publish_fixture_run(parquet_test_settings, "r1")
+        resp = client.get("/records/P1/ssn-clean")
+        assert resp.status_code == 200
+        assert resp.json() == {"patid": "P1", "ssn": "123456789"}
 
     def test_search_filters(self, client, parquet_test_settings):
         _publish_fixture_run(parquet_test_settings, "r1")

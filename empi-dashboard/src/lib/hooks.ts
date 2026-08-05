@@ -53,6 +53,14 @@ export function useRawRecord(patid: string | null) {
   });
 }
 
+export function useCleanSsn(patid: string | null) {
+  return useQuery({
+    queryKey: ["ssn-clean", patid],
+    queryFn: () => api.getCleanSsn(patid as string),
+    enabled: patid !== null,
+  });
+}
+
 /** The ML matcher only ever scores a pair the gate let through, so a gate
  * drop has no `ml_matcher` explanation — try it first and fall back to the
  * gate's own explanation (the only record of *why* it was dropped). `null`

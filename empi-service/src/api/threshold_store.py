@@ -1,6 +1,6 @@
 """Live-tunable ML decision thresholds — `GET/PUT /admin/thresholds`.
 
-`gate_threshold`, `ml_auto_merge_threshold`, and `ml_review_floor` are
+`gate_threshold`, `ml_auto_merge_threshold`, and `fs_review_floor` are
 ordinary `Settings` fields (`.env`-overridable, like everything else in
 `src/config.py`), but changing them today means editing `.env` and
 restarting the process. This module adds a second override path: a small
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 THRESHOLD_FIELDS: tuple[str, ...] = (
     "gate_threshold",
     "ml_auto_merge_threshold",
-    "ml_review_floor",
+    "fs_review_floor",
 )
 
 

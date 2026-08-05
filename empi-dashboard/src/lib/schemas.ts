@@ -146,6 +146,12 @@ export const RawRecordSchema = z.object({
 });
 export type RawRecord = z.infer<typeof RawRecordSchema>;
 
+export const CleanSsnSchema = z.object({
+  patid: z.string(),
+  ssn: z.string().nullable(),
+});
+export type CleanSsn = z.infer<typeof CleanSsnSchema>;
+
 export const MatchStatusCountsSchema = z.object({
   auto_match: z.number(),
   needs_review: z.number(),
@@ -267,6 +273,6 @@ export type PairExplanation = z.infer<typeof PairExplanationSchema>;
 export const ThresholdSettingsSchema = z.object({
   gate_threshold: z.number().min(0).max(1),
   ml_auto_merge_threshold: z.number().min(0).max(1),
-  ml_review_floor: z.number().min(0).max(1),
+  fs_review_floor: z.number().min(0).max(1),
 });
 export type ThresholdSettings = z.infer<typeof ThresholdSettingsSchema>;

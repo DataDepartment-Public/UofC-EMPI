@@ -26,11 +26,11 @@ const FIELDS: {
       'Match-probability at/above which the ML matcher tiers a pair "auto_merge".',
   },
   {
-    key: "ml_review_floor",
-    label: "ML review floor",
+    key: "fs_review_floor",
+    label: "FS review floor",
     description:
-      'Match-probability at/above which the ML matcher tiers a pair "human_review" ' +
-      "(also the candidate-inclusion floor for the ML matcher's feature parquet).",
+      'Match-probability at/above which the FS matcher tiers a pair "human_review" ' +
+      "(also the candidate-inclusion floor for the FS matcher's feature parquet).",
   },
 ];
 

@@ -1,21 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { useRawRecord } from "@/lib/hooks";
+import { useCleanSsn } from "@/lib/hooks";
 
-/** Reveal-in-place toggle for a masked SSN. Sourced from the same un-scrubbed
- * raw-record data the "View raw data" drawer already fetches
- * (`GET /records/:patid/raw`, `RawDataDrawer.tsx`) — no new PII exposure
- * surface, just a faster affordance than opening the full drawer. Fetch is
- * lazy (`enabled` only once revealed) and cached by react-query, so toggling
- * back and forth doesn't re-fetch. */
+/** Reveal-in-place toggle for a masked SSN. Sourced from `cleaned_attrs.ssn`
+ * (`GET /records/:patid/ssn-clean`) — the pipeline-normalized value blocking
+ * and the deterministic rules actually matched on — rather than `SSN_raw`,
+ * which is the un-scrubbed source value and may be junk `clean_ssn` rejected
+ * outright. Fetch is lazy (`enabled` only once revealed) and cached by
+ * react-query, so toggling back and forth doesn't re-fetch. */
 export function SsnReveal({ patid, masked }: { patid: string; masked: string }) {
   const [revealed, setRevealed] = useState(false);
-  const { data, isLoading, isError } = useRawRecord(revealed ? patid : null);
+  const { data, isLoading, isError } = useCleanSsn(revealed ? patid : null);
 
-  const rawSsn = data ? data.fields["SSN_raw"] : undefined;
+  const cleanSsn = data?.ssn;
   const fullSsn =
-    rawSsn != null && rawSsn !== "" ? String(rawSsn) : null;
+    cleanSsn != null && cleanSsn !== "" ? String(cleanSsn) : null;
 
   let display = masked;
   if (revealed) {

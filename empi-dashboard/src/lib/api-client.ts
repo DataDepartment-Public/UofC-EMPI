@@ -7,6 +7,8 @@
 import { z } from "zod";
 import {
   AuditLogRowSchema,
+  CleanSsn,
+  CleanSsnSchema,
   DashboardSummary,
   DashboardSummarySchema,
   DismissResponseSchema,
@@ -134,6 +136,12 @@ export const api = {
     call<RawRecord>(
       RawRecordSchema,
       `/api/records/${encodeURIComponent(patid)}/raw`,
+    ),
+
+  getCleanSsn: (patid: string) =>
+    call<CleanSsn>(
+      CleanSsnSchema,
+      `/api/records/${encodeURIComponent(patid)}/ssn-clean`,
     ),
 
   listRuns: () => call<RunSummary[]>(z.array(RunSummarySchema), "/api/runs"),

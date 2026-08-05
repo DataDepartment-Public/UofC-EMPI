@@ -157,6 +157,11 @@ class RawRecord(BaseModel):
     fields: dict[str, object]
 
 
+class CleanSsn(BaseModel):
+    patid: str
+    ssn: str | None
+
+
 class MergeRequest(BaseModel):
     mid: str
     patids: list[str] = Field(min_length=1)
@@ -299,7 +304,7 @@ class AuditLogRow(BaseModel):
     id: int
     ts_utc: str
     user: str
-    action: Literal["merge", "unmerge", "split", "dismiss", "view_raw"]
+    action: Literal["merge", "unmerge", "split", "dismiss", "view_raw", "view_ssn_clean"]
     patids: str
     mid: str
     prev_state: str
@@ -383,11 +388,11 @@ class ThresholdSettings(BaseModel):
         description="Match-probability at/above which the ML matcher "
         "tiers a pair 'auto_merge'.",
     )
-    ml_review_floor: float = Field(
+    fs_review_floor: float = Field(
         ge=0.0, le=1.0,
-        description="Match-probability at/above which the ML matcher "
+        description="Match-probability at/above which the FS matcher "
         "tiers a pair 'human_review' (also the candidate-inclusion floor "
-        "for the MLFeatures parquet).",
+        "for the FSFeatures parquet).",
     )
 
 

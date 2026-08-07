@@ -1,9 +1,12 @@
-"""Unit tests for the FS gate that filters the ML input pool
+"""Unit tests for the LEGACY FS gate that filters the ML input pool
 (`src.pipeline._fs_plausible_pool`).
 
-FS acts as the non-match gate: pairs it ranks `no_match` are dropped, and only
-the plausible survivors reach the ML matcher (Stage 4.5). Passthrough columns
-must survive because the result comes from `non_matches`, not the FS frame.
+FS used to be the pipeline's non-match gate; `src/models/nonmatch_gate/`
+replaced it (see tests/unit/models/nonmatch_gate/). This path still runs as
+the fallback when no gate model is active or `gate_supersedes_fs` is off:
+pairs FS ranks `no_match` are dropped and only the plausible survivors reach
+the ML matcher. Passthrough columns must survive because the result comes
+from `non_matches`, not the FS frame.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@ import { SsnReveal } from "./SsnReveal";
 
 const RESULT_STYLE: Record<ComparisonRow["result"], { label: string; className: string }> = {
   exact: { label: "Exact match", className: "text-status-auto font-bold" },
-  different: { label: "Different", className: "text-status-nomatch font-bold" },
+  different: { label: "Different", className: "text-status-nomatch-display font-bold" },
   missing: { label: "One or both missing", className: "text-gray font-semibold" },
 };
 

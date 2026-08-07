@@ -19,6 +19,10 @@ dist/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 
+# One-time confusion-matrix render (script + figures, never committed)
+notebooks/fellegi_sunter/figures/
+notebooks/fellegi_sunter/plot_fs_confusion_matrix.py
+
 # Data files (keep structure + the per-folder SCHEMA.md docs; ignore data)
 data/raw/*
 data/processed/*
@@ -28,8 +32,10 @@ data/non_matches/*
 data/no_match/*
 data/fs_output/*
 data/ml_output/*
+data/gate_output/*
 data/clusters/*
 data/runs/*
+data/evaluations/*
 data/local_index/*
 data/silver_labels/*
 data/gold_labels?*
@@ -42,8 +48,10 @@ data/reviewer_labels/*
 !data/no_match/.gitkeep
 !data/fs_output/.gitkeep
 !data/ml_output/.gitkeep
+!data/gate_output/.gitkeep
 !data/clusters/.gitkeep
 !data/runs/.gitkeep
+!data/evaluations/.gitkeep
 !data/local_index/.gitkeep
 !data/silver_labels/.gitkeep
 !data/reviewer_labels/.gitkeep
@@ -55,6 +63,7 @@ data/reviewer_labels/*
 !data/no_match/SCHEMA.md
 !data/fs_output/SCHEMA.md
 !data/ml_output/SCHEMA.md
+!data/gate_output/SCHEMA.md
 !data/clusters/SCHEMA.md
 !data/runs/SCHEMA.md
 !data/local_index/SCHEMA.md

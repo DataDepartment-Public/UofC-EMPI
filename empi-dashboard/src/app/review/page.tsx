@@ -74,11 +74,6 @@ export default function ReviewQueuePage() {
     <div>
       <div className="mb-5">
         <h2 className="text-[22px] font-extrabold text-ink-2">Review Queue</h2>
-        <p className="mt-1 text-[13px] text-gray">
-          Candidate-level triage — every pending pair, independent of which
-          cluster it belongs to. Select a candidate on the left to see its
-          full explanation on the right.
-        </p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[400px_1fr]">

@@ -1,27 +1,39 @@
 """Concrete BYOF + BYOM implementation for the pluggable ML matcher (Stage 4.5)
-— the LightGBM **v3 ambiguous-pair classifier**.
+— the LightGBM **v5 confident-match classifier**.
 
-Ports the feature engineering of
-`notebooks/ml_model/pair_classifier_lightgbm_ambiguous_v3.ipynb` (§5) into a
-`FeatureBuilder`, and adapts the notebook's fitted model to the pipeline's
-match-scorer contract.
+Trained by
+`notebooks/ml_model/confident_match/pair_classifier_lightgbm_confident_match_v5.ipynb`
+over the **whole** candidate pool with the target stated in the serving
+direction:
+
+    class 1 = confident match
+    class 0 = ambiguous ∪ confident non-match
+
+The pipeline reads ``predict_proba(X)[:, 1]`` as ``match_probability`` and maps
+high → ``auto_merge``, so a model whose native class 1 *is* the confident match
+needs **no inversion anywhere**: no probability-column swap at serve time, and
+no sign flip on the SHAP contributions. Earlier models (class 1 = *ambiguous*)
+required both, and that double inversion was the sharpest edge in the serving
+path — a missed negation produced a waterfall that read plausibly and was
+exactly backwards. v5 removes the edge instead of guarding it.
 
 Two pieces:
 
-* ``V3FeatureBuilder`` — turns candidate pairs + cleaned records into the 12
-  v3 features (3 categoricals + 9 numerics). No dependency on the FS matcher's
-  ``fs_features``; features come straight from the cleaned attributes.
-* ``MatchProbabilityAdapter`` — the notebook model predicts ``P(ambiguous)``
-  as class 1 (positive = "route to review"), but the pipeline treats
-  ``predict_proba(X)[:, 1]`` as ``match_probability`` and maps *high* scores to
-  the ``auto_merge`` tier. This adapter swaps the two probability columns at
-  serve time so column 1 is ``P(confident match) = 1 - P(ambiguous)``. The
-  serialized model artifact pickles an instance of this class, so it must stay
-  importable from this module for ``registry.load_model_artifact`` (joblib) to
-  deserialize it.
+* ``FeatureBuilderV5`` — turns candidate pairs + cleaned records into the 12
+  features (3 categoricals + 9 numerics), ported from the notebook's §5. No
+  dependency on the FS matcher's ``fs_features``; features come straight from
+  the cleaned attributes. **The Stage-4.25 non-match gate uses this same
+  builder**, so the gate and the matcher see identical inputs and there is one
+  feature implementation to keep correct, not two.
+* ``DirectMatchAdapter`` — a thin pass-through wrapper. It exists for two
+  reasons that survive having nothing to invert: it realigns input columns to
+  the inner model's training order (LightGBM matches features positionally, so
+  a reordering would otherwise score silently wrong), and it is the stable
+  pickled type for the artifact, which keeps the model store's payload a class
+  owned by this repo rather than a bare ``LGBMClassifier``.
 
 HIPAA: no PHI is logged here (feature building runs silently; the matcher logs
-aggregate tier counts only, mirroring the FS matcher).
+aggregate tier counts only).
 """
 
 from __future__ import annotations
@@ -34,7 +46,14 @@ import jellyfish
 import numpy as np
 import pandas as pd
 
-__all__ = ["V3FeatureBuilder", "MatchProbabilityAdapter", "FEATURE_COLS", "CATEGORICAL_FEATURES"]
+__all__ = [
+    "FeatureBuilderV5",
+    "DirectMatchAdapter",
+    "FEATURE_COLS",
+    "CATEGORICAL_FEATURES",
+    "NUMERIC_FEATURES",
+    "COMPARE_LEVELS",
+]
 
 # ── Feature roster (must match the notebook's training columns + order) ───────
 MISSING, SAME, DIFFERENT = "missing", "same", "different"
@@ -59,7 +78,7 @@ _num_re = re.compile(r"\d+")
 _NA_TOKENS = {"nan", "none", "<na>", "nat", "null"}
 
 
-# ── Scalar helpers (ported verbatim from the v3 notebook §5) ──────────────────
+# ── Scalar helpers (ported verbatim from the notebook §5) ────────────────────
 def _norm(x: Any) -> str | None:
     """Value -> lowercased stripped str, or None for any missing kind."""
     if isinstance(x, str):
@@ -167,8 +186,9 @@ def _cmp_categorical(a_norm: pd.Series, b_norm: pd.Series) -> pd.Categorical:
     return pd.Categorical(out, categories=COMPARE_LEVELS)
 
 
-class V3FeatureBuilder:
-    """`FeatureBuilder` for the LightGBM v3 model.
+class FeatureBuilderV5:
+    """`FeatureBuilder` for the LightGBM v5 model, shared with the Stage-4.25
+    non-match gate.
 
     Returns a frame keyed by ``PATID_A``/``PATID_B`` with exactly the 12
     ``FEATURE_COLS`` (categoricals as ``category`` dtype with the training
@@ -283,17 +303,17 @@ class V3FeatureBuilder:
         return _cmp_categorical(a, b)
 
 
-class MatchProbabilityAdapter:
-    """Wraps the notebook's fitted classifier so ``predict_proba(X)[:, 1]`` is
-    ``P(confident match) = 1 - P(ambiguous)``.
+class DirectMatchAdapter:
+    """Wraps a fitted classifier whose **class 1 is already the confident
+    match**, so ``predict_proba(X)[:, 1]`` is served as-is.
 
-    The inner model was trained with class 1 = *ambiguous*, so its
-    ``predict_proba`` returns ``[P(match), P(ambiguous)]``. This adapter swaps
-    the columns to ``[P(ambiguous), P(match)]`` so the pipeline (which reads
-    column 1 as ``match_probability`` and maps high → ``auto_merge``) sees the
-    match-scorer semantics. Also reorders input columns to the inner model's
-    training feature order when known, so column ordering can't silently break
-    predictions.
+    Both `predict_proba` and `contributions` are deliberately identity
+    operations on the model's output. If you find yourself adding an inversion
+    to this class, the model you are wrapping is not a v5 model.
+
+    The serialized artifact pickles an instance of this class, so it must stay
+    importable from this module for ``registry.load_model_artifact`` (joblib)
+    to deserialize it.
     """
 
     def __init__(self, model: Any):
@@ -303,18 +323,44 @@ class MatchProbabilityAdapter:
         """Serve-only adapter; retraining is out of scope. Kept so the wrapper
         still satisfies the `MLModel` Protocol."""
         raise NotImplementedError(
-            "MatchProbabilityAdapter is a serve-only wrapper; fit the inner "
-            "model directly (see the v3 notebook) and wrap the fitted model."
+            "DirectMatchAdapter is a serve-only wrapper; fit the inner model "
+            "directly (see the v5 notebook) and wrap the fitted model."
         )
 
     def _align(self, X):
+        """Reorder `X` to the inner model's training feature order when known.
+
+        LightGBM matches features positionally, so a caller handing over the
+        right columns in the wrong order gets confidently wrong scores with no
+        error. `FeatureBuilderV5` already emits `FEATURE_COLS` order; this is
+        the belt-and-braces for anything else that reaches `predict_proba`.
+        """
         names = getattr(self.model, "feature_name_", None)
         if names is not None and isinstance(X, pd.DataFrame) and set(names).issubset(X.columns):
             return X[list(names)]
         return X
 
     def predict_proba(self, X):
-        proba = np.asarray(self.model.predict_proba(self._align(X)))
-        if proba.ndim == 2 and proba.shape[1] == 2:
-            return proba[:, ::-1]  # [P(match), P(amb)] -> [P(amb), P(match)]
-        return proba
+        """``[P(not confident match), P(confident match)]`` — pass-through.
+
+        No column swap: the inner model's class 1 is the served positive class.
+        """
+        return np.asarray(self.model.predict_proba(self._align(X)))
+
+    def contributions(self, X):
+        """Exact TreeSHAP contributions, already in served-score space.
+
+        The inner model's raw margin ``f`` gives ``P(confident match) =
+        sigmoid(f)``, which *is* the served score — so contributions carry the
+        pipeline's sign convention (positive pushes toward ``auto_merge``)
+        without adjustment.
+
+        Returns `(n_rows, n_features + 1)` with the base value last, matching
+        LightGBM's `pred_contrib` layout. Returns None if the inner model can't
+        produce contributions.
+        """
+        try:
+            contrib = self.model.predict_proba(self._align(X), pred_contrib=True)
+        except TypeError:
+            return None
+        return np.asarray(contrib)

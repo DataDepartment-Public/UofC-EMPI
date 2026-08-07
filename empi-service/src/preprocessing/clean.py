@@ -9,9 +9,11 @@ for that stem regardless of the date suffix.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -23,13 +25,16 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 # Imports below must follow the sys.path insertion above, hence noqa: E402.
-from src.config import settings  # noqa: E402
+from src.config import configure_logging, settings  # noqa: E402
 from src.contracts import CleanedRecords, validate  # noqa: E402
 from src.preprocessing.transformations import transform_dataframe  # noqa: E402
 
 DEFAULT_RAW_DIR = settings.raw_dir
 DEFAULT_PROCESSED_DIR = settings.processed_dir
 SUPPORTED_EXTENSIONS = {'.csv', '.xls', '.xlsx'}
+
+# PHI: aggregate counts and paths only — never field values.
+logger = logging.getLogger(__name__)
 
 
 def clean_mdm_population(df: pd.DataFrame) -> pd.DataFrame:
@@ -60,9 +65,20 @@ def _load(input_path: Path) -> pd.DataFrame:
     # before the per-field transformations can apply the left-pad rules from
     # docs/Data-Cleaning-Guide.md.
     suffix = input_path.suffix.lower()
+    started = time.perf_counter()
+    logger.info(
+        "LOAD — reading %s (%.1f MB) with dtype=str",
+        input_path.name, input_path.stat().st_size / 1e6,
+    )
     if suffix in {'.xls', '.xlsx'}:
-        return pd.read_excel(input_path, dtype=str)
-    return pd.read_csv(input_path, dtype=str)
+        df = pd.read_excel(input_path, dtype=str)
+    else:
+        df = pd.read_csv(input_path, dtype=str)
+    logger.info(
+        "LOAD — %d rows × %d columns in %.1fs",
+        len(df), len(df.columns), time.perf_counter() - started,
+    )
+    return df
 
 
 def load_cleaned(path: str | os.PathLike) -> pd.DataFrame:
@@ -86,6 +102,7 @@ def clean_from_file(
     df = _load(input_path)
     cleaned = transform_dataframe(df)
     validate(cleaned, CleanedRecords)
+    logger.info("VALIDATE — cleaned frame satisfies the CleanedRecords contract")
 
     version = _next_version(processed_dir, input_path.stem)
     date_str = datetime.utcnow().strftime('%Y_%m_%d')
@@ -110,7 +127,13 @@ def write_cleaned(cleaned: pd.DataFrame, output_path: str | os.PathLike) -> Path
             to_persist[col] = to_persist[col].apply(
                 lambda v: str(v) if isinstance(v, (set, frozenset)) else v
             )
+    started = time.perf_counter()
     to_persist.to_parquet(output_path, index=False)
+    logger.info(
+        "WRITE — %d rows × %d columns → %s (%.1f MB, %.1fs)",
+        len(to_persist), len(to_persist.columns), output_path.name,
+        output_path.stat().st_size / 1e6, time.perf_counter() - started,
+    )
     return output_path
 
 
@@ -122,16 +145,22 @@ def process_raw_directory(
     raw_dir = Path(raw_dir) if raw_dir is not None else DEFAULT_RAW_DIR
     processed_dir = Path(processed_dir) if processed_dir is not None else DEFAULT_PROCESSED_DIR
 
+    candidates = [
+        e for e in sorted(raw_dir.iterdir())
+        if e.is_file() and e.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
+    logger.info("CLEAN — %d file(s) to process from %s", len(candidates), raw_dir)
+
     results = []
-    for entry in sorted(raw_dir.iterdir()):
-        if not entry.is_file() or entry.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            continue
+    for i, entry in enumerate(candidates, start=1):
+        logger.info("── [%d/%d] %s ──", i, len(candidates), entry.name)
         cleaned, output_path = clean_from_file(entry, processed_dir)
         results.append((entry, output_path, cleaned))
     return results
 
 
 if __name__ == '__main__':
+    configure_logging(settings)
     args = sys.argv[1:]
     if args:
         in_file = args[0]

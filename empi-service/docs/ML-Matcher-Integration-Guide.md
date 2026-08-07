@@ -22,40 +22,53 @@
 ## 1. Where your model fits
 
 ```
-[1/6] clean ─► [2/6] block ─► [3/6] deterministic rules
+[1/7] clean ─► [2/7] block ─► [3/7] deterministic rules
                                         │
                                         ▼
-                          [4/6] Fellegi-Sunter matcher (audit-only)
+                          [4/7] Fellegi-Sunter matcher (audit-only)
+                                        │
+                                        ▼
+                          [5/7] non-match gate — drops confident non-matches
                                         │
                                         ▼
                           ┌─────────────────────┐
-                          │   YOUR MODEL HERE    │   [5/6] — between FS and clustering
+                          │   YOUR MODEL HERE    │   [6/7] — between the gate and clustering
                           │  (src/models/ml_matcher/) │
                           └─────────────────────┘
                                         │
                                         ▼
-                          [6/6] clustering (terminal)
+                          [7/7] clustering (terminal)
 ```
 
-(`[n/6]` matches the tags you'll actually see in pipeline log lines —
-`MODEL(FS)` is `[4/6]`, `MODEL(ML)` is `[5/6]`.)
+(`[n/7]` matches the tags you'll actually see in pipeline log lines —
+`MODEL(FS)` is `[4/7]`, `GATE` is `[5/7]`, `MODEL(ML)` is `[6/7]`.)
 
 The deterministic rules stage already splits every candidate pair into three
 buckets: pairs it's confident enough about get **auto-merged** directly into
-clustering; everything else falls into a `non_matches` pool. The FS matcher
-(Splink, Stage 4) scores that pool and **gates it** — the pairs FS ranks
-`no_match` (FS `match_probability < fs_review_floor`) are discarded as confident
-non-matches, and only the *plausible* survivors reach your model
-(`_fs_plausible_pool` in `src/pipeline.py`). Your model scores that FS-plausible
+clustering; everything else falls into a `non_matches` pool. The **non-match
+gate** (Stage 4.25, `src/models/nonmatch_gate/` — see
+`docs/Nonmatch-Gate-Guide.md`) scores that pool with `P(plausible)` and
+discards everything below `settings.gate_threshold` as a confident non-match,
+so only the *plausible* survivors reach your model. Your model scores that
 subset (optionally enriched with FS's features) and is a scored classifier, not
 an automatic merger — whether its `auto_merge`-tier output feeds clustering is a
-config toggle (`settings.ml_feeds_clustering`, off by default — see §4).
+config toggle (`settings.ml_feeds_clustering`, **on** by default — see §4).
 
-Because the non-matches are gated out upstream, the served LightGBM v3 model
-runs as a **2-tier** classifier (`ml_review_floor = 0.0`): confident match →
-`auto_merge`, ambiguous → `human_review`; it does not emit `no_match`. A model
-that *does* need to distinguish non-matches can still emit all three tiers by
-setting a non-zero `ml_review_floor` — the `classify()` machinery supports it.
+> The FS matcher used to be that gate (`_fs_plausible_pool` in
+> `src/pipeline.py`, keeping pairs with `match_probability >=
+> fs_review_floor`). It still runs as the **fallback** when no gate model is
+> active, or when `EMPI_GATE_SUPERSEDES_FS=false`; otherwise Stage 4 is
+> audit-only.
+
+Because the non-matches are gated out upstream, Stage 4.5 is a **2-tier**
+classifier by construction: confident match → `auto_merge`, ambiguous →
+`human_review`. **It cannot emit `no_match`, and there is no floor setting to
+re-enable one.** Discarding is the Stage-4.25 gate's job, and the gate is the
+only stage that records what it dropped (`data/gate_output/`); a second stage
+able to discard would mean a pair could vanish in either of two places with only
+one of them audited. If you plug in a model that genuinely needs to reject
+pairs itself, that is a deliberate change to `MLMatcher.classify` and to where
+the drop is recorded — not a config flip.
 
 **Your job is exactly this:** given a pool of candidate patient-record pairs,
 produce a calibrated match probability and a tier for each pair.
@@ -232,17 +245,15 @@ same inclusive-boundary threshold pattern `FSModel.classify()` uses
 (`src/models/fs_matcher/base.py`), tested in
 `test_ml_matcher_matcher.py::test_classify_thresholds_inclusive`.
 
-All you provide are the threshold *values* — `ClassificationConfig
-(auto_merge_threshold, review_floor)` — based on your held-out evaluation
-(precision/recall at each threshold). These are already real, defaulted
-settings in `src/config.py`:
+All you provide is the threshold *value* — `MLClassificationConfig
+(auto_merge_threshold)` — based on your held-out evaluation (precision/recall at
+each threshold). These are already real, defaulted settings in `src/config.py`:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `ml_auto_merge_threshold` | `0.95` | score ≥ this → `auto_merge` tier |
-| `ml_review_floor` | `0.40` | score ≥ this → `human_review` tier; also the cutoff for landing in the `MLFeatures` candidate parquet at all |
+| `ml_auto_merge_threshold` | `0.70` | score ≥ this → `auto_merge`; below it → `human_review` |
 | `ml_deploy_gate_margin` | `0.02` | a retrained model may only promote if held-out precision/recall are within this margin of the currently-active model's |
-| `ml_feeds_clustering` | `False` | when `True`, your `auto_merge`-tier pairs union into clustering edges alongside the deterministic rules' |
+| `ml_feeds_clustering` | `True` | your `auto_merge`-tier pairs union into clustering edges alongside the deterministic rules' |
 | `ml_model_dir` | `models/ml/` | where trained artifacts + `active.json` live |
 | `ml_active_model` | `None` | explicit override; when unset, the registry resolves `active.json` (or the newest artifact) |
 
@@ -305,7 +316,7 @@ Three checkpoints, cheapest first:
    python -m src.models.ml_matcher.train --promote   # trains, writes ml_model_<ts>.json + .meta.json, promotes
    python -m src.pipeline --input data/raw/MDM_Population.csv
    ```
-   Watch for `[5/6] MODEL(ML) — scoring N non-match pairs with ML model ...`
+   Watch for `[6/7] MODEL(ML) — scoring N plausible pairs with ML model ...`
    in the log (not the `skipped` variant) — that confirms the registry
    resolved your promoted model and Stage 4.5 actually ran. Check
    `data/ml_output/ml_features_<run_id>.parquet` for your output.

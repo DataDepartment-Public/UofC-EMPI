@@ -1,0 +1,53 @@
+{
+  "model_name": "ml_matcher",
+  "holdout_spec": {
+    "method": "sha256_bucket",
+    "salt": "empi-holdout-v1",
+    "fraction": 0.2,
+    "version": 1
+  },
+  "model_file": "ml_model_confident_match_v5_20260731T184743Z.pkl",
+  "model_version": "lightgbm_v5",
+  "created_utc": "2026-07-31T18:47:43.170630+00:00",
+  "notes": "LightGBM v5 confident-match classifier, serve-only. class 1 = confident match, so score = predict_proba[:, 1] directly (no inversion; DirectMatchAdapter is a pass-through and SHAP contributions keep their sign). Trained on the whole candidate pool; served on Stage-4.25 gate survivors.",
+  "serve_adapter": "src.models.ml_matcher.lightgbm_v5.DirectMatchAdapter",
+  "feature_builder": "src.models.ml_matcher.lightgbm_v5.FeatureBuilderV5",
+  "feature_cols": [
+    "sound_first",
+    "sound_last",
+    "cmp_street_num",
+    "sim_jw_first",
+    "sim_jw_last",
+    "sim_jw_middle",
+    "sim_lev_email",
+    "sim_lev_address1",
+    "addr_token_jaccard",
+    "ssn_digit_frac",
+    "sim_dob",
+    "sim_phones"
+  ],
+  "thresholds": {
+    "auto_merge": 0.7,
+    "review_floor": 0.0
+  },
+  "test_metrics": {
+    "n_test": 40849,
+    "roc_auc": 0.9984,
+    "pr_auc": 0.9923,
+    "metrics_auto_merge": {
+      "precision": 0.9012,
+      "recall": 0.9861,
+      "tp": 6822,
+      "fp": 748,
+      "fn": 96
+    },
+    "metrics_auto_merge_serving_population": {
+      "precision": 0.9428,
+      "recall": 0.9861,
+      "tp": 6822,
+      "fp": 414,
+      "fn": 96,
+      "n": 12433
+    }
+  }
+}

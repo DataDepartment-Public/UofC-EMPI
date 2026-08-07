@@ -145,6 +145,8 @@ class IndexBackend(Protocol):
         self, *, limit: int = 100, since: str | None = None
     ) -> list[dict]: ...
 
+    def get_audit_log_row(self, audit_id: int) -> dict | None: ...
+
 
 class SqlIndexBackend:
     """`IndexBackend` over any DB-API-style connection + a store module.
@@ -301,6 +303,9 @@ class SqlIndexBackend:
 
     def list_audit_log(self, *, limit: int = 100, since: str | None = None) -> list[dict]:
         return self._store.list_audit_log(self.conn, limit=limit, since=since)
+
+    def get_audit_log_row(self, audit_id: int) -> dict | None:
+        return self._store.get_audit_log_row(self.conn, audit_id)
 
 
 def build_index_backend(settings: Any) -> IndexBackend:

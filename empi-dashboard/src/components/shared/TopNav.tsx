@@ -14,6 +14,7 @@ export function TopNav() {
   const pathname = usePathname();
   const onDataset = pathname.startsWith("/dataset");
   const onReview = pathname.startsWith("/review");
+  const onAdmin = pathname.startsWith("/admin");
 
   return (
     <div className="sticky top-0 z-50">
@@ -37,7 +38,7 @@ export function TopNav() {
         </div>
       </header>
       <nav className="flex gap-1 border-b border-line bg-white px-6">
-        <TabLink href="/" active={!onDataset && !onReview}>
+        <TabLink href="/" active={!onDataset && !onReview && !onAdmin}>
           Dashboard
         </TabLink>
         <TabLink href="/review" active={onReview}>
@@ -45,6 +46,9 @@ export function TopNav() {
         </TabLink>
         <TabLink href="/dataset" active={onDataset}>
           Patient Registry
+        </TabLink>
+        <TabLink href="/admin" active={onAdmin}>
+          Admin
         </TabLink>
       </nav>
     </div>

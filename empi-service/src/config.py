@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     no_match_dir: Path = _DATA / "no_match"
     clusters_dir: Path = _DATA / "clusters"
     runs_dir: Path = _DATA / "runs"
+    evaluations_dir: Path = Field(
+        default=_DATA / "evaluations",
+        description="Stored end-to-end evaluation reports (one JSON + TXT per "
+        "session/label-source/holdout). Kept out of runs_dir because those are "
+        "pipeline RunManifests — immutable per-run lineage — while these are "
+        "measurements ABOUT runs and accumulate on their own timeline.",
+    )
     log_dir: Path = _PROJECT_ROOT / "logs"
 
     # ── API service (src/api/) ──────────────────────────────────────────────
@@ -208,6 +215,50 @@ class Settings(BaseSettings):
         "deliberately promoted for production auto-merge.",
     )
 
+    # ── Stage 4.25: ML non-match gate (src/models/nonmatch_gate/) ────────────
+    # The pipeline's non-match gate: a LightGBM classifier over the same 12
+    # features the ML matcher uses, trained on the WHOLE candidate pool to
+    # separate confident non-matches from plausible pairs (match ∪ ambiguous).
+    # It decides which of the rules' `non_matches` survive to the ML matcher —
+    # the job the FS matcher used to do. Skipped (pool passes through
+    # ungated, or falls back to the FS gate) when no active model resolves.
+    gate_model_dir: Path = Field(
+        default=_MODELS / "nonmatch_gate",
+        description="Directory of trained non-match gate artifacts "
+        "(nonmatch_gate_<ts>.pkl + meta sidecars) and the 'active' pointer. "
+        "Gitignored — populated by the notebook's export cell "
+        "(notebooks/ml_model/confident_nonmatch/).",
+    )
+    gate_active_model: Path | None = Field(
+        default=None,
+        description="Explicit active gate artifact to serve. When None, the "
+        "registry resolves the active pointer (or latest) in gate_model_dir.",
+    )
+    gate_output_dir: Path = Field(
+        default=_DATA / "gate_output",
+        description="Output dir for the gate's per-run ClassificationResults "
+        "audit frame. Gitignored.",
+    )
+    gate_threshold: float = Field(
+        default=0.30,
+        description="P(plausible) at/above which a pair PASSES the gate and "
+        "reaches the ML matcher. Below it the pair is a confident non-match "
+        "and is discarded. 0.30 is the notebook's operating point "
+        "(plausible recall 0.999 on held-out test).",
+    )
+    gate_deploy_gate_margin: float = Field(
+        default=0.02,
+        description="A retrained gate model may only be promoted to 'active' "
+        "if its held-out plausible precision/recall are within this margin of "
+        "the current active model's.",
+    )
+    gate_supersedes_fs: bool = Field(
+        default=True,
+        description="When True (the default), the ML non-match gate decides "
+        "the ML matcher's input pool. Set False to fall back to the legacy FS "
+        "gate (FS `no_match` tier discarded) even when a gate model is active.",
+    )
+
     # ── Stage 4.5: pluggable ML matcher (src/models/ml_matcher/) ─────────────
     # Bring-your-own-model / bring-your-own-features candidate + feature
     # generator, structurally parallel to the FS matcher: loads a pre-trained
@@ -235,16 +286,13 @@ class Settings(BaseSettings):
         "training set. Gitignored.",
     )
     ml_auto_merge_threshold: float = Field(
-        default=0.95,
-        description="Match-probability at/above which a scored pair is "
-        "tiered 'auto_merge'. Informational only unless ml_feeds_clustering "
-        "is on.",
-    )
-    ml_review_floor: float = Field(
-        default=0.40,
-        description="Match-probability at/above which a pair is tiered "
-        "'human_review'. Doubles as the CANDIDATE CUTOFF: only pairs at/above "
-        "this land in the MLFeatures candidate parquet.",
+        default=0.70,
+        description="Match-probability at/above which a scored pair is tiered "
+        "'auto_merge'; below it, 'human_review'. Stage 4.5 is a 2-tier "
+        "classifier with no floor — discarding confident non-matches is the "
+        "Stage-4.25 gate's job, and it is the only stage that records its "
+        "drops. Since ml_feeds_clustering is on, this bounds merge precision: "
+        "tune it against a held-out precision target, not a round number.",
     )
     ml_deploy_gate_margin: float = Field(
         default=0.02,
@@ -254,12 +302,39 @@ class Settings(BaseSettings):
         "retrain).",
     )
     ml_feeds_clustering: bool = Field(
-        default=False,
+        default=True,
         description="When True, the ML matcher's auto_merge-tier "
         "ClassificationResults union into Stage 5 clustering edges alongside "
-        "the deterministic rules' matches. Independent of "
-        "fs_feeds_clustering. Default OFF preserves clustering-on-"
-        "deterministic-edges-only as the out-of-the-box behavior.",
+        "the deterministic rules' matches. Independent of fs_feeds_clustering. "
+        "Default ON: Stage 4.5 is a decision stage, not an audit stage — a "
+        "model whose verdict reaches nothing cannot raise recall. Two "
+        "consequences to know: (1) merge precision is now bounded by the "
+        "served model's, so tune ml_auto_merge_threshold against a held-out "
+        "precision target rather than leaving it at the training notebook's "
+        "operating point; (2) the served model was fit on gold, so the "
+        "end-to-end headline is no longer leakage-free at --holdout none — "
+        "use --holdout strict. Set EMPI_ML_FEEDS_CLUSTERING=false to restore "
+        "deterministic-edges-only clustering.",
+    )
+
+    # ── Per-pair SHAP explanations (src/models/explanations.py) ──────────────
+    # The gate and the ML matcher each emit a per-pair contribution frame
+    # alongside their scores, served read-only by GET /explanations/... .
+    # Computed at score time (not on demand) so an explanation always
+    # describes the model and feature vector that produced the recorded
+    # decision — see the module docstring.
+    explanations_enabled: bool = Field(
+        default=True,
+        description="Emit per-pair SHAP explanations from the non-match gate "
+        "and the ML matcher. Exact TreeSHAP via LightGBM's pred_contrib; adds "
+        "roughly 20us/pair/model to a run. Turn off to skip the artifacts "
+        "entirely (the explanation endpoint then 404s for that run).",
+    )
+    explanation_top_n: int = Field(
+        default=8,
+        description="How many features the explanation endpoint suggests "
+        "showing in a waterfall (a hint the UI may ignore; every feature is "
+        "always returned, ranked by |contribution|).",
     )
 
     # ── Logging (see configure_logging below) ────────────────────────────────
@@ -328,10 +403,13 @@ class Settings(BaseSettings):
             self.no_match_dir,
             self.clusters_dir,
             self.runs_dir,
+            self.evaluations_dir,
             self.fs_model_dir,
             self.fs_output_dir,
             self.ml_model_dir,
             self.ml_output_dir,
+            self.gate_model_dir,
+            self.gate_output_dir,
             self.db_path.parent,
             self.local_index_dir,
         ):

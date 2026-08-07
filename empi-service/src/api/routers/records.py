@@ -10,11 +10,12 @@ Parquet index.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from src.api import jobs
-from src.api.deps import get_backend, get_settings
+from src.api.deps import get_backend, get_reviewer_id_optional, get_settings
 from src.api.backends.index_backend import IndexBackend
 from src.api.schemas import (
     CandidatePatient,
@@ -185,12 +186,40 @@ def get_cluster(mid: str, backend: IndexBackend = Depends(get_backend)) -> Entit
 
 
 @router.get("/records/{patid}/raw", response_model=RawRecord)
-def get_raw_record(patid: str, backend: IndexBackend = Depends(get_backend)) -> RawRecord:
+def get_raw_record(
+    patid: str,
+    backend: IndexBackend = Depends(get_backend),
+    reviewer_id: str = Depends(get_reviewer_id_optional),
+) -> RawRecord:
+    """Unmasked source record — includes the full SSN (`SSN_raw`), the
+    dashboard's SSN-reveal toggle and "View raw data" drawer are both just
+    this same fetch. Every successful call is written to `audit_log` (action
+    `view_raw`) so there's a record of who accessed a patient's unmasked PHI
+    and when, matching the accountability every other reviewer action
+    already gets — a 404 (nothing to view) is not logged."""
     raw_json = backend.get_record_raw(patid)
     if raw_json is None:
         raise HTTPException(
             status_code=404, detail=f"No raw data published for PATID: {patid}"
         )
+
+    backend.begin()
+    try:
+        backend.insert_audit_log(
+            ts_utc=datetime.now(timezone.utc).isoformat(),
+            user=reviewer_id,
+            action="view_raw",
+            patids=patid,
+            mid=backend.get_entity_mid_for_patid(patid) or patid,
+            prev_state="N/A",
+            next_state="Viewed",
+            run_id=None,
+        )
+        backend.commit()
+    except Exception:
+        backend.rollback()
+        raise
+
     return RawRecord(patid=patid, fields=json.loads(raw_json))
 
 

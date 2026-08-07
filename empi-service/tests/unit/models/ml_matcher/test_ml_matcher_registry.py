@@ -34,6 +34,16 @@ def test_resolve_returns_none_when_store_empty(tmp_path):
     assert R.resolve_active_model(_settings(tmp_path)) is None
 
 
+def test_resolve_discovers_the_v5_artifact_naming(tmp_path):
+    """The v5 notebook names artifacts `ml_model_confident_match_v5_<ts>.pkl`;
+    the `ml_model_*.pkl` glob must still find them, and `meta_path_for` must
+    still land on the right sidecar."""
+    a = _write_model(tmp_path, "ml_model_confident_match_v5_20260101T000000Z.pkl", 0.9, 0.9)
+    resolved = R.resolve_active_model(_settings(tmp_path))
+    assert resolved.name == a.name
+    assert R.load_model_meta(resolved) is not None
+
+
 def test_resolve_falls_back_to_latest_by_mtime(tmp_path):
     _write_model(tmp_path, "ml_model_A.pkl", 0.78, 0.95)
     b = _write_model(tmp_path, "ml_model_B.pkl", 0.79, 0.95)

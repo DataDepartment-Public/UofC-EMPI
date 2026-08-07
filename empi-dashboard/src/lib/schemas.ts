@@ -78,11 +78,6 @@ export const ReviewCandidateSchema = z.object({
   source_blocks: z.string().nullable(),
   patient_a: CandidatePatientSchema,
   patient_b: CandidatePatientSchema,
-  // Audit-only FS matcher signal — feeds a future GBT, not a scored decision.
-  // Only populated for candidates scored via the incremental path; null for
-  // candidates from a full batch publish.
-  fs_match_probability: z.number().nullable().optional(),
-  fs_classification_tier: z.string().nullable().optional(),
 });
 export type ReviewCandidate = z.infer<typeof ReviewCandidateSchema>;
 
@@ -127,8 +122,6 @@ export const ReviewQueueItemSchema = z.object({
   confidence: z.number().nullable(),
   evidence: z.string().nullable(),
   source_blocks: z.string().nullable(),
-  fs_match_probability: z.number().nullable().optional(),
-  fs_classification_tier: z.string().nullable().optional(),
   reviewed: z.boolean(),
   patient_a: CandidatePatientSchema,
   patient_b: CandidatePatientSchema,
@@ -199,6 +192,9 @@ export const AuditLogRowSchema = z.object({
   prev_state: z.string(),
   next_state: z.string(),
   run_id: z.string().nullable(),
+  prev_mid: z.string().nullable().optional(),
+  undo_of: z.number().nullable().optional(),
+  undone: z.boolean().default(false),
 });
 export type AuditLogRow = z.infer<typeof AuditLogRowSchema>;
 
@@ -212,3 +208,65 @@ export const UnmergeResponseSchema = z.object({
   new_mid: z.string(),
   entity: EntitySchema,
 });
+
+export const UndoResponseSchema = z.object({
+  audit_id: z.number(),
+  reversed_action: z.enum(["merge", "unmerge"]),
+  entity: EntitySchema.nullable().optional(),
+  new_mids: z.array(z.string()).default([]),
+});
+export type UndoResponse = z.infer<typeof UndoResponseSchema>;
+
+// ── Explanations (GET /explanations/{model}/{a}/{b}) ────────────────────────
+// Mirrors src/api/schemas.py::PairExplanation exactly — this API layer is a
+// 1:1 pass-through of src/models/explanations.py's build_payload(), not
+// renamed anywhere, so field names here match the backend verbatim.
+export const ExplanationFeatureSchema = z.object({
+  name: z.string(),
+  label: z.string(),
+  value: z.union([z.number(), z.string()]).nullable().optional(),
+  display_value: z.string().nullable().optional(),
+  shap: z.number(),
+  start: z.number(),
+  end: z.number(),
+  direction: z.enum(["positive", "negative"]),
+  cumulative_prob: z.number(),
+});
+export type ExplanationFeature = z.infer<typeof ExplanationFeatureSchema>;
+
+export const ExplanationDecisionSchema = z.object({
+  score: z.number(),
+  tier: z.string(),
+  threshold: z.number().nullable().optional(),
+});
+export type ExplanationDecision = z.infer<typeof ExplanationDecisionSchema>;
+
+export const ExplanationAxisSchema = z.object({
+  min: z.number(),
+  max: z.number(),
+});
+export type ExplanationAxis = z.infer<typeof ExplanationAxisSchema>;
+
+export const PairExplanationSchema = z.object({
+  model: z.string(),
+  run_id: z.string().nullable().optional(),
+  model_file: z.string().nullable().optional(),
+  patid_a: z.string(),
+  patid_b: z.string(),
+  decision: ExplanationDecisionSchema,
+  base_value: z.number(),
+  final_margin: z.number(),
+  units: z.literal("log_odds"),
+  top_n: z.number(),
+  axis: ExplanationAxisSchema,
+  features: z.array(ExplanationFeatureSchema),
+});
+export type PairExplanation = z.infer<typeof PairExplanationSchema>;
+
+// ── Admin (GET/PUT /admin/thresholds) ────────────────────────────────────────
+export const ThresholdSettingsSchema = z.object({
+  gate_threshold: z.number().min(0).max(1),
+  ml_auto_merge_threshold: z.number().min(0).max(1),
+  ml_review_floor: z.number().min(0).max(1),
+});
+export type ThresholdSettings = z.infer<typeof ThresholdSettingsSchema>;

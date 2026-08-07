@@ -204,6 +204,23 @@ class UnmergeResponse(BaseModel):
     entity: Entity
 
 
+class UndoResponse(BaseModel):
+    """`POST /audit/{audit_id}/undo` — reverses a `merge` or `unmerge` entry.
+
+    `reversed_action` is the action that was undone (not the action taken to
+    undo it). Undoing a `merge` unmerges every patid back into its own
+    singleton entity (no single `entity` to return, hence `new_mids`);
+    undoing an `unmerge` re-merges the one patid back into `prev_mid`
+    (`entity` is that reconstituted entity, and `new_mids` is just `[mid]`
+    for symmetry with the merge case).
+    """
+
+    audit_id: int
+    reversed_action: Literal["merge", "unmerge"]
+    entity: Entity | None = None
+    new_mids: list[str] = Field(default_factory=list)
+
+
 class MatchStatusCounts(BaseModel):
     """FR-11: the three-way Auto-match / Needs review / No match bar chart."""
 
@@ -308,7 +325,7 @@ class AuditLogRow(BaseModel):
     id: int
     ts_utc: str
     user: str
-    action: Literal["merge", "unmerge", "split", "dismiss"]
+    action: Literal["merge", "unmerge", "split", "dismiss", "view_raw"]
     patids: str
     mid: str
     prev_state: str
@@ -341,6 +358,7 @@ __all__ = [
     "MergeResponse",
     "UnmergeRequest",
     "UnmergeResponse",
+    "UndoResponse",
     "AuditLogRow",
     "IncomingRecord",
     "ScoreRequest",

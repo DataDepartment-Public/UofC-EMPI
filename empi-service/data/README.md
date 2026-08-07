@@ -30,6 +30,7 @@ python -m src.pipeline --input data/raw/MDM_Population.csv
 | 4.5 — ML matcher | [`ml_output/`](ml_output/SCHEMA.md) | `[SCAFFOLD]` — empty until a model is trained; see `docs/ML-Matcher-Integration-Guide.md` |
 | 5 — Cluster | [`clusters/`](clusters/SCHEMA.md) | `[IMPLEMENTED]` |
 | (manifest) | [`runs/`](runs/SCHEMA.md) | one `run_<run_id>.json` per pipeline invocation |
+| (evaluation) | [`evaluations/`](evaluations/SCHEMA.md) | stored end-to-end evaluation reports, keyed by session — see `docs/End-to-End-Evaluation-Guide.md` |
 
 Folder names follow the classification-tier vocabulary in `contracts.py`
 (`TIER_AUTO_MERGE`/`TIER_NO_MATCH`) where the folder genuinely holds one

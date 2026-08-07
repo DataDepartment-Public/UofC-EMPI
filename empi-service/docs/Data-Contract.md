@@ -412,6 +412,51 @@ union), keyed on `(PATID_A, PATID_B)`.
 
 ---
 
+## Stage 4.25 — non-match gate
+
+- **Producer:** `src/models/nonmatch_gate/` (`NonMatchGate.apply`). Invoked
+  from `src/pipeline.py` when an active gate model is resolvable
+  (`nonmatch_gate.registry.resolve_active_model`), `settings.gate_supersedes_fs`
+  is on (the default), and the `non_matches` pool is non-empty.
+- **Role:** the pipeline's **confident-non-match filter** — it decides which
+  `non_matches` pairs reach Stage 4.5 and discards the rest. This role used to
+  belong to Stage 4's FS `no_match` tier; **Stage 4 is now audit-only.** The
+  gate makes no merge decision and never feeds clustering.
+- **Score:** `P(plausible)` = `P(match ∪ ambiguous)`; pairs at/above
+  `settings.gate_threshold` (0.30) pass.
+- **Features:** reuses Stage 4.5's `FeatureBuilderV5` — the gate and the
+  matcher see identical inputs.
+- **Fallback:** with no active gate model (or `gate_supersedes_fs=false`), the
+  legacy FS gate (`_fs_plausible_pool`) filters the pool instead; with neither
+  FS nor a gate model, the pool passes through **ungated** with a `WARNING`.
+- **Model store:** `models/nonmatch_gate/` — not under `data/`.
+
+### 4.25a — gate_results (full audit frame, ClassificationResults-shaped)
+
+- **Contract:** `contracts.ClassificationResults`
+- **Location:** `data/gate_output/gate_results_<run_id>.parquet`
+- **Grain:** every scored `non_matches` pair, **including the dropped ones** —
+  which exist nowhere else (`data/no_match/` holds the deterministic rules'
+  rejects, not the gate's)
+- **Tiers:** `human_review` (passed) / `no_match` (dropped) only; never
+  `auto_merge`
+- **Status:** audit frame; the surviving pairs pass to Stage 4.5 in memory
+
+### 4.25b — gate_explanations (per-pair SHAP)
+
+- **Contract:** `contracts.PairExplanations` (`validate_pair_explanations`)
+- **Location:** `data/gate_output/gate_explanations_<run_id>.parquet`
+- **Grain:** every scored pair, dropped ones included
+- **Columns:** the pair key + `model_name` / `score` / `predicted_tier` /
+  `base_value` / `model_file`, then one `shap_<feature>` contribution and one
+  `feat_<feature>` value per feature
+- **Status:** served read-only by `GET /explanations/nonmatch_gate/...`;
+  nothing in the pipeline reads it back
+
+Full detail: `docs/Nonmatch-Gate-Guide.md`, `docs/Explanations-Guide.md`.
+
+---
+
 ## Stage 4.5 — ML matcher (pluggable candidate/feature generator)  `[SCAFFOLD]`
 
 - **Producer:** `src/models/ml_matcher/` (`MLMatcher.score` for serving,
@@ -450,8 +495,18 @@ union), keyed on `(PATID_A, PATID_B)`.
   column names/count are the implementer's choice; only the pair key is
   validated by name, via `validate_ml_features`).
 - **Location:** `data/ml_output/ml_features_<run_id>.parquet`
-- **Grain:** candidates only — filtered to `match_probability >=
-  settings.ml_review_floor` (0.40 default).
+- **Grain:** **every scored pair**, unfiltered. There is no candidate cutoff:
+  the file is the complete record of the stage's scores, which is what an
+  offline threshold sweep reads (a filtered file makes any threshold below the
+  cutoff unevaluable).
+
+### 4.5c — ml_explanations (per-pair SHAP)
+
+Same `PairExplanations` contract and column shape as §4.25b, at
+`data/ml_output/ml_explanations_<run_id>.parquet`, covering every pair the ML
+matcher scored. Contributions are sign-normalized to the **served** score
+(`P(confident match)`), not the underlying model's `P(ambiguous)` — see
+`docs/Explanations-Guide.md` §3..
 
 ---
 
@@ -469,7 +524,8 @@ singleton-inclusive assignment is `clustering.build_cluster_assignments`'s
 output, written to `data/clusters/`.
 
 **Configurable edge union:** `settings.fs_feeds_clustering` /
-`settings.ml_feeds_clustering` (both default `False`) independently control
+`settings.ml_feeds_clustering` (`fs` defaults `False`, **`ml` defaults `True`**)
+independently control
 whether Stage 4's / Stage 4.5's `auto_merge`-tier `ClassificationResults` rows
 (projected to `contracts.Edges` via `src.models.base.to_edges`) union into the
 edge set clustering runs union-find over. With both off — the out-of-the-box
@@ -500,8 +556,9 @@ A uniform edge schema (`PATID_A`, `PATID_B`, `confidence`, `match_source`,
 deterministic+probabilistic/ML frame. Produced by `src.models.base.to_edges`,
 projecting the `auto_merge`-tier rows of any `ClassificationResults` frame.
 Unioned into Stage 5's clustering input only when `fs_feeds_clustering` /
-`ml_feeds_clustering` is on (see above) — with both off, no stage produces an
-`Edges` frame and clustering behaves exactly as it always has.
+`ml_feeds_clustering` is on (see above). `ml_feeds_clustering` is on by default,
+so Stage 4.5 normally does produce an `Edges` frame; with both toggles off no
+stage does, and clustering consumes deterministic `matches` alone.
 
 ---
 
@@ -758,8 +815,10 @@ specifically to replace fragile "latest version in the directory" resolution —
 | `raw_input`, `cleaned`, `candidate_pairs`, `matches`, `non_matches` | `ArtifactRef` | Always populated. |
 | `rejects`, `clusters`, `review_evidence` | `ArtifactRef`, optional | Populated by every current run; optional for backward-compat with older manifest shapes. |
 | `matches_model`, `fs_features` | `ArtifactRef`, optional | Populated **only** when an active FS model scored the run (null if Stage 4 was skipped). |
+| `gate_results` | `ArtifactRef`, optional | Populated **only** when an active gate model gated the run (null when Stage 4.25 fell back to the legacy FS gate or ran ungated). |
+| `gate_explanations`, `ml_explanations` | `ArtifactRef`, optional | Per-pair SHAP frames. Null when `explanations_enabled` is off, the stage was skipped, or the served model exposes no contributions. |
 | `matches_ml`, `ml_features` | `ArtifactRef`, optional | Populated **only** when an active ML model scored the run (null if Stage 4.5 was skipped — the common case today, since ml_matcher ships with no trained model). |
-| `counts` | `dict[str, int]` | `raw_rows`, `cleaned_rows`, `valid_records`, `candidate_pairs`, `matches`, `non_matches`, `rejects`, `clusters`, `total_clusters`. |
+| `counts` | `dict[str, int]` | `raw_rows`, `cleaned_rows`, `valid_records`, `candidate_pairs`, `matches`, `non_matches`, `gate_plausible`, `gate_dropped`, `rejects`, `clusters`, `total_clusters`. |
 
 Each `ArtifactRef` carries a project-root-relative `path`, `rows`, and a
 `sha256` of the file.
@@ -779,15 +838,20 @@ whether that's by design.
 | `data/auto_merge/` | Stage 3 (auto-merge tier) | `src/api/ingest/publish.py`, `src/evaluation/rule_eval.py` | Active |
 | `data/non_matches/` | Stage 3 (`non_matches_*` + `review_evidence_*` companion) | Stage 4 (scores `non_matches`), `src/api/ingest/publish.py` (both files) | Active |
 | `data/no_match/` | Stage 3 | *(none)* | Terminal — audit only, no reader |
-| `data/fs_output/` | Stage 4 (`ProbabilisticMatches` audit frame + pipeline candidates + `train.py` labeled training set — merged folder, was `matches_model/`+`FS_output/`) | Stage 4.5 (`fs_features` enrichment input, optional); audit frame feeds Stage 5's edge union when `fs_feeds_clustering` is on | Active |
-| `data/ml_output/` | Stage 4.5 (`ClassificationResults` audit frame + pipeline candidates — merged folder, was `matches_ml/`+`ML_output/`) | *(none yet)*; audit frame feeds Stage 5's edge union when `ml_feeds_clustering` is on | Scaffold — no in-repo consumer until a real model is trained |
+| `data/fs_output/` | Stage 4 (`ProbabilisticMatches` audit frame + pipeline candidates + `train.py` labeled training set — merged folder, was `matches_model/`+`FS_output/`) | Stage 4.5 (`fs_features` enrichment input, optional); audit frame feeds Stage 5's edge union when `fs_feeds_clustering` is on | Active — audit-only since Stage 4.25 took over gating |
+| `data/gate_output/` | Stage 4.25 (`ClassificationResults` audit frame + `PairExplanations` SHAP frame) | `GET /explanations/nonmatch_gate/...` (SHAP frame); the survivors pass to Stage 4.5 in memory | Active — sole record of the pairs the gate dropped |
+| `data/ml_output/` | Stage 4.5 (`ClassificationResults` audit frame + pipeline candidates + `PairExplanations` SHAP frame — merged folder, was `matches_ml/`+`ML_output/`) | `GET /explanations/ml_matcher/...` (SHAP frame); audit frame feeds Stage 5's edge union when `ml_feeds_clustering` is on | Active |
 | `data/clusters/` | Stage 5 | `src/api/ingest/publish.py` | Active |
 | `data/runs/` | `src/pipeline.py` (`RunManifest`) | `src/api/ingest/publish.py`, `fs_matcher/train.py` (input resolution), `scripts/build_eval_workbook.py` | Active |
+| `data/evaluations/` | `scripts/evaluate_all.py` / `eval_end_to_end.py` (`pipeline_eval.write_report`) | `src/evaluation/report_io.py`, `notebooks/evaluation/end_to_end_eval.ipynb` | Active — end-to-end evaluation reports, keyed by session, NOT by run |
 | `data/silver_labels/` | *(external, VM-only)* | `fs_matcher/train.py` | VM-only PHI input, gitignored |
+| `data/gold_labels/` | *(external, VM-only)* | `scripts/evaluate_all.py`, `src/evaluation/holdout.py`, the ML notebooks | VM-only PHI input, gitignored — also the gate/matcher TRAINING data, hence the holdout machinery |
+| `data/synthetic_data/` | *(external, curated)* | `src/evaluation/synthetic.py` via `scripts/evaluate_all.py` | Active — the only label source with entity-level ground truth |
 | `data/empi.db` | `src/api/ingest/publish.py` | `src/api/backends/sql_backend.py` + routers | Active — serves the review dashboard |
 | `data/local_index/` | `src/api/ingest/publish.py` / `publish_local.py` (batch), `src/api/ingest/incremental.py` / `local_score.py` (incremental) | `src/api/backends/parquet_backend.py`-backed routes (records/dashboard/audit), `src/api/ingest/local_score.py` | Active — full parity with `data/empi.db` (Stage 6) |
 | `models/fs/` *(not under `data/`)* | `fs_matcher/train.py` | Stage 4 (`registry.resolve_active_model`) | See `docs/FS-Matcher-Production-Guide.md` for the full model-store layout |
 | `models/ml/` *(not under `data/`)* | `ml_matcher/train.py` (scaffold — training unimplemented) | Stage 4.5 (`ml_matcher.registry.resolve_active_model`) | See `docs/ML-Matcher-Integration-Guide.md` |
+| `models/nonmatch_gate/` *(not under `data/`)* | the gate notebook's export + promote cell (`notebooks/ml_model/confident_nonmatch/`) | Stage 4.25 (`nonmatch_gate.registry.resolve_active_model`) | See `docs/Nonmatch-Gate-Guide.md` |
 
 ---
 

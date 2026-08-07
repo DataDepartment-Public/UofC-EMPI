@@ -23,9 +23,15 @@ highest-confidence deterministic pair connecting its *unlocked* members — the
 pipeline's evidence for the grouping actually being written.
 
 Review-tier data (FR-7/8/19/20/21 in the Dashboard FR doc): `non_matches`
-(the full review queue — review-tier rule-confirmed pairs + uncertain pairs)
-and the companion `review_evidence` artifact (rule provenance for the
-rule-confirmed subset — see `src/pipeline.py`) become `review_candidate` rows.
+minus whatever the Stage-4.25 gate (`gate_results`) confidently dropped as
+`TIER_NO_MATCH` is the review queue — those dropped pairs already carry a
+decisive automated non-match decision and resolve straight to `origin='none'`
+instead of surfacing for a human. The companion `review_evidence` artifact
+(rule provenance for the rule-confirmed subset — see `src/pipeline.py`)
+supplies `match_rule`/`rules_fired` for that subset. `gate_results` is `None`
+on manifests with no gate model (legacy FS-gate fallback, or no gate
+available at all — Stage 4.25 in `src/pipeline.py`), in which case every
+`non_matches` pair is still review-eligible, matching pre-gate behavior.
 A singleton entity whose sole member appears in the review queue gets
 `origin='review'` instead of `'none'`.
 
@@ -78,6 +84,7 @@ from src.contracts import (
     SEX,
     SSN,
     SSN_LAST4,
+    TIER_NO_MATCH,
     VALID_RECORD,
     ZIP_BASE,
 )
@@ -229,15 +236,37 @@ def _raw_row(patid: str, raw_by_patid: dict[str, dict], run_id: str) -> tuple | 
 def _review_candidate_rows(
     non_matches: pd.DataFrame,
     review_evidence: pd.DataFrame | None,
+    gate_results: pd.DataFrame | None,
     run_id: str,
     now: str,
 ) -> tuple[list[tuple], set[str]]:
-    """`non_matches` is the full review queue (review-tier rule-confirmed +
-    uncertain pairs); `review_evidence` (may be `None` for pre-existing
-    manifests without it) carries `match_rule`/`rules_fired` for the
-    rule-confirmed subset. Returns (rows, {every PATID in the queue})."""
+    """The review queue is `non_matches` (rule-uncertain pairs) minus
+    whatever the Stage-4.25 gate confidently dropped as `TIER_NO_MATCH` in
+    `gate_results` — those pairs already have a decisive automated
+    non-match decision (see `src/models/nonmatch_gate/gate.py`) and belong
+    in `origin='none'`, not the human queue. `gate_results` is `None` when
+    no gate model scored this run (legacy FS-gate fallback or no gate
+    available — Stage 4.25 in `src/pipeline.py`); every `non_matches` pair
+    stays review-eligible in that case. `review_evidence` (may be `None`
+    for pre-existing manifests without it) carries `match_rule`/
+    `rules_fired` for the rule-confirmed subset. Returns (rows, {every
+    PATID in the queue})."""
     if non_matches.empty:
         return [], set()
+
+    if gate_results is not None and not gate_results.empty:
+        dropped = gate_results.loc[
+            gate_results["predicted_tier"] == TIER_NO_MATCH, [PATID_A, PATID_B]
+        ]
+        if not dropped.empty:
+            non_matches = non_matches.merge(
+                dropped.assign(_gate_dropped=True), on=[PATID_A, PATID_B], how="left"
+            )
+            non_matches = non_matches[non_matches["_gate_dropped"].isna()].drop(
+                columns="_gate_dropped"
+            )
+        if non_matches.empty:
+            return [], set()
 
     evidence_by_pair: dict[frozenset, tuple[str, float, str]] = {}
     if review_evidence is not None and not review_evidence.empty:
@@ -326,6 +355,11 @@ def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
         if manifest.review_evidence is not None
         else None
     )
+    gate_results = (
+        pd.read_parquet(_resolve(manifest.gate_results.path, settings))
+        if manifest.gate_results is not None
+        else None
+    )
 
     attrs_by_patid = _attrs_index(cleaned)
     raw_by_patid = _raw_index(cleaned)
@@ -337,7 +371,7 @@ def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
     now = _now()
 
     review_candidate_rows, review_patids = _review_candidate_rows(
-        non_matches, review_evidence, run_id, now
+        non_matches, review_evidence, gate_results, run_id, now
     )
 
     # Incremental-scoring index rebuild — pure Python/pandas, no DB round-trips

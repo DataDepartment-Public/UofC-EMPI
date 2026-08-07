@@ -346,6 +346,7 @@ class ParquetIndexBackend:
         updated_before: str | None = None,
         confidence_min: float | None = None,
         confidence_max: float | None = None,
+        sort: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[dict], int]:
@@ -403,7 +404,26 @@ class ParquetIndexBackend:
         member_counts = members.groupby("mid").size().rename("member_count")
         filtered = filtered.merge(member_counts, on="mid", how="left")
         filtered["member_count"] = filtered["member_count"].fillna(0).astype(int)
-        filtered = filtered.sort_values(["updated_utc", "mid"], ascending=[False, True])
+
+        if sort == "confidence":
+            filtered = filtered.sort_values(
+                ["confidence", "mid"], ascending=[False, True], na_position="last"
+            )
+        elif sort == "name":
+            primary_names = joined_members.loc[
+                joined_members["is_primary"].astype(bool),
+                ["mid", "first_name", "last_name"],
+            ]
+            filtered = filtered.merge(primary_names, on="mid", how="left")
+            filtered = filtered.sort_values(
+                ["last_name", "first_name", "mid"],
+                ascending=True,
+                na_position="last",
+                key=lambda s: s.str.lower() if s.dtype == object else s,
+            )
+            filtered = filtered.drop(columns=["first_name", "last_name"])
+        else:
+            filtered = filtered.sort_values(["updated_utc", "mid"], ascending=[False, True])
 
         start = max(page - 1, 0) * page_size
         page_rows = filtered.iloc[start : start + page_size]

@@ -76,7 +76,7 @@ export default function ReviewQueuePage() {
         <h2 className="text-[22px] font-extrabold text-ink-2">Review Queue</h2>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[400px_1fr]">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[400px_minmax(0,1fr)]">
         <ReviewQueueList
           filters={filters}
           onFiltersChange={setFilters}

@@ -7,6 +7,8 @@
 import { z } from "zod";
 import {
   AuditLogRowSchema,
+  CleanSsn,
+  CleanSsnSchema,
   DashboardSummary,
   DashboardSummarySchema,
   DismissResponseSchema,
@@ -17,6 +19,8 @@ import {
   PairExplanationSchema,
   RawRecord,
   RawRecordSchema,
+  ReadyResponse,
+  ReadyResponseSchema,
   RecordsPage,
   RecordsPageSchema,
   ReviewQueuePage,
@@ -60,6 +64,16 @@ async function call<T>(
   return schema.parse(body);
 }
 
+/** Like `call`, but a "not ready" backend is a real, expected status to
+ * render (see ReadyResponseSchema) rather than a thrown error — the BFF's
+ * health route mirrors FastAPI's 503 for `not_ready`, so this reads the body
+ * regardless of `res.ok`. */
+async function callHealth(path: string): Promise<ReadyResponse> {
+  const res = await fetch(path);
+  const body = await res.json().catch(() => null);
+  return ReadyResponseSchema.parse(body);
+}
+
 /** Like `call`, but a 404 means "not scored by this model" — a normal,
  * expected outcome (a purely deterministic-rule pair, or one the gate
  * dropped before it reached `ml_matcher`) — not an error, so it resolves to
@@ -90,6 +104,7 @@ export interface RecordsFilters {
   ssn_last4?: string;
   confidence_min?: number;
   confidence_max?: number;
+  sort?: "confidence" | "name" | "updated";
   page?: number;
   page_size?: number;
 }
@@ -134,6 +149,12 @@ export const api = {
     call<RawRecord>(
       RawRecordSchema,
       `/api/records/${encodeURIComponent(patid)}/raw`,
+    ),
+
+  getCleanSsn: (patid: string) =>
+    call<CleanSsn>(
+      CleanSsnSchema,
+      `/api/records/${encodeURIComponent(patid)}/ssn-clean`,
     ),
 
   listRuns: () => call<RunSummary[]>(z.array(RunSummarySchema), "/api/runs"),
@@ -189,6 +210,8 @@ export const api = {
       `/api/audit/${encodeURIComponent(auditId)}/undo`,
       { method: "POST" },
     ),
+
+  getHealth: () => callHealth("/api/health"),
 
   getThresholds: () =>
     call<ThresholdSettings>(ThresholdSettingsSchema, "/api/admin/thresholds"),

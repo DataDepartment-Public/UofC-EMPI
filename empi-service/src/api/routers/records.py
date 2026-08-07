@@ -19,6 +19,7 @@ from src.api.deps import get_backend, get_reviewer_id_optional, get_settings
 from src.api.backends.index_backend import IndexBackend
 from src.api.schemas import (
     CandidatePatient,
+    CleanSsn,
     Entity,
     EntityMember,
     RawRecord,
@@ -157,18 +158,21 @@ def list_records(
     updated_before: str | None = None,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    sort: str | None = None,
     page: int = 1,
     page_size: int | None = None,
     backend: IndexBackend = Depends(get_backend),
     settings: Settings = Depends(get_settings),
 ) -> RecordsPage:
+    """`sort` — `'confidence'`, `'name'`, or unset/anything else for the
+    default most-recently-updated-first (see `IndexBackend.list_entities`)."""
     page_size = page_size or settings.records_page_size
     rows, total = backend.list_entities(
         search=search, origin=origin, is_merged=is_merged,
         birth_date=birth_date, ssn_last4=ssn_last4,
         updated_after=updated_after, updated_before=updated_before,
         confidence_min=confidence_min, confidence_max=confidence_max,
-        page=page, page_size=page_size,
+        sort=sort, page=page, page_size=page_size,
     )
     items = []
     for row in rows:
@@ -221,6 +225,47 @@ def get_raw_record(
         raise
 
     return RawRecord(patid=patid, fields=json.loads(raw_json))
+
+
+@router.get("/records/{patid}/ssn-clean", response_model=CleanSsn)
+def get_clean_ssn(
+    patid: str,
+    backend: IndexBackend = Depends(get_backend),
+    reviewer_id: str = Depends(get_reviewer_id_optional),
+) -> CleanSsn:
+    """The pipeline-normalized full SSN (`cleaned_attrs.ssn`) — the value
+    blocking (B1) and the deterministic rules actually matched on, unlike
+    `SSN_raw` from `GET /records/{patid}/raw`, which is the un-scrubbed
+    source value and may contain formatting noise or fail `clean_ssn`'s
+    validation entirely. Reveal-toggle UI should prefer this over the raw
+    endpoint so a reviewer never sanity-checks a merge against a value the
+    matching engine didn't trust. Audit-logged the same way as `view_raw`
+    since this also exposes unmasked PHI; a 404 (nothing published) is not
+    logged."""
+    rows = backend.get_cleaned_attrs([patid])
+    if not rows:
+        raise HTTPException(
+            status_code=404, detail=f"No cleaned attributes published for PATID: {patid}"
+        )
+
+    backend.begin()
+    try:
+        backend.insert_audit_log(
+            ts_utc=datetime.now(timezone.utc).isoformat(),
+            user=reviewer_id,
+            action="view_ssn_clean",
+            patids=patid,
+            mid=backend.get_entity_mid_for_patid(patid) or patid,
+            prev_state="N/A",
+            next_state="Viewed",
+            run_id=None,
+        )
+        backend.commit()
+    except Exception:
+        backend.rollback()
+        raise
+
+    return CleanSsn(patid=patid, ssn=rows[0].get("ssn"))
 
 
 @router.post("/records/score", response_model=ScoreCreateResponse, status_code=202)

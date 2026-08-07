@@ -46,6 +46,20 @@ export function DatasetFilters({
           className="w-20 rounded-md border border-line px-2.5 py-1.5 text-sm outline-none focus:border-brand-blue"
         />
       </Field>
+      <Field label="Sort by">
+        <select
+          value={value.sort ?? "updated"}
+          onChange={(e) => {
+            const next = e.target.value;
+            set({ sort: next === "updated" ? undefined : (next as RecordsFilters["sort"]) });
+          }}
+          className="rounded-md border border-line px-2.5 py-1.5 text-sm outline-none focus:border-brand-blue"
+        >
+          <option value="updated">Last updated</option>
+          <option value="confidence">Confidence</option>
+          <option value="name">Name</option>
+        </select>
+      </Field>
       <button
         onClick={() => onChange({ page: 1, page_size: value.page_size })}
         className="rounded-md border border-line px-3 py-1.5 text-sm font-semibold text-gray-2 hover:bg-bg"

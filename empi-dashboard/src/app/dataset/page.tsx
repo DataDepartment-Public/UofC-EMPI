@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, RecordsFilters } from "@/lib/api-client";
 import { useRecords, useUnmergeMutation } from "@/lib/hooks";
@@ -25,12 +25,14 @@ const FINAL_ORIGINS = "deterministic,merge,none";
  * same search/filter/page a reviewer had open, instead of a freshly reset
  * Patient Registry. */
 function filtersFromSearchParams(searchParams: URLSearchParams): RecordsFilters {
+  const sort = searchParams.get("sort");
   return {
     page: Number(searchParams.get("page")) || 1,
     page_size: PAGE_SIZE,
     search: searchParams.get("search") ?? undefined,
     birth_date: searchParams.get("birth_date") ?? undefined,
     ssn_last4: searchParams.get("ssn_last4") ?? undefined,
+    sort: sort === "confidence" || sort === "name" ? sort : undefined,
   };
 }
 
@@ -39,6 +41,7 @@ function filtersToSearch(filters: RecordsFilters): string {
   if (filters.search) params.set("search", filters.search);
   if (filters.birth_date) params.set("birth_date", filters.birth_date);
   if (filters.ssn_last4) params.set("ssn_last4", filters.ssn_last4);
+  if (filters.sort) params.set("sort", filters.sort);
   if (filters.page && filters.page !== 1) params.set("page", String(filters.page));
   return params.toString();
 }
@@ -61,13 +64,19 @@ function DatasetPageContent() {
   const setFilters = (
     next: RecordsFilters | ((prev: RecordsFilters) => RecordsFilters),
   ) => {
-    setFiltersState((prev) => {
-      const resolved = typeof next === "function" ? next(prev) : next;
-      const qs = filtersToSearch(resolved);
-      router.replace(qs ? `/dataset?${qs}` : "/dataset", { scroll: false });
-      return resolved;
-    });
+    setFiltersState((prev) => (typeof next === "function" ? next(prev) : next));
   };
+
+  // Syncing the URL is a side effect of `filters` changing, not part of the
+  // state update itself — doing it inside the `setFiltersState` updater
+  // above (a `router.replace` call in a "pure" state-updater function) trips
+  // React's "Cannot update a component while rendering a different
+  // component" warning.
+  useEffect(() => {
+    const qs = filtersToSearch(filters);
+    router.replace(qs ? `/dataset?${qs}` : "/dataset", { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters]);
 
   const [rawPatid, setRawPatid] = useState<string | null>(null);
   const [pendingUnmerge, setPendingUnmerge] = useState<{

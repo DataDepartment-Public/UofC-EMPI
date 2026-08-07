@@ -108,6 +108,7 @@ class IndexBackend(Protocol):
         updated_before: str | None = None,
         confidence_min: float | None = None,
         confidence_max: float | None = None,
+        sort: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[dict], int]: ...
@@ -260,7 +261,7 @@ class SqlIndexBackend:
         *,
         search=None, origin=None, is_merged=None, birth_date=None,
         ssn_last4=None, updated_after=None, updated_before=None,
-        confidence_min=None, confidence_max=None,
+        confidence_min=None, confidence_max=None, sort=None,
         page=1, page_size=50,
     ) -> tuple[list[dict], int]:
         return self._store.list_entities(
@@ -268,7 +269,7 @@ class SqlIndexBackend:
             birth_date=birth_date, ssn_last4=ssn_last4,
             updated_after=updated_after, updated_before=updated_before,
             confidence_min=confidence_min, confidence_max=confidence_max,
-            page=page, page_size=page_size,
+            sort=sort, page=page, page_size=page_size,
         )
 
     def dashboard_summary(self) -> dict:

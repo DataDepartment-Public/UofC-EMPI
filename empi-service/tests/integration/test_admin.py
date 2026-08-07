@@ -34,7 +34,7 @@ def test_settings(tmp_path, monkeypatch):
     # this process's .env) values leak in as the "default" a test expects.
     monkeypatch.setattr(real_settings, "gate_threshold", 0.30)
     monkeypatch.setattr(real_settings, "ml_auto_merge_threshold", 0.70)
-    monkeypatch.setattr(real_settings, "ml_review_floor", 0.40)
+    monkeypatch.setattr(real_settings, "fs_review_floor", 0.40)
     real_settings.ensure_dirs()
     return real_settings
 
@@ -52,7 +52,7 @@ class TestAdminThresholds:
         assert resp.json() == {
             "gate_threshold": 0.30,
             "ml_auto_merge_threshold": 0.70,
-            "ml_review_floor": 0.40,
+            "fs_review_floor": 0.40,
         }
 
     def test_put_updates_and_get_reflects_it(self, client, test_settings):
@@ -61,20 +61,20 @@ class TestAdminThresholds:
             json={
                 "gate_threshold": 0.25,
                 "ml_auto_merge_threshold": 0.80,
-                "ml_review_floor": 0.35,
+                "fs_review_floor": 0.35,
             },
         )
         assert resp.status_code == 200
         assert resp.json() == {
             "gate_threshold": 0.25,
             "ml_auto_merge_threshold": 0.80,
-            "ml_review_floor": 0.35,
+            "fs_review_floor": 0.35,
         }
 
         # Takes effect immediately on the live settings singleton.
         assert test_settings.gate_threshold == 0.25
         assert test_settings.ml_auto_merge_threshold == 0.80
-        assert test_settings.ml_review_floor == 0.35
+        assert test_settings.fs_review_floor == 0.35
 
         again = client.get("/admin/thresholds")
         assert again.json() == resp.json()
@@ -85,7 +85,7 @@ class TestAdminThresholds:
             json={
                 "gate_threshold": 0.20,
                 "ml_auto_merge_threshold": 0.75,
-                "ml_review_floor": 0.30,
+                "fs_review_floor": 0.30,
             },
         )
         path = threshold_store.overrides_path(test_settings)
@@ -93,7 +93,7 @@ class TestAdminThresholds:
         assert json.loads(path.read_text()) == {
             "gate_threshold": 0.20,
             "ml_auto_merge_threshold": 0.75,
-            "ml_review_floor": 0.30,
+            "fs_review_floor": 0.30,
         }
 
     def test_put_rejects_out_of_range_values(self, client, test_settings):
@@ -102,7 +102,7 @@ class TestAdminThresholds:
             json={
                 "gate_threshold": 1.5,
                 "ml_auto_merge_threshold": 0.70,
-                "ml_review_floor": 0.40,
+                "fs_review_floor": 0.40,
             },
         )
         assert resp.status_code == 422
@@ -115,17 +115,17 @@ class TestAdminThresholds:
             json={
                 "gate_threshold": 0.15,
                 "ml_auto_merge_threshold": 0.60,
-                "ml_review_floor": 0.20,
+                "fs_review_floor": 0.20,
             },
         )
         # Simulate a fresh process: reset the live singleton to field
         # defaults, then re-run what lifespan() does on startup.
         test_settings.gate_threshold = 0.30
         test_settings.ml_auto_merge_threshold = 0.70
-        test_settings.ml_review_floor = 0.40
+        test_settings.fs_review_floor = 0.40
 
         threshold_store.apply_persisted_overrides(test_settings)
 
         assert test_settings.gate_threshold == 0.15
         assert test_settings.ml_auto_merge_threshold == 0.60
-        assert test_settings.ml_review_floor == 0.20
+        assert test_settings.fs_review_floor == 0.20

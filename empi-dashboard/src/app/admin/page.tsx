@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ApiError } from "@/lib/api-client";
 import { useThresholds, useUpdateThresholds } from "@/lib/hooks";
 import { Toast } from "@/components/shared/Toast";
+import { SystemStatusPanel } from "@/components/admin/SystemStatusPanel";
 import type { ThresholdSettings } from "@/lib/schemas";
 
 const FIELDS: {
@@ -26,11 +27,11 @@ const FIELDS: {
       'Match-probability at/above which the ML matcher tiers a pair "auto_merge".',
   },
   {
-    key: "ml_review_floor",
-    label: "ML review floor",
+    key: "fs_review_floor",
+    label: "FS review floor",
     description:
-      'Match-probability at/above which the ML matcher tiers a pair "human_review" ' +
-      "(also the candidate-inclusion floor for the ML matcher's feature parquet).",
+      'Match-probability at/above which the FS matcher tiers a pair "human_review" ' +
+      "(also the candidate-inclusion floor for the FS matcher's feature parquet).",
   },
 ];
 
@@ -55,14 +56,21 @@ export default function AdminPage() {
         </p>
       </div>
 
-      {isLoading && <p className="text-sm text-gray">Loading thresholds…</p>}
-      {isError && (
-        <p className="text-sm text-status-nomatch">
-          Couldn&apos;t reach the eMPI API. Is the backend running?
-        </p>
-      )}
+      <div className="flex flex-wrap justify-center gap-5">
+        <div className="w-full max-w-md">
+          {isLoading && (
+            <p className="text-sm text-gray">Loading thresholds…</p>
+          )}
+          {isError && (
+            <p className="text-sm text-status-nomatch">
+              Couldn&apos;t reach the eMPI API. Is the backend running?
+            </p>
+          )}
+          {data && <ThresholdForm initial={data} />}
+        </div>
 
-      {data && <ThresholdForm initial={data} />}
+        <SystemStatusPanel />
+      </div>
     </div>
   );
 }
@@ -89,7 +97,7 @@ function ThresholdForm({ initial }: { initial: ThresholdSettings }) {
   };
 
   return (
-    <div className="card max-w-xl p-5">
+    <div className="card w-full max-w-md p-5">
       <div className="space-y-5">
         {FIELDS.map((f) => (
           <div key={f.key}>

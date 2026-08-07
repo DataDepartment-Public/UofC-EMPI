@@ -1,4 +1,5 @@
 import type { ExplainPatient } from "./explain";
+import { maskSsn } from "./format";
 
 export interface ComparisonRow {
   label: string;
@@ -8,7 +9,7 @@ export interface ComparisonRow {
 }
 
 const FIELDS: { key: keyof ExplainPatient; label: string }[] = [
-  { key: "ssn_last4", label: "SSN (last 4)" },
+  { key: "ssn_last4", label: "SSN" },
   { key: "birth_date", label: "Birthdate" },
   { key: "first_name", label: "First name" },
   { key: "last_name", label: "Last name" },
@@ -42,7 +43,9 @@ export function compareRecords(
     } else {
       result = "different";
     }
-    return { label, valueA: va_ ?? "(missing)", valueB: vb_ ?? "(missing)", result };
+    const displayA = key === "ssn_last4" && va_ !== null ? maskSsn(va_) : va_ ?? "(missing)";
+    const displayB = key === "ssn_last4" && vb_ !== null ? maskSsn(vb_) : vb_ ?? "(missing)";
+    return { label, valueA: displayA, valueB: displayB, result };
   });
 }
 

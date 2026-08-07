@@ -643,6 +643,7 @@ def list_entities(
     updated_before: str | None = None,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    sort: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
@@ -667,6 +668,10 @@ def list_entities(
         with a NULL confidence (no deterministic rule fired) are excluded by
         either bound, same as SQL's normal NULL comparison semantics — a caller
         wanting those back should leave both bounds unset.
+      * `sort` — `'confidence'` (highest first, NULLs last), `'name'` (the
+        entity's primary member's last/first name, A-Z), or anything else
+        including unset (`'updated'`, the default) for most-recently-updated
+        first.
 
     Returns (rows, total_count).
     """
@@ -720,15 +725,32 @@ def list_entities(
         f"SELECT COUNT(*) AS n FROM entity e {where_sql}", params
     ).fetchone()["n"]
 
+    if sort == "confidence":
+        sort_join_sql = ""
+        order_sql = "e.confidence IS NULL, e.confidence DESC, e.mid"
+    elif sort == "name":
+        sort_join_sql = (
+            "LEFT JOIN entity_member pm ON pm.mid = e.mid AND pm.is_primary = 1 "
+            "LEFT JOIN record_attrs pa ON pa.patid = pm.patid"
+        )
+        order_sql = (
+            "pa.last_name IS NULL, pa.last_name COLLATE NOCASE, "
+            "pa.first_name COLLATE NOCASE, e.mid"
+        )
+    else:
+        sort_join_sql = ""
+        order_sql = "e.updated_utc DESC, e.mid"
+
     offset = max(page - 1, 0) * page_size
     rows = conn.execute(
         f"""
         SELECT e.*, COUNT(em.patid) AS member_count
         FROM entity e
         LEFT JOIN entity_member em ON em.mid = e.mid
+        {sort_join_sql}
         {where_sql}
         GROUP BY e.mid
-        ORDER BY e.updated_utc DESC, e.mid
+        ORDER BY {order_sql}
         LIMIT ? OFFSET ?
         """,
         [*params, page_size, offset],

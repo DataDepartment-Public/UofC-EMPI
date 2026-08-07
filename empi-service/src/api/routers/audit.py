@@ -292,11 +292,16 @@ def list_audit(
     backend: IndexBackend = Depends(get_backend),
 ) -> list[AuditLogRow]:
     """The reviewer-facing audit trail (Dataset tab's Merge Audit Log). Excludes
-    `view_raw` entries — those are PHI-access records, not reviewer decisions,
-    and have no natural place in a table built around undoable state
-    transitions; they remain in `audit_log` and are queryable directly."""
+    `view_raw`/`view_ssn_clean` entries — those are PHI-access records, not
+    reviewer decisions, and have no natural place in a table built around
+    undoable state transitions; they remain in `audit_log` and are queryable
+    directly."""
     rows = backend.list_audit_log(limit=limit, since=since)
-    return [AuditLogRow(**row) for row in rows if row["action"] != "view_raw"]
+    return [
+        AuditLogRow(**row)
+        for row in rows
+        if row["action"] not in ("view_raw", "view_ssn_clean")
+    ]
 
 
 __all__ = ["router"]

@@ -183,6 +183,11 @@ class RawRecord(BaseModel):
     fields: dict[str, object]
 
 
+class CleanSsn(BaseModel):
+    patid: str
+    ssn: str | None
+
+
 class MergeRequest(BaseModel):
     mid: str
     patids: list[str] = Field(min_length=1)
@@ -325,13 +330,97 @@ class AuditLogRow(BaseModel):
     id: int
     ts_utc: str
     user: str
-    action: Literal["merge", "unmerge", "split", "dismiss", "view_raw"]
+    action: Literal["merge", "unmerge", "split", "dismiss", "view_raw", "view_ssn_clean"]
     patids: str
     mid: str
     prev_state: str
     next_state: str
     run_id: str | None
     related_patids: str | None = None
+    prev_mid: str | None = None
+    undo_of: int | None = None
+    undone: bool = False
+
+
+# ── Explanations (GET /explanations/...) ─────────────────────────────────────
+class ExplanationFeature(BaseModel):
+    """One bar of the waterfall.
+
+    `start`/`end` are precomputed cumulative positions, so the UI draws a
+    rectangle per feature and does no arithmetic — it needs no notion of a
+    base value, log-odds, or SHAP at all.
+    """
+
+    name: str
+    label: str
+    value: float | str | None = None
+    display_value: str | None = None
+    shap: float
+    start: float
+    end: float
+    direction: Literal["positive", "negative"]
+    cumulative_prob: float
+
+
+class ExplanationDecision(BaseModel):
+    score: float
+    tier: str
+    threshold: float | None = None
+
+
+class ExplanationAxis(BaseModel):
+    min: float
+    max: float
+
+
+class PairExplanation(BaseModel):
+    """A plot-ready waterfall for one pair under one model.
+
+    Contributions are exact TreeSHAP in **log-odds** (`units`), summing to
+    `final_margin` from `base_value`. Signs are normalized so positive always
+    pushes toward the model's positive decision — plausible for the gate,
+    confident-match for the ML matcher. `features` is ordered by descending
+    |contribution|; `top_n` is a suggestion for how many to show.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    model: str
+    run_id: str | None = None
+    model_file: str | None = None
+    patid_a: str
+    patid_b: str
+    decision: ExplanationDecision
+    base_value: float
+    final_margin: float
+    units: Literal["log_odds"] = "log_odds"
+    top_n: int
+    axis: ExplanationAxis
+    features: list[ExplanationFeature]
+
+
+# ── Admin (GET/PUT /admin/thresholds) ────────────────────────────────────────
+class ThresholdSettings(BaseModel):
+    """The live-tunable ML decision thresholds — see
+    `src/api/threshold_store.py`. Same shape for both the GET response and
+    the PUT request body."""
+
+    gate_threshold: float = Field(
+        ge=0.0, le=1.0,
+        description="P(plausible) at/above which a pair passes the "
+        "non-match gate and reaches the ML matcher.",
+    )
+    ml_auto_merge_threshold: float = Field(
+        ge=0.0, le=1.0,
+        description="Match-probability at/above which the ML matcher "
+        "tiers a pair 'auto_merge'.",
+    )
+    fs_review_floor: float = Field(
+        ge=0.0, le=1.0,
+        description="Match-probability at/above which the FS matcher "
+        "tiers a pair 'human_review' (also the candidate-inclusion floor "
+        "for the FSFeatures parquet).",
+    )
 
 
 __all__ = [
@@ -370,4 +459,9 @@ __all__ = [
     "CachedModelInfo",
     "ModelReloadResponse",
     "ModelStatusResponse",
+    "ExplanationFeature",
+    "ExplanationDecision",
+    "ExplanationAxis",
+    "PairExplanation",
+    "ThresholdSettings",
 ]

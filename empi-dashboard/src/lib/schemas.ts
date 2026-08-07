@@ -146,6 +146,12 @@ export const RawRecordSchema = z.object({
 });
 export type RawRecord = z.infer<typeof RawRecordSchema>;
 
+export const CleanSsnSchema = z.object({
+  patid: z.string(),
+  ssn: z.string().nullable(),
+});
+export type CleanSsn = z.infer<typeof CleanSsnSchema>;
+
 export const MatchStatusCountsSchema = z.object({
   auto_match: z.number(),
   needs_review: z.number(),
@@ -267,6 +273,23 @@ export type PairExplanation = z.infer<typeof PairExplanationSchema>;
 export const ThresholdSettingsSchema = z.object({
   gate_threshold: z.number().min(0).max(1),
   ml_auto_merge_threshold: z.number().min(0).max(1),
-  ml_review_floor: z.number().min(0).max(1),
+  fs_review_floor: z.number().min(0).max(1),
 });
 export type ThresholdSettings = z.infer<typeof ThresholdSettingsSchema>;
+
+// ── Health (GET /health/ready) ───────────────────────────────────────────────
+export const ReadyChecksSchema = z.object({
+  db: z.boolean(),
+  data_dirs: z.boolean(),
+  last_run_id: z.string().nullable(),
+});
+export type ReadyChecks = z.infer<typeof ReadyChecksSchema>;
+
+// `checks` is omitted by the BFF's health route when FastAPI is completely
+// unreachable (a plain fetch failure, not an HTTP error response) — see
+// app/api/health/route.ts's generic catch branch.
+export const ReadyResponseSchema = z.object({
+  status: z.enum(["ok", "not_ready"]),
+  checks: ReadyChecksSchema.optional(),
+});
+export type ReadyResponse = z.infer<typeof ReadyResponseSchema>;

@@ -126,6 +126,92 @@ def _write_run(settings: Settings, run_id: str):
     return manifest
 
 
+def _write_run_with_gate_drop(settings: Settings, run_id: str):
+    # Same P1-P5 shape as `_write_run`, plus P6<->P7: a non_matches pair the
+    # Stage-4.25 gate confidently scores TIER_NO_MATCH — it must not become
+    # a review_candidate row, unlike P4<->P5 (gate tier human_review).
+    cleaned = pd.DataFrame({
+        "PATID": ["P1", "P2", "P3", "P4", "P5", "P6", "P7"],
+        "FirstNM_clean": ["Jane", "Jane", "John", "Amy", "Amy", "Bob", "Bob"],
+        "LastNM_clean": ["Doe", "Doe", "Smith", "Lee", "Lee", "Ray", "Ray"],
+        "BirthDT_clean": pd.to_datetime([
+            "1990-01-01", "1990-01-01", "1985-05-05", "1975-03-03", "1975-03-03",
+            "1970-06-06", "1970-06-06",
+        ]),
+        "SSN_clean": ["123456789", "123456789", None, None, None, None, None],
+        "last_4_SSN": ["6789", "6789", None, None, None, None, None],
+        "Email_clean": [None] * 7,
+        "ZipCD_clean_base": ["60601", "60601", None, None, None, None, None],
+        "AddressLine1_clean": [None] * 7,
+        "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE", "FEMALE", "FEMALE", "MALE", "MALE"],
+        "Phones_set": [set()] * 7,
+        "FirstNM_raw": ["JANE", "JANE", "JOHN", "AMY", "AMY", "BOB", "BOB"],
+        "SSN_raw": ["123-45-6789", "123456789", None, None, None, None, None],
+        "valid_record": [True] * 7,
+    })
+    cleaned_path = settings.processed_dir / f"cleaned_{run_id}.parquet"
+    cleaned.to_parquet(cleaned_path, index=False)
+
+    matches = pd.DataFrame({
+        "PATID_A": ["P1"], "PATID_B": ["P2"],
+        "match_rule": ["SSN_DOB"], "confidence": [1.0],
+        "rules_fired": ["SSN_DOB"], "is_suspicious": [False],
+        "high_fanout_ssn": [False], "cluster_id": [0],
+        "source_blocks": ["B1"], "n_blocks": [1],
+    })
+    matches_path = settings.auto_merge_dir / f"matches_{run_id}.parquet"
+    matches.to_parquet(matches_path, index=False)
+
+    non_matches = pd.DataFrame({
+        "PATID_A": ["P4", "P6"], "PATID_B": ["P5", "P7"],
+        "source_blocks": ["B3", "B4"], "n_blocks": [1, 1],
+    })
+    non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
+    non_matches.to_parquet(non_matches_path, index=False)
+
+    review_evidence = pd.DataFrame({
+        "PATID_A": ["P4"], "PATID_B": ["P5"],
+        "match_rule": ["NAME_DOB_SEX"], "confidence": [0.98],
+        "rules_fired": ["NAME_DOB_SEX"], "is_suspicious": [False],
+        "high_fanout_ssn": [False],
+        "source_blocks": ["B3"], "n_blocks": [1],
+    })
+    review_evidence_path = settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
+    review_evidence.to_parquet(review_evidence_path, index=False)
+
+    gate_results = pd.DataFrame({
+        "PATID_A": ["P4", "P6"], "PATID_B": ["P5", "P7"],
+        "model_name": ["nonmatch_gate", "nonmatch_gate"],
+        "score": [0.91, 0.001],
+        "predicted_tier": ["human_review", "no_match"],
+    })
+    gate_results_path = settings.non_matches_dir / f"gate_results_{run_id}.parquet"
+    gate_results.to_parquet(gate_results_path, index=False)
+
+    clusters = pd.DataFrame({
+        "PATID": ["P1", "P2", "P3", "P4", "P5", "P6", "P7"],
+        "cluster_id": [0, 0, 1, 2, 3, 4, 5],
+    })
+    clusters_path = settings.clusters_dir / f"clusters_{run_id}.parquet"
+    clusters.to_parquet(clusters_path, index=False)
+
+    def ref(path, rows):
+        return ArtifactRef(path=str(path.relative_to(settings.project_root)), rows=rows, sha256="x")
+
+    manifest = RunManifest(
+        run_id=run_id, created_utc="2026-07-01T00:00:00Z",
+        raw_input=ref(cleaned_path, 7), cleaned=ref(cleaned_path, 7),
+        candidate_pairs=ref(matches_path, 1), matches=ref(matches_path, 1),
+        non_matches=ref(non_matches_path, 2),
+        review_evidence=ref(review_evidence_path, 1),
+        gate_results=ref(gate_results_path, 2),
+        clusters=ref(clusters_path, 7),
+        counts={},
+    )
+    (settings.runs_dir / f"run_{run_id}.json").write_text(manifest.model_dump_json())
+    return manifest
+
+
 class TestPublishRun:
     def test_fresh_publish_creates_entities(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -162,6 +248,24 @@ class TestPublishRun:
         assert len(candidates) == 1
         assert candidates[0]["match_rule"] == "NAME_DOB_SEX"
         assert candidates[0]["confidence"] == 0.98
+
+    def test_gate_dropped_pair_resolves_to_none_not_review(self, conn, backend, fixture_settings):
+        _write_run_with_gate_drop(fixture_settings, "r2")
+        counts = publish.publish_run(backend, "r2", fixture_settings)
+
+        # Only P4<->P5 (gate tier human_review) becomes a review_candidate
+        # row — P6<->P7 (gate tier no_match) is excluded despite being in
+        # non_matches, since the gate already resolved it confidently.
+        assert counts["review_candidates"] == 1
+
+        p4_mid = sql_backend.get_entity_mid_for_patid(conn, "P4")
+        assert sql_backend.get_entity(conn, p4_mid)["entity"]["origin"] == "review"
+
+        p6_mid = sql_backend.get_entity_mid_for_patid(conn, "P6")
+        p7_mid = sql_backend.get_entity_mid_for_patid(conn, "P7")
+        assert sql_backend.get_entity(conn, p6_mid)["entity"]["origin"] == "none"
+        assert sql_backend.get_entity(conn, p7_mid)["entity"]["origin"] == "none"
+        assert sql_backend.review_candidates_for_patid(conn, "P6") == []
 
     def test_record_attrs_denormalized(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")

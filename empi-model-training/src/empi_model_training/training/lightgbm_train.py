@@ -35,6 +35,8 @@ import ast
 import json
 import logging
 import re
+import sys
+import types
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -309,6 +311,48 @@ class DirectMatchAdapter:
         """`[P(not confident match), P(confident match)]` — pass-through, no
         column swap: the inner model's class 1 is the served positive class."""
         return np.asarray(self.model.predict_proba(self._align(x)))
+
+
+# `joblib`/`pickle` record a class by `__module__` + `__qualname__`, and
+# `pickle.Pickler.save_global` verifies that reference is real *at dump
+# time* (via `__import__` + `getattr`), not just recorded as a string —
+# then, on load, the same lookup runs again in the loading process. Without
+# this, running this script as `python -m
+# empi_model_training.training.lightgbm_train` leaves
+# `DirectMatchAdapter.__module__` as `"__main__"` (the training script's own
+# entry-point module), so `joblib.dump` below pickles a class reference that
+# can only ever resolve inside *that exact process* — empi-service's
+# `registry.load_model_artifact` then fails with `AttributeError: Can't get
+# attribute 'DirectMatchAdapter' on <module '__main__' from '.../uvicorn'>`
+# the moment anything tries to unpickle it.
+#
+# Fix: point `__module__` at empi-service's real module path instead (which
+# has its own behaviorally-identical `DirectMatchAdapter` — see this class's
+# docstring), and register lightweight stand-ins for that path in
+# `sys.modules` so the dump-time self-check passes here too — this repo
+# still never *imports* empi-service's code, it only satisfies pickle's
+# "is this reference real" check with a stub matching what empi-service's
+# own environment will resolve for real.
+#
+# Every ancestor package needs its own stub, not just the leaf: `__import__`
+# resolves a dotted name one parent at a time (`src`, then `src.models`,
+# then `src.models.ml_matcher`, then the leaf), not via a single lookup of
+# the full dotted string — registering only the leaf under `sys.modules`
+# works UNTIL this process's own `sys.path` happens to make a *real* `src`
+# resolvable first (this repo's own `src/` layout does exactly that, via
+# the implicit cwd entry on `sys.path`, if this script runs from this
+# repo's root — as it does under `uv run pytest`). That real-but-wrong
+# `src` package has no `.models` submodule, so `__import__` fails on the
+# second path component before it ever reaches our leaf stub, unless every
+# level is pre-registered so resolution never falls through to the
+# filesystem at all.
+_SERVE_MODULE = "src.models.ml_matcher.lightgbm_v5"
+_parts = _SERVE_MODULE.split(".")
+for _i in range(1, len(_parts) + 1):
+    _dotted = ".".join(_parts[:_i])
+    sys.modules.setdefault(_dotted, types.ModuleType(_dotted))
+sys.modules[_SERVE_MODULE].DirectMatchAdapter = DirectMatchAdapter  # type: ignore[attr-defined]
+DirectMatchAdapter.__module__ = _SERVE_MODULE
 
 
 # ── Data ingestion + population filter ──────────────────────────────────────

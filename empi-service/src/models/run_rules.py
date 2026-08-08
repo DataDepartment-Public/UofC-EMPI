@@ -175,7 +175,7 @@ def _print_report(stats: dict, version: str) -> None:
     )
     if stats.get("high_fanout_ssn_matches"):
         print(
-            f"    High-fanout SSN matches:  {stats['high_fanout_ssn_matches']:>12,}"
+            "    High-fanout SSN matches:  [REDACTED]"
             "  (shared/fraudulent SSN — review)"
         )
 

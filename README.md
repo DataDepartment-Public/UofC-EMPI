@@ -166,7 +166,102 @@ long-lived Azure secret is ever stored in GitHub:
   and calls the backend's `POST /admin/models/reload` so it's actually
   live — no restart, no redeploy.
 
-## Running the whole app locally
+## Running the whole app with Docker (recommended)
+
+`docker-compose.yml` at the repo root brings up both halves — FastAPI on
+`:8000`, the dashboard on `:3000` — and wires them together. This is the
+quickest path from a fresh clone to a working UI.
+
+### 1. Prerequisites on the host
+
+Two things live on your machine and are mounted into the container rather than
+baked into the image (both are gitignored — PHI and model artifacts never go
+into the repo or the build context):
+
+**Input data** — put the source CSV in `empi-service/data/raw/`:
+
+```
+empi-service/data/raw/MDM_Population.csv
+```
+
+Mounted read-only, so a run can never modify the source data. See
+[`empi-service/data/raw/SCHEMA.md`](empi-service/data/raw/SCHEMA.md) for the
+expected columns.
+
+**Model artifacts** — the two served LightGBM models go in `empi-service/models/`:
+
+```
+empi-service/models/nonmatch_gate/   nonmatch_gate_<ts>.pkl        (Stage 4.25 — confident non-matches)
+empi-service/models/ml/              ml_model_confident_match_v5_<ts>.pkl  (Stage 4.5 — confident matches)
+```
+
+Each directory's `active.json` is tracked in git and names the exact `.pkl`
+file it expects — make sure the filenames on disk match, or promote your own
+with the registry. Without an active gate model the pipeline falls back to the
+FS gate (or runs ungated with a warning); without an active ML model Stage 4.5
+is skipped entirely and only deterministic matches feed clustering.
+
+Make sure Docker Desktop (or the Docker daemon) is actually running.
+
+### 2. Bring the stack up
+
+```bash
+docker compose up --build -d
+```
+
+### 3. Create the database schema — once per volume
+
+The app connects to the database but does not create its own schema. Run this
+once against a fresh `empi-data` volume (i.e. the first `up`, and again after
+any `docker compose down -v`):
+
+```bash
+docker compose exec empi-service python scripts/init_db.py
+```
+
+### 4. Kick off a pipeline run
+
+`POST /runs` runs the full pipeline **and** publishes the result into the
+resolved-output index that the dashboard reads.
+
+```bash
+# macOS / Linux
+curl -s -X POST http://localhost:8000/runs -F "input_path=data/raw/MDM_Population.csv"
+```
+
+```powershell
+# Windows (PowerShell) — use curl.exe, not the `curl` alias for Invoke-WebRequest
+curl.exe -s -X POST http://localhost:8000/runs -F "input_path=data/raw/MDM_Population.csv"
+```
+
+The path is container-relative (`/app/data/raw/…`), so pass it exactly as
+above regardless of where the file sits on your host.
+
+### 5. Watch it work
+
+```bash
+docker compose logs -f empi-service
+```
+
+Stages are tagged `[n/7]`. The run finishes when clustering and the publish
+step are done — on the full dataset this takes a while.
+
+### 6. Open the dashboard
+
+[http://localhost:3000](http://localhost:3000)
+
+### Useful extras
+
+```bash
+docker compose down          # stop, keep the data volume
+docker compose down -v       # stop and wipe the index (init_db.py needed again)
+docker compose ps            # service + health status
+```
+
+Local dev overrides (feature flags, thresholds) come from
+`empi-service/.env` if present — see `empi-service/.env.example`.
+
+## Running the whole app without Docker
 
 ```bash
 # Terminal 1 — backend

@@ -45,9 +45,18 @@ def create_run(
         raw_input = settings.raw_dir / f"upload_{run_id}{suffix}"
         raw_input.write_bytes(file.file.read())
     else:
-        raw_input = Path(input_path)
-        if not raw_input.is_absolute():
-            raw_input = settings.project_root / raw_input
+        candidate_input = Path(input_path)
+        if not candidate_input.is_absolute():
+            candidate_input = settings.project_root / candidate_input
+        raw_input = candidate_input.resolve()
+        project_root = settings.project_root.resolve()
+        try:
+            raw_input.relative_to(project_root)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="input_path must be within the project root.",
+            )
         if not raw_input.exists():
             raise HTTPException(
                 status_code=422, detail=f"input_path not found: {raw_input}"

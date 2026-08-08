@@ -341,6 +341,37 @@ class TestReadSideMethods:
         by_mid, _ = backend.list_entities(search="M-000001")
         assert {r["mid"] for r in by_mid} == {"M-000001"}
 
+    def test_list_entities_search_by_full_name(self, backend):
+        """Parity with `sql_backend`: a full name spans `first_name` +
+        `last_name`, so the query is tokenized rather than matched whole."""
+        _seed_three_entities(backend)
+        rows, total = backend.list_entities(search="John Smith")
+        assert total == 1
+        assert rows[0]["mid"] == "M-000003"
+
+    def test_list_entities_search_full_name_order_insensitive(self, backend):
+        _seed_three_entities(backend)
+        _, total = backend.list_entities(search="smith john")
+        assert total == 1
+
+    def test_list_entities_search_tokens_are_anded(self, backend):
+        """Amy is Lee and John is Smith — "Amy Smith" is nobody."""
+        _seed_three_entities(backend)
+        _, total = backend.list_entities(search="Amy Smith")
+        assert total == 0
+
+    def test_list_entities_blank_search_does_not_filter(self, backend):
+        _seed_three_entities(backend)
+        _, total = backend.list_entities(search="   ")
+        assert total == 3
+
+    def test_list_entities_search_treats_query_as_text_not_regex(self, backend):
+        """A name is not a pattern: an unbalanced paren must return no rows,
+        not raise `re.error` out of the dashboard's registry search."""
+        _seed_three_entities(backend)
+        _, total = backend.list_entities(search="Smith (")
+        assert total == 0
+
     def test_dashboard_summary_aggregates(self, backend):
         _seed_three_entities(backend)
         summary = backend.dashboard_summary()

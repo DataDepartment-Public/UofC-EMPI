@@ -38,6 +38,8 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
+from src.api.backends.search_terms import search_tokens
+
 #: Re-exported so existing `store.hash_block_key` / `store.HASHED_BLOCKS` call
 #: sites (`publish.py`, tests) keep working — these are pure/data, not tied
 #: to SQLite, which is why `src/api/ingest/incremental.py` imports them from
@@ -546,14 +548,23 @@ def list_review_candidates(
     if confidence_max is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) <= ?")
         params.append(confidence_max)
-    if search:
-        where.append(
-            "(ra_a.first_name LIKE ? OR ra_a.last_name LIKE ? OR "
-            "ra_b.first_name LIKE ? OR ra_b.last_name LIKE ? OR "
-            "rc.patid_a LIKE ? OR rc.patid_b LIKE ?)"
+    tokens = search_tokens(search)
+    if tokens:
+        # All tokens must land on one side of the pair, so a query can't be
+        # satisfied by taking the first name from side A and the last from B.
+        side_a = " AND ".join(
+            "(ra_a.first_name LIKE ? OR ra_a.last_name LIKE ? OR rc.patid_a LIKE ?)"
+            for _ in tokens
         )
-        like = f"%{search}%"
-        params.extend([like, like, like, like, like, like])
+        side_b = " AND ".join(
+            "(ra_b.first_name LIKE ? OR ra_b.last_name LIKE ? OR rc.patid_b LIKE ?)"
+            for _ in tokens
+        )
+        where.append(f"(({side_a}) OR ({side_b}))")
+        for _side in (side_a, side_b):
+            for token in tokens:
+                like = f"%{token}%"
+                params.extend([like, like, like])
 
     reviewed_expr = (
         "(ema.mid = emb.mid OR EXISTS ("
@@ -724,15 +735,24 @@ def list_entities(
     if confidence_max is not None:
         where.append("e.confidence <= ?")
         params.append(confidence_max)
-    if search:
+    tokens = search_tokens(search)
+    if tokens:
+        # Every token must match the *same* member, each token free to match a
+        # different column of it — so "PATRICIA PATEL" finds the member whose
+        # first/last names are PATRICIA/PATEL. See `search_terms`.
+        member_sql = " AND ".join(
+            "(em2.patid LIKE ? OR ra2.first_name LIKE ? OR ra2.last_name LIKE ?)"
+            for _ in tokens
+        )
         where.append(
             "(e.mid LIKE ? OR EXISTS (SELECT 1 FROM entity_member em2 "
             "LEFT JOIN record_attrs ra2 ON ra2.patid = em2.patid "
-            "WHERE em2.mid = e.mid AND ("
-            "em2.patid LIKE ? OR ra2.first_name LIKE ? OR ra2.last_name LIKE ?)))"
+            f"WHERE em2.mid = e.mid AND {member_sql}))"
         )
-        like = f"%{search}%"
-        params.extend([like, like, like, like])
+        params.append(f"%{search}%")
+        for token in tokens:
+            like = f"%{token}%"
+            params.extend([like, like, like])
     if birth_date:
         where.append(
             "EXISTS (SELECT 1 FROM entity_member em3 "

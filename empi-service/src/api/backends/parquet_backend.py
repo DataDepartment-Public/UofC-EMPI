@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.api.backends.search_terms import search_tokens
+
 _SCHEMAS: dict[str, list[str]] = {
     "block_key": ["block_id", "key_value", "patid"],
     "cleaned_attrs": [
@@ -396,15 +398,26 @@ class ParquetIndexBackend:
         if confidence_max is not None:
             mask &= entities["confidence"] <= confidence_max
 
-        if search:
-            like = search.lower()
-            member_hit_mids = set(joined_members.loc[
-                joined_members["patid"].str.lower().str.contains(like, na=False)
-                | joined_members["first_name"].str.lower().str.contains(like, na=False)
-                | joined_members["last_name"].str.lower().str.contains(like, na=False),
-                "mid",
-            ])
-            mid_hit = entities["mid"].str.lower().str.contains(like, na=False)
+        tokens = search_tokens(search)
+        if tokens:
+            # Mirrors sql_backend.list_entities — every token must match the
+            # same member row, each free to match a different column, so
+            # "PATRICIA PATEL" hits one PATRICIA/PATEL member rather than
+            # borrowing each name from a different member of the cluster.
+            # `regex=False`: the box holds a name, not a pattern — an
+            # unescaped `(` would otherwise raise instead of finding nothing.
+            member_hit = pd.Series(True, index=joined_members.index)
+            for token in tokens:
+                like = token.lower()
+                member_hit &= (
+                    joined_members["patid"].str.lower().str.contains(like, na=False, regex=False)
+                    | joined_members["first_name"].str.lower().str.contains(like, na=False, regex=False)
+                    | joined_members["last_name"].str.lower().str.contains(like, na=False, regex=False)
+                )
+            member_hit_mids = set(joined_members.loc[member_hit, "mid"])
+            mid_hit = entities["mid"].str.lower().str.contains(
+                search.lower(), na=False, regex=False
+            )
             mask &= mid_hit | entities["mid"].isin(member_hit_mids)
 
         if birth_date:
@@ -585,16 +598,26 @@ class ParquetIndexBackend:
             mask &= sort_conf >= confidence_min
         if confidence_max is not None:
             mask &= sort_conf <= confidence_max
-        if search:
-            like = search.lower()
-            mask &= (
-                joined["a_first_name"].str.lower().str.contains(like, na=False)
-                | joined["a_last_name"].str.lower().str.contains(like, na=False)
-                | joined["b_first_name"].str.lower().str.contains(like, na=False)
-                | joined["b_last_name"].str.lower().str.contains(like, na=False)
-                | joined["patid_a"].str.lower().str.contains(like, na=False)
-                | joined["patid_b"].str.lower().str.contains(like, na=False)
-            )
+        tokens = search_tokens(search)
+        if tokens:
+            # Mirrors sql_backend.list_review_candidates — all tokens on one
+            # side of the pair, so a query can't be satisfied by taking the
+            # first name from side A and the last name from side B.
+            side_a = pd.Series(True, index=joined.index)
+            side_b = pd.Series(True, index=joined.index)
+            for token in tokens:
+                like = token.lower()
+                side_a &= (
+                    joined["a_first_name"].str.lower().str.contains(like, na=False, regex=False)
+                    | joined["a_last_name"].str.lower().str.contains(like, na=False, regex=False)
+                    | joined["patid_a"].str.lower().str.contains(like, na=False, regex=False)
+                )
+                side_b &= (
+                    joined["b_first_name"].str.lower().str.contains(like, na=False, regex=False)
+                    | joined["b_last_name"].str.lower().str.contains(like, na=False, regex=False)
+                    | joined["patid_b"].str.lower().str.contains(like, na=False, regex=False)
+                )
+            mask &= side_a | side_b
         if reviewed is True:
             mask &= joined["reviewed"]
         elif reviewed is False:

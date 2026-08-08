@@ -133,6 +133,65 @@ class TestListEntities:
         assert total == 1
         assert rows[0]["mid"] == "M-2"
 
+    def test_search_by_full_name_spanning_two_columns(self, conn):
+        """A steward types the whole name they're looking at. Matching the
+        raw string per-column found nothing, since neither `first_name` nor
+        `last_name` alone contains "John Smith"."""
+        self._seed(conn)
+        rows, total = sql_backend.list_entities(conn, search="John Smith")
+        assert total == 1
+        assert rows[0]["mid"] == "M-2"
+
+    def test_search_by_full_name_is_order_insensitive(self, conn):
+        """"LAST, FIRST" pastes and reversed typing must work too."""
+        self._seed(conn)
+        _, total = sql_backend.list_entities(conn, search="Smith John")
+        assert total == 1
+
+    def test_search_tokens_narrow_rather_than_widen(self, conn):
+        """Tokens are ANDed: adding a word must never return *more* rows.
+        "Jane Smith" is nobody here — Jane is Doe, John is Smith."""
+        self._seed(conn)
+        _, total = sql_backend.list_entities(conn, search="Jane Smith")
+        assert total == 0
+
+    def test_search_tokens_must_land_on_the_same_member(self, conn):
+        """Two members in one cluster must not jointly satisfy a name: M-3
+        holds a JANE ROE and a BOB SMITH, so "Jane Smith" matches neither."""
+        sql_backend.upsert_entity(conn, "M-3", "r1", "deterministic", True, 0.9, "t0")
+        sql_backend.upsert_entity_member(conn, "P3", "M-3", True, "pipeline", "t0")
+        sql_backend.upsert_entity_member(conn, "P4", "M-3", False, "pipeline", "t0")
+        sql_backend.upsert_record_attrs(
+            conn, "P3", first_name="Jane", last_name="Roe", birth_date=None,
+            ssn_last4=None, email=None, zip_code=None, address1=None, sex=None,
+            run_id="r1",
+        )
+        sql_backend.upsert_record_attrs(
+            conn, "P4", first_name="Bob", last_name="Smith", birth_date=None,
+            ssn_last4=None, email=None, zip_code=None, address1=None, sex=None,
+            run_id="r1",
+        )
+        conn.commit()
+        rows, total = sql_backend.list_entities(conn, search="Jane Smith")
+        assert total == 0
+
+    def test_search_ignores_extra_whitespace(self, conn):
+        self._seed(conn)
+        _, total = sql_backend.list_entities(conn, search="  John   Smith  ")
+        assert total == 1
+
+    def test_blank_search_does_not_filter(self, conn):
+        """A box holding only spaces is not a query for nothing."""
+        self._seed(conn)
+        _, total = sql_backend.list_entities(conn, search="   ")
+        assert total == 2
+
+    def test_search_still_matches_mid(self, conn):
+        self._seed(conn)
+        rows, total = sql_backend.list_entities(conn, search="M-1")
+        assert total == 1
+        assert rows[0]["mid"] == "M-1"
+
     def test_pagination(self, conn):
         self._seed(conn)
         rows, total = sql_backend.list_entities(conn, page=1, page_size=1)

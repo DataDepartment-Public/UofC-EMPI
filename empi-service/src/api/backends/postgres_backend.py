@@ -36,6 +36,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from src.api.backends.search_terms import search_tokens
 from src.preprocessing.blocking import HASHED_BLOCKS, hash_block_key  # noqa: F401
 
 PgConnection = psycopg.Connection[dict[str, Any]]
@@ -469,14 +470,22 @@ def list_review_candidates(
     if confidence_max is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) <= %s")
         params.append(confidence_max)
-    if search:
-        where.append(
-            "(ra_a.first_name ILIKE %s OR ra_a.last_name ILIKE %s OR "
-            "ra_b.first_name ILIKE %s OR ra_b.last_name ILIKE %s OR "
-            "rc.patid_a ILIKE %s OR rc.patid_b ILIKE %s)"
+    tokens = search_tokens(search)
+    if tokens:
+        # Mirrors sql_backend.list_review_candidates — all tokens on one side.
+        side_a = " AND ".join(
+            "(ra_a.first_name ILIKE %s OR ra_a.last_name ILIKE %s OR rc.patid_a ILIKE %s)"
+            for _ in tokens
         )
-        like = f"%{search}%"
-        params.extend([like, like, like, like, like, like])
+        side_b = " AND ".join(
+            "(ra_b.first_name ILIKE %s OR ra_b.last_name ILIKE %s OR rc.patid_b ILIKE %s)"
+            for _ in tokens
+        )
+        where.append(f"(({side_a}) OR ({side_b}))")
+        for _side in (side_a, side_b):
+            for token in tokens:
+                like = f"%{token}%"
+                params.extend([like, like, like])
 
     reviewed_expr = (
         "(ema.mid = emb.mid OR EXISTS ("
@@ -609,15 +618,23 @@ def list_entities(
     if confidence_max is not None:
         where.append("e.confidence <= %s")
         params.append(confidence_max)
-    if search:
+    tokens = search_tokens(search)
+    if tokens:
+        # Mirrors sql_backend.list_entities — every token on the same member,
+        # each free to match a different column. See `search_terms`.
+        member_sql = " AND ".join(
+            "(em2.patid ILIKE %s OR ra2.first_name ILIKE %s OR ra2.last_name ILIKE %s)"
+            for _ in tokens
+        )
         where.append(
             "(e.mid ILIKE %s OR EXISTS (SELECT 1 FROM entity_member em2 "
             "LEFT JOIN record_attrs ra2 ON ra2.patid = em2.patid "
-            "WHERE em2.mid = e.mid AND ("
-            "em2.patid ILIKE %s OR ra2.first_name ILIKE %s OR ra2.last_name ILIKE %s)))"
+            f"WHERE em2.mid = e.mid AND {member_sql}))"
         )
-        like = f"%{search}%"
-        params.extend([like, like, like, like])
+        params.append(f"%{search}%")
+        for token in tokens:
+            like = f"%{token}%"
+            params.extend([like, like, like])
     if birth_date:
         where.append(
             "EXISTS (SELECT 1 FROM entity_member em3 "

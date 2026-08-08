@@ -180,9 +180,8 @@ def _materialize_pairs(
     if missing:
         logger.warning(
             "df_clean missing %d attribute column(s); rules needing them "
-            "cannot fire: %s",
+            "cannot fire.",
             len(missing),
-            ", ".join(missing),
         )
 
     attrs = df_clean[[COL_PATID, *present]]

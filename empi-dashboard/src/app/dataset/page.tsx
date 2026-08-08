@@ -8,6 +8,7 @@ import { DatasetFilters } from "@/components/dataset/DatasetFilters";
 import { DatasetRow } from "@/components/dataset/DatasetRow";
 import { UnmergeModal } from "@/components/dataset/UnmergeModal";
 import { AuditLog } from "@/components/shared/AuditLog";
+import { PageJumper } from "@/components/shared/PageJumper";
 import { RawDataDrawer } from "@/components/shared/RawDataDrawer";
 import { Toast } from "@/components/shared/Toast";
 
@@ -134,13 +135,8 @@ function DatasetPageContent() {
 
       {data && (
         <>
-          <div className="mb-2 flex items-center justify-between text-xs text-gray">
-            <span>
-              {data.total.toLocaleString()} patient{data.total === 1 ? "" : "s"}
-            </span>
-            <span>
-              Page {page} of {totalPages}
-            </span>
+          <div className="mb-2 text-xs text-gray">
+            {data.total.toLocaleString()} patient{data.total === 1 ? "" : "s"}
           </div>
 
           {data.items.length === 0 ? (
@@ -171,7 +167,7 @@ function DatasetPageContent() {
             </>
           )}
 
-          <div className="mt-4 flex justify-center gap-2">
+          <div className="mt-4 flex items-center justify-center gap-3">
             <button
               disabled={page <= 1}
               onClick={() => setFilters((f) => ({ ...f, page: page - 1 }))}
@@ -179,6 +175,13 @@ function DatasetPageContent() {
             >
               ← Prev
             </button>
+            <PageJumper
+              page={page}
+              totalPages={totalPages}
+              onJump={(next) => setFilters((f) => ({ ...f, page: next }))}
+              className="flex items-center gap-1.5 text-xs text-gray"
+              inputClassName="w-12 rounded-md border border-line px-1.5 py-1 text-center font-mono text-xs tabular-nums text-ink-2 outline-none focus:border-brand-blue"
+            />
             <button
               disabled={page >= totalPages}
               onClick={() => setFilters((f) => ({ ...f, page: page + 1 }))}

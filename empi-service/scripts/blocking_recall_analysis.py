@@ -260,8 +260,6 @@ def _print(res: dict) -> None:
     print(f"    phone     : {p['phone_status']}")
     print(f"    pairs with NO agreeing strong id (SSN/email/phone): "
           f"{p['no_agreeing_strong_id']}/{p['n_missed']}")
-    print(f"    pairs with SSN missing on a side: "
-          f"{p['ssn_missing_pairs']}/{p['n_missed']}")
     print("\n  Top missed case_types:")
     for d in p["by_case_type"][:12]:
         print(f"    {d['case_type']:<28} missed={d['missed']:<4} "

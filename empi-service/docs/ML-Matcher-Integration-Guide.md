@@ -1,23 +1,29 @@
 # ML Matcher — Integration Guide
 
-> **Status:** Scaffold built and tested; your two extension points are still
-> stubs. Everything under `src/models/ml_matcher/` exists today — the
-> `MLMatcher` class, the model registry (active-pointer + deploy-gate,
-> mirroring the FS matcher's), the `train` CLI, pipeline wiring as Stage 4.5
-> (with schema validation), and a full unit test suite
-> (`tests/unit/models/ml_matcher/`). Run `pytest tests/unit/models/ml_matcher/
-> -v` first to confirm the scaffold works in your environment.
+> **Status (2026-08-07): the extension points below are filled in — this is
+> now a historical build guide, not a live TODO list.** The served model is
+> the LightGBM v5 confident-match classifier (`src/models/ml_matcher/
+> lightgbm_v5.py`'s `FeatureBuilderV5`/`DirectMatchAdapter`) — see
+> [ML-Model-LightGBM-v5.md](ML-Model-LightGBM-v5.md) for what's actually
+> running in production and why. The rest of this doc (the pipeline
+> contract, the four columns' `build_features` inputs, the classify/
+> `to_ml_features` shape) is still accurate and is exactly the contract
+> `lightgbm_v5.py` implements — read it as "how the shipped model satisfies
+> this interface," not "what to build."
 >
-> What's actually left, concretely — everything else in this doc is context
-> for these four:
-> 1. A `FeatureBuilder` implementation (§3).
-> 2. A trained `MLModel`-compatible estimator (§3).
-> 3. `MLMatcher.train()` — currently a stub that raises `NotImplementedError`
->    (`src/models/ml_matcher/matcher.py`).
-> 4. `registry.load_model_artifact()` — currently a stub; the one function
->    that deserializes whatever format you save your model in
->    (`src/models/ml_matcher/registry.py`). This is where your answer to
->    §8.1 (serialization format) actually gets wired in.
+> Of the four extension points this doc originally posed:
+> 1. A `FeatureBuilder` implementation (§3) — done, `FeatureBuilderV5`.
+> 2. A trained `MLModel`-compatible estimator (§3) — done, a LightGBM
+>    classifier trained via `scripts/train_synthetic_models.py` (local/demo)
+>    or `empi-model-training/training/lightgbm_train.py` (Azure ML).
+> 3. `MLMatcher.train()` — **still** a stub raising `NotImplementedError`
+>    (`src/models/ml_matcher/matcher.py`), and deliberately so: this
+>    in-service method was never the training path. Training always
+>    happens out-of-process (the notebook, the synthetic-training script,
+>    or `empi-model-training`), never through this method.
+> 4. `registry.load_model_artifact()` — done, not a stub. Deserializes the
+>    joblib-pickled `DirectMatchAdapter` `active.json` points at
+>    (`src/models/ml_matcher/registry.py`).
 
 ## 1. Where your model fits
 

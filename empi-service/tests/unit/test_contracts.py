@@ -135,9 +135,10 @@ class TestMatches:
         with pytest.raises(_SCHEMA_ERR):
             validate(_matches(match_rule=["NOT_A_RULE"]), Matches)
 
-    def test_rejects_review_tier_rule(self):
-        # Review-tier rules (NAME_DOB_SEX / NAME_DOB_ADDRESS) are never auto-merged,
-        # so they must not appear in the Matches (auto-merge) artifact.
+    def test_rejects_removed_rule(self):
+        # NAME_DOB_SEX / NAME_DOB_ADDRESS were removed as deterministic rules
+        # (previously review-tier, never auto-merged); they must never appear
+        # in the Matches (auto-merge) artifact for a new run.
         with pytest.raises(_SCHEMA_ERR):
             validate(_matches(match_rule=["NAME_DOB_SEX"]), Matches)
 

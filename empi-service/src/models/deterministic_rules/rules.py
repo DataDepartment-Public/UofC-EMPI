@@ -106,23 +106,20 @@ class MatchRule:
 # docs/Deterministic-Rules-Guide.md "Evaluation"). Email is only trustworthy when
 # corroborated by name + DOB, which is exactly NAME_DOB_EMAIL.
 #
-# NAME_DOB_SEX and NAME_DOB_ADDRESS are tier "human_review", NOT auto-merge. Against the
-# silver labels they adjudicate at only ~65% / ~67% precision and carry essentially
-# all of the false merges: name + DOB + sex is not a unique identity (a common
-# name, shared birthday, and sex collide on real data), and a shared street address
-# links co-resident relatives who share a birthday. They still fire and keep their
-# provenance, but a pair whose *only* confirming rule is one of these is routed to
-# review rather than auto-merged. A pair that also fires an auto-merge rule still
-# auto-merges (the higher-confidence auto-merge rule wins). See the "Evaluation"
-# and "Three-way decision" sections of docs/Deterministic-Rules-Guide.md.
+# NAME_DOB_SEX and NAME_DOB_ADDRESS were REMOVED (previously tier "human_review",
+# never auto-merge) for the same reason: against the silver labels they
+# adjudicated at only ~65% / ~67% precision and carried essentially all of the
+# false merges — name + DOB + sex is not a unique identity (a common name,
+# shared birthday, and sex collide on real data), and a shared street address
+# links co-resident relatives who share a birthday. Pairs they used to confirm
+# now fall through to the downstream gate/ML matcher pipeline like any other
+# rules-uncertain pair, rather than being force-routed to review at ~65-67%
+# precision. See git history and the "Evaluation" section of
+# docs/Deterministic-Rules-Guide.md for the full record.
 RULES: tuple[MatchRule, ...] = (
     MatchRule("SSN_DOB", 1.000, ("ssn", "dob")),
     MatchRule("NAME_DOB_EMAIL", 0.990, ("first", "last", "dob", "email")),
     MatchRule("NAME_DOB_PHONE", 0.985, ("first", "last", "dob", "phone")),
-    MatchRule("NAME_DOB_SEX", 0.980, ("first", "last", "dob", "sex"), TIER_HUMAN_REVIEW),
-    MatchRule(
-        "NAME_DOB_ADDRESS", 0.970, ("first", "last", "dob", "address"), TIER_HUMAN_REVIEW
-    ),
 )
 
 # Rule-name sets by tier — the routing key the pipeline uses to split confirmed

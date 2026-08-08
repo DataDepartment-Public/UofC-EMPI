@@ -42,8 +42,10 @@ Empty until a model is trained; see `docs/ML-Matcher-Integration-Guide.md`.
   column names/count are the implementer's choice; only `PATID_A`/`PATID_B`
   are validated by name, via `validate_ml_features`)
 - **File:** `ml_features_<run_id>.parquet`
-- **Grain:** candidates only — filtered to `match_probability >=
-  settings.ml_review_floor` (0.40 default)
+- **Grain:** every scored pair, no floor — a candidate-inclusion floor used
+  to filter this file, but it's gone: keeping every pair is what makes the
+  parquet a complete record of the stage's scores, which an offline
+  threshold sweep needs (see `MLMatcher.to_ml_features`'s docstring)
 
 ## 4.5c — ml_explanations (per-pair SHAP)
 

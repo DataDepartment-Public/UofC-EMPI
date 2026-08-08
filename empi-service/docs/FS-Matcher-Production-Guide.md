@@ -9,7 +9,7 @@ who needs to operate and maintain the matcher — no Splink internals required.
 
 ## 1. What it is and where it sits
 
-The pipeline resolves patient records in six stages:
+The pipeline resolves patient records in seven stages:
 
 ```
 raw → 1. clean → 2. blocking → 3. deterministic rules ─┬─► matches (auto-merge)
@@ -18,18 +18,28 @@ raw → 1. clean → 2. blocking → 3. deterministic rules ─┬─► matches
                                                               ▼
                                             4. FS matcher  (this component)
                                               • scores the non-matches
-                                              • GATES the pool: discards its
-                                                no_match tier (confident non-matches)
+                                              • AUDIT-ONLY — routes nothing
+                                                (see the callout below)
                                               • emits per-pair FEATURES
                                               │
-                                              ▼  the FS-plausible survivors only
-                                     4.5. ML matcher (src/models/ml_matcher/, LightGBM v5)
-                                              • classifies survivors: match vs ambiguous
+                                              ▼  every non-match pair, unfiltered
+                                     4.25. non-match gate (src/models/nonmatch_gate/)
+                                              • drops confident non-matches
+                                              • the only stage that records
+                                                what it discarded
                                               │
-                                              ▼  (both feed clustering only if their
-                                                   *_feeds_clustering toggle is on)
-                                       6. clustering → cluster_assignments
-                                          (deterministic auto-merge edges by default)
+                                              ▼  the gate-plausible survivors only
+                                     4.5. ML matcher (src/models/ml_matcher/, LightGBM v5)
+                                              • classifies survivors: auto_merge vs
+                                                human_review (2-tier; cannot itself
+                                                emit no_match)
+                                              │
+                                              ▼  ml_feeds_clustering=True by default:
+                                                   auto_merge edges union in for real
+                                       5. clustering → cluster_assignments
+                                          (deterministic rule edges + ML auto_merge
+                                           edges by default; FS's own edges stay out
+                                           unless fs_feeds_clustering is explicitly on)
 ```
 
 The deterministic rules (Stage 3) confidently **auto-merge** the easy pairs and
@@ -42,7 +52,10 @@ for every pair.
 > FS used to do a second job: **gate** the pool, discarding the pairs it ranked
 > `no_match` (score `< fs_review_floor`) so only the *plausible* survivors
 > reached the ML matcher. That job now belongs to a dedicated model — the
-> **non-match gate**, Stage 4.25, `src/models/nonmatch_gate/`
+> **non-match gate**, Stage 4.25, `src/models/nonmatch_gate/` (the diagram
+> above already reflects this — FS is audit-only, the gate does the
+> discarding). FS still runs as the **fallback** gate when no gate model is
+> active, or when `EMPI_GATE_SUPERSEDES_FS=false`.
 > (`docs/Nonmatch-Gate-Guide.md`), trained on the whole candidate pool
 > specifically to separate confident non-matches from plausible pairs.
 >

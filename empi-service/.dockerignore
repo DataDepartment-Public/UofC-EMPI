@@ -24,7 +24,11 @@ tests/
 .ruff_cache/
 .mypy_cache/
 
-scripts/
+# scripts/ IS needed in the image -- docker-compose.yml's own comment tells
+# operators to run `docker compose exec empi-service python scripts/init_db.py`
+# for schema setup, and the Dockerfile COPYs it in (see below). research/ is
+# ad-hoc analysis, not part of that ops surface -- excluded on its own.
+scripts/research/
 docs/
 
 .env

@@ -48,6 +48,32 @@ class ReadyResponse(BaseModel):
     checks: ReadyChecks
 
 
+class ActiveModelInfo(BaseModel):
+    """Meta of one matcher's currently-resolved active model, or None if
+    neither an override nor active.json nor any model file resolves."""
+
+    model_config = ConfigDict(extra="allow")
+
+    model_file: str | None = None
+
+
+class CachedModelInfo(BaseModel):
+    path: str
+    mtime: float
+
+
+class ModelReloadResponse(BaseModel):
+    invalidated: list[str]
+    fs_active_model: ActiveModelInfo | None
+    ml_active_model: ActiveModelInfo | None
+
+
+class ModelStatusResponse(BaseModel):
+    cached: dict[str, CachedModelInfo]
+    fs_active_model: ActiveModelInfo | None
+    ml_active_model: ActiveModelInfo | None
+
+
 class RecordAttrs(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
@@ -93,6 +119,12 @@ class ReviewCandidate(BaseModel):
     #: for candidates from a full batch publish, which doesn't run FS yet.
     fs_match_probability: float | None = None
     fs_classification_tier: str | None = None
+    #: Stage 4.5 ML matcher's score (`docs/ML-Model-LightGBM-v5.md`) — the
+    #: actual scored decision for pairs that reached this queue with no rule
+    #: firing (`confidence` null). Null only when the ML matcher didn't score
+    #: this pair (no active model, or dropped earlier by the non-match gate).
+    ml_match_probability: float | None = None
+    ml_classification_tier: str | None = None
 
 
 class Entity(BaseModel):
@@ -131,6 +163,8 @@ class ReviewQueueItem(BaseModel):
     source_blocks: str | None
     fs_match_probability: float | None = None
     fs_classification_tier: str | None = None
+    ml_match_probability: float | None = None
+    ml_classification_tier: str | None = None
     reviewed: bool
     patient_a: CandidatePatient
     patient_b: CandidatePatient
@@ -310,6 +344,7 @@ class AuditLogRow(BaseModel):
     prev_state: str
     next_state: str
     run_id: str | None
+    related_patids: str | None = None
     prev_mid: str | None = None
     undo_of: int | None = None
     undone: bool = False
@@ -428,6 +463,10 @@ __all__ = [
     "ScoreTier",
     "RecordScoreOutcome",
     "ScoreResult",
+    "ActiveModelInfo",
+    "CachedModelInfo",
+    "ModelReloadResponse",
+    "ModelStatusResponse",
     "ExplanationFeature",
     "ExplanationDecision",
     "ExplanationAxis",

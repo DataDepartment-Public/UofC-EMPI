@@ -53,7 +53,7 @@ def create_run(
                 status_code=422, detail=f"input_path not found: {raw_input}"
             )
 
-    jobs.mark_queued(run_id)
+    jobs.mark_queued(run_id, settings)
     background_tasks.add_task(jobs.run_pipeline_job, run_id, raw_input, settings)
     return RunCreateResponse(run_id=run_id, status="queued")
 
@@ -81,14 +81,22 @@ def list_runs(settings: Settings = Depends(get_settings)) -> list[RunSummary]:
     """
     run_ids: set[str] = set(jobs.all_in_flight())
     if settings.runs_dir.exists():
-        run_ids |= {p.stem.removeprefix("run_") for p in settings.runs_dir.glob("run_*.json")}
+        run_ids |= {
+            p.stem.removeprefix("run_")
+            for p in settings.runs_dir.glob("run_*.json")
+            if not p.name.endswith(".status.json")
+        }
+        run_ids |= {
+            p.name.removeprefix("run_").removesuffix(".status.json")
+            for p in settings.runs_dir.glob("run_*.status.json")
+        }
 
     summaries = [_run_summary(run_id, settings) for run_id in run_ids]
     return sorted(summaries, key=lambda s: s.created_utc or "", reverse=True)
 
 
 def _run_summary(run_id: str, settings: Settings) -> RunSummary:
-    in_flight = jobs.get_status(run_id)
+    in_flight = jobs.get_status(run_id) or jobs.read_run_status_file(run_id, settings)
     manifest = _load_manifest_or_none(run_id, settings)
 
     if in_flight is not None and in_flight["status"] != "succeeded":
@@ -109,7 +117,7 @@ def _run_summary(run_id: str, settings: Settings) -> RunSummary:
 
 @router.get("/runs/{run_id}")
 def get_run(run_id: str, settings: Settings = Depends(get_settings)) -> dict:
-    in_flight = jobs.get_status(run_id)
+    in_flight = jobs.get_status(run_id) or jobs.read_run_status_file(run_id, settings)
     manifest = _load_manifest_or_none(run_id, settings)
 
     if manifest is None and in_flight is None:

@@ -12,6 +12,7 @@ a fast fake in the tests that don't need a real pipeline run (the pipeline
 itself is already covered by tests/unit + tests/integration for it).
 """
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -19,10 +20,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api import jobs
+from src.api.backends import sql_backend
 from src.api.backends.index_backend import build_index_backend
 from src.api.main import app
 from src.config import Settings, settings as real_settings
 from src.contracts import ArtifactRef, RunManifest
+from src.models import model_cache
+from src.models.fs_matcher import registry as fs_registry
 
 
 @pytest.fixture
@@ -38,6 +42,14 @@ def test_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(real_settings, "runs_dir", tmp_path / "data" / "runs")
     monkeypatch.setattr(real_settings, "db_path", tmp_path / "empi.db")
     real_settings.ensure_dirs()
+    # lifespan no longer creates the schema implicitly (src/api/main.py) —
+    # a fresh temp DB is exactly the "new environment" case scripts/init_db.py
+    # exists for, so tests now do explicitly what that script does once.
+    conn = sql_backend.get_connection(real_settings.db_path)
+    try:
+        sql_backend.init_db(conn)
+    finally:
+        conn.close()
     return real_settings
 
 
@@ -161,6 +173,90 @@ class TestHealth:
         assert resp.json()["checks"]["db"] is True
 
 
+class TestAdmin:
+    """POST /admin/models/reload + GET /admin/models/status — the explicit,
+    no-downtime cutover for a promoted FS/ML model (src/models/model_cache.py)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        # model_cache is a process-wide singleton -- isolate each test from
+        # whatever another test (or another test module) left cached.
+        model_cache.invalidate()
+        yield
+        model_cache.invalidate()
+
+    @pytest.fixture(autouse=True)
+    def _isolated_model_dirs(self, test_settings, monkeypatch):
+        # test_settings (module-level fixture) doesn't redirect fs_model_dir/
+        # ml_model_dir -- no other test class needed to write model artifacts.
+        # These tests promote real models, so without this they'd write
+        # active.json/fs_model_*.json straight into the real models/fs on disk.
+        monkeypatch.setattr(test_settings, "fs_model_dir", test_settings.project_root / "models" / "fs")
+        monkeypatch.setattr(test_settings, "ml_model_dir", test_settings.project_root / "models" / "ml")
+        test_settings.fs_model_dir.mkdir(parents=True, exist_ok=True)
+        test_settings.ml_model_dir.mkdir(parents=True, exist_ok=True)
+
+    def test_status_with_no_models_or_cache(self, client, test_settings):
+        resp = client.get("/admin/models/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"cached": {}, "fs_active_model": None, "ml_active_model": None}
+
+    def test_reload_with_empty_cache_invalidates_nothing(self, client, test_settings):
+        resp = client.post("/admin/models/reload")
+        assert resp.status_code == 200
+        assert resp.json()["invalidated"] == []
+
+    def test_status_reports_cached_entry_and_reload_clears_it(self, client, test_settings):
+        model_path = test_settings.fs_model_dir / "fs_model_1.json"
+        model_path.write_text("{}")
+        model_cache.get_or_load("fs_matcher", model_path, lambda p: {"loaded": True})
+
+        status = client.get("/admin/models/status").json()
+        assert "fs_matcher" in status["cached"]
+        assert status["cached"]["fs_matcher"]["path"] == str(model_path)
+
+        reload_resp = client.post("/admin/models/reload")
+        assert reload_resp.json()["invalidated"] == ["fs_matcher"]
+
+        status_after = client.get("/admin/models/status").json()
+        assert status_after["cached"] == {}
+
+    def test_reload_reports_current_active_model_meta(self, client, test_settings):
+        fs_path = test_settings.fs_model_dir / "fs_model_1.json"
+        fs_path.write_text("{}")
+        fs_registry.meta_path_for(fs_path).write_text(
+            json.dumps({"model_file": fs_path.name, "test_metrics": {}})
+        )
+        fs_registry.promote(fs_path, test_settings)
+
+        resp = client.post("/admin/models/reload")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["fs_active_model"]["model_file"] == fs_path.name
+        assert body["ml_active_model"] is None
+
+    def test_reload_forces_next_load_to_see_updated_file(self, test_settings):
+        # Not a client test -- exercises the cache's own self-invalidating
+        # mtime behavior alongside the endpoint's eager invalidate(), the two
+        # mechanisms described in model_cache.py's docstring.
+        model_path = test_settings.fs_model_dir / "fs_model_1.json"
+        model_path.write_text("v1")
+        loads = []
+
+        def loader(p):
+            loads.append(p.read_text())
+            return p.read_text()
+
+        model_cache.get_or_load("fs_matcher", model_path, loader)
+        model_cache.get_or_load("fs_matcher", model_path, loader)
+        assert loads == ["v1"]  # second call was a cache hit, no reload
+
+        model_cache.invalidate("fs_matcher")
+        model_cache.get_or_load("fs_matcher", model_path, loader)
+        assert loads == ["v1", "v1"]  # explicit invalidate forced a reload
+
+
 class TestRuns:
     def test_create_run_requires_exactly_one_source(self, client, test_settings):
         resp = client.post("/runs", data={})
@@ -199,6 +295,60 @@ class TestRuns:
         assert resp.status_code == 200
         run_ids = [r["run_id"] for r in resp.json()]
         assert "r1" in run_ids
+
+
+class TestRunsStatusFileFallback:
+    """The in-memory registry (`jobs._REGISTRY`) is gone the instant the
+    process restarts; the durable `.status.json` file is what's left. These
+    simulate that by writing the file then dropping the registry entry, the
+    same gap a real crash/redeploy leaves."""
+
+    def test_get_run_falls_back_to_status_file_after_restart(self, client, test_settings):
+        jobs.mark_queued("interrupted-run", test_settings)
+        jobs._touch("interrupted-run", "failed", test_settings, error="Interrupted by restart")
+        jobs._REGISTRY.pop("interrupted-run")
+
+        resp = client.get("/runs/interrupted-run")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "failed"
+        assert "Interrupted" in body["error"]
+
+    def test_list_runs_includes_run_known_only_via_status_file(self, client, test_settings):
+        jobs.mark_queued("interrupted-run-2", test_settings)
+        jobs._REGISTRY.pop("interrupted-run-2")
+
+        resp = client.get("/runs")
+        run_ids = [r["run_id"] for r in resp.json()]
+        assert "interrupted-run-2" in run_ids
+
+    def test_list_runs_does_not_double_count_status_file_as_manifest(
+        self, client, test_settings
+    ):
+        """`run_<id>.status.json` also matches the glob `run_*.json` used for
+        manifests -- regression test for a real bug this caught: without
+        excluding `.status.json` names, a run only known via its status file
+        showed up twice, once under a mangled id ending in `.status`."""
+        _publish_fixture_run(test_settings, "r1")
+        jobs.mark_queued("r1", test_settings)  # r1 also has a status file now
+
+        resp = client.get("/runs")
+        run_ids = [r["run_id"] for r in resp.json()]
+        assert run_ids.count("r1") == 1
+        assert not any(rid.endswith(".status") for rid in run_ids)
+
+
+class TestStartupReconciliation:
+    def test_lifespan_marks_orphaned_status_file_as_interrupted(self, test_settings):
+        jobs.mark_queued("crashed-run", test_settings)
+        jobs._REGISTRY.clear()  # simulate a fresh process with nothing in memory
+
+        with TestClient(app):
+            pass  # lifespan's reconciliation runs on context entry
+
+        status = jobs.read_run_status_file("crashed-run", test_settings)
+        assert status["status"] == "failed"
+        assert "restart" in status["error"]
 
 
 class TestRecords:
@@ -415,6 +565,21 @@ class TestRecordsScore:
         resp = client.post("/records/score", json={"records": []})
         assert resp.status_code == 422
 
+    def test_get_score_result_falls_back_to_status_file_after_restart(
+        self, client, test_settings
+    ):
+        jobs.mark_score_queued("interrupted-score", test_settings)
+        jobs._touch_score(
+            "interrupted-score", "failed", test_settings, error="Interrupted by restart"
+        )
+        jobs._SCORE_REGISTRY.pop("interrupted-score")
+
+        resp = client.get("/records/score/interrupted-score")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "failed"
+        assert "Interrupted" in body["error"]
+
 
 class TestAudit:
     def test_merge_requires_reviewer_header(self, client, test_settings):
@@ -450,6 +615,45 @@ class TestAudit:
         assert audit_resp.status_code == 200
         assert audit_resp.json()[0]["action"] == "merge"
 
+    def test_merge_records_related_patids(self, client, test_settings):
+        """related_patids captures the entity's membership BEFORE this merge
+        — the snapshot a later export (e.g. for retraining labels) needs,
+        since entity_member only ever holds current state."""
+        _publish_fixture_run(test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        resp = client.post(
+            "/audit/merge",
+            json={"mid": matched_mid, "patids": ["P3"]},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 200
+
+        audit_resp = client.get("/audit")
+        row = audit_resp.json()[0]
+        assert row["action"] == "merge"
+        assert row["patids"] == "P3"
+        assert set(row["related_patids"].split(",")) == {"P1", "P2"}
+
+    def test_merge_multiple_patids_records_all_prior_members(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        resp = client.post(
+            "/audit/merge",
+            json={"mid": matched_mid, "patids": ["P4", "P5"]},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 200
+
+        row = client.get("/audit").json()[0]
+        assert set(row["patids"].split(",")) == {"P4", "P5"}
+        assert set(row["related_patids"].split(",")) == {"P1", "P2"}
+
     def test_unmerge_creates_new_entity(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
         matched_mid = next(
@@ -470,6 +674,40 @@ class TestAudit:
         old = client.get(f"/clusters/{matched_mid}").json()
         assert [m["patid"] for m in old["members"]] == ["P1"]
         assert old["is_merged"] is False
+
+    def test_unmerge_records_who_stayed_behind(self, client, test_settings):
+        """related_patids on an unmerge row is who remained in the original
+        entity -- captured at the moment of the split, not reconstructed
+        later (audit_log.mid itself only ever holds the NEW standalone mid)."""
+        _publish_fixture_run(test_settings, "r1")
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        resp = client.post(
+            "/audit/unmerge",
+            json={"mid": matched_mid, "patid": "P2"},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 200
+
+        row = client.get("/audit").json()[0]
+        assert row["action"] == "unmerge"
+        assert row["patids"] == "P2"
+        assert row["related_patids"] == "P1"
+
+    def test_dismiss_does_not_set_related_patids(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.post(
+            "/audit/dismiss",
+            json={"patid_a": "P4", "patid_b": "P5"},
+            headers={"X-Reviewer-Id": "reviewer.jclark"},
+        )
+        assert resp.status_code == 200
+
+        row = client.get("/audit").json()[0]
+        assert row["action"] == "dismiss"
+        assert row["related_patids"] is None
 
     def test_unmerge_wrong_mid_404s(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
@@ -795,6 +1033,7 @@ class TestAuditAgainstParquetBackend:
         audit_resp = client.get("/audit")
         assert audit_resp.status_code == 200
         assert audit_resp.json()[0]["action"] == "merge"
+        assert set(audit_resp.json()[0]["related_patids"].split(",")) == {"P1", "P2"}
 
         # Now reflected in the dashboard summary too.
         summary = client.get("/dashboard/summary").json()

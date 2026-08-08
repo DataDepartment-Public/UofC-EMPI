@@ -66,18 +66,26 @@ CREATE TABLE IF NOT EXISTS entity_member (
 );
 CREATE INDEX IF NOT EXISTS idx_entity_member_mid ON entity_member(mid);
 
+-- related_patids is a comma-joined snapshot, captured at write time, of the
+-- *other* patids relevant to reconstructing this event's implied pairs --
+-- NULL for 'dismiss' (patids already holds both sides). For 'merge' it's the
+-- entity's members immediately before this merge; for 'unmerge' it's who
+-- stayed behind in the original entity. Exists so a later export (e.g. for
+-- retraining labels) never has to reconstruct past membership from
+-- entity_member's current-state-only table -- see src/api/routers/audit.py.
 CREATE TABLE IF NOT EXISTS audit_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts_utc       TEXT NOT NULL,
-    user         TEXT NOT NULL,
-    action       TEXT NOT NULL,
-    patids       TEXT NOT NULL,
-    mid          TEXT NOT NULL,
-    prev_state   TEXT NOT NULL,
-    next_state   TEXT NOT NULL,
-    run_id       TEXT,
-    prev_mid     TEXT,
-    undo_of      INTEGER
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc         TEXT NOT NULL,
+    user           TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    patids         TEXT NOT NULL,
+    mid            TEXT NOT NULL,
+    prev_state     TEXT NOT NULL,
+    next_state     TEXT NOT NULL,
+    run_id         TEXT,
+    related_patids TEXT,
+    prev_mid       TEXT,
+    undo_of        INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS record_attrs (
@@ -112,6 +120,8 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     created_utc  TEXT NOT NULL,
     fs_match_probability   REAL,
     fs_classification_tier TEXT,
+    ml_match_probability   REAL,
+    ml_classification_tier TEXT,
     UNIQUE(patid_a, patid_b, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_review_candidate_a ON review_candidate(patid_a);
@@ -169,9 +179,20 @@ CREATE TABLE IF NOT EXISTS cleaned_attrs (
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Open one SQLite connection. Callers own its lifecycle (one per request
-    or per script run) — this module never pools connections."""
+    or per script run) — this module never pools connections.
+
+    `check_same_thread=False`: FastAPI runs a sync generator dependency's
+    pre-yield code, the route handler, and its post-yield/finally code as
+    separate `anyio.to_thread.run_sync` dispatches — under concurrent load
+    these don't always land on the same worker thread, even though the
+    connection is still only ever used sequentially within one request's
+    lifetime (never concurrently across requests). Without this, `close()`
+    intermittently raises `sqlite3.ProgrammingError: SQLite objects created
+    in a thread can only be used in that same thread.` when it lands on a
+    different thread than the one that opened the connection.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -185,8 +206,11 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     "review_candidate": {
         "fs_match_probability": "REAL",
         "fs_classification_tier": "TEXT",
+        "ml_match_probability": "REAL",
+        "ml_classification_tier": "TEXT",
     },
     "audit_log": {
+        "related_patids": "TEXT",
         "prev_mid": "TEXT",
         "undo_of": "INTEGER",
     },
@@ -388,12 +412,14 @@ def get_record_raw(conn: sqlite3.Connection, patid: str) -> str | None:
 _REVIEW_CANDIDATE_INSERT_SQL = """
     INSERT INTO review_candidate
         (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
-         run_id, created_utc)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         run_id, created_utc, ml_match_probability, ml_classification_tier)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
         match_rule=excluded.match_rule, confidence=excluded.confidence,
         evidence=excluded.evidence, source_blocks=excluded.source_blocks,
-        created_utc=excluded.created_utc
+        created_utc=excluded.created_utc,
+        ml_match_probability=excluded.ml_match_probability,
+        ml_classification_tier=excluded.ml_classification_tier
 """
 
 
@@ -403,7 +429,9 @@ def replace_review_candidates_for_run(
     """Replace this run's review-candidate rows wholesale (delete + bulk
     insert) — unlike entities/members, a review pair that's no longer in the
     latest run's `non_matches` (resolved, or reclassified) should disappear
-    rather than linger as a stale suggestion."""
+    rather than linger as a stale suggestion. `rows` are `(patid_a, patid_b,
+    match_rule, confidence, evidence, source_blocks, run_id, created_utc,
+    ml_match_probability, ml_classification_tier)`."""
     conn.execute("DELETE FROM review_candidate WHERE run_id = ?", (run_id,))
     if rows:
         conn.executemany(_REVIEW_CANDIDATE_INSERT_SQL, rows)
@@ -471,7 +499,7 @@ def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[di
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
         WHERE rc.patid_a = ? OR rc.patid_b = ?
-        ORDER BY rc.confidence DESC NULLS LAST, rc.id
+        ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
         """,
         (patid, patid),
     ).fetchall()
@@ -500,17 +528,23 @@ def list_review_candidates(
         pair (the reviewer's "Not a match" action — `POST /audit/dismiss`).
 
     `reviewed=False` (the default queue) excludes both; `reviewed=True`
-    surfaces only them ("Already reviewed"). Default order is confidence
-    DESC, with NULL-confidence (blocking-only, no rule fired) pairs last —
-    same convention as `review_candidates_for_patid`.
+    surfaces only them ("Already reviewed"). Default order is
+    `COALESCE(confidence, ml_match_probability)` DESC, with pairs that have
+    neither (blocking-only, no rule fired and not ML-scored) last — same
+    convention as `review_candidates_for_patid`.
+
+    `confidence_min`/`confidence_max` filter that same coalesced value —
+    most pairs in the queue only have an ML score (no rule fired), so
+    filtering on `rc.confidence` alone would hide the entire ML-scored
+    majority (`NULL >= x` is never true in SQL).
     """
     where = []
     params: list = []
     if confidence_min is not None:
-        where.append("rc.confidence >= ?")
+        where.append("COALESCE(rc.confidence, rc.ml_match_probability) >= ?")
         params.append(confidence_min)
     if confidence_max is not None:
-        where.append("rc.confidence <= ?")
+        where.append("COALESCE(rc.confidence, rc.ml_match_probability) <= ?")
         params.append(confidence_max)
     if search:
         where.append(
@@ -561,7 +595,7 @@ def list_review_candidates(
                {reviewed_expr} AS reviewed
         {base_from}
         {where_sql}
-        ORDER BY rc.confidence DESC NULLS LAST, rc.id
+        ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
         LIMIT ? OFFSET ?
         """,
         [*params, page_size, offset],
@@ -834,6 +868,7 @@ def insert_audit_log(
     prev_state: str,
     next_state: str,
     run_id: str | None,
+    related_patids: str | None = None,
     prev_mid: str | None = None,
     undo_of: int | None = None,
 ) -> int:
@@ -841,11 +876,11 @@ def insert_audit_log(
         """
         INSERT INTO audit_log
             (ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
-             prev_mid, undo_of)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             related_patids, prev_mid, undo_of)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
-         prev_mid, undo_of),
+         related_patids, prev_mid, undo_of),
     )
     return int(cur.lastrowid)
 

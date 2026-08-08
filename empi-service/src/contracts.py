@@ -56,13 +56,12 @@ CLEANED_REQUIRED_COLUMNS: tuple[str, ...] = (
 
 #: Deterministic rule names — keep in sync with deterministic_rules.RULES.
 RULE_NAMES: tuple[str, ...] = (
-    "SSN_DOB", "NAME_DOB_EMAIL",
-    "NAME_DOB_PHONE", "NAME_DOB_SEX", "NAME_DOB_ADDRESS",
+    "SSN_DOB", "NAME_DOB_EMAIL", "NAME_DOB_PHONE",
 )
 
 #: Auto-merge-tier rule names — keep in sync with
-#: deterministic_rules.AUTO_MERGE_RULES. NAME_DOB_SEX / NAME_DOB_ADDRESS are
-#: review-tier and must never appear in the (auto-merge) Matches artifact.
+#: deterministic_rules.AUTO_MERGE_RULES. Every rule today is auto-merge tier
+#: (no review-tier rule is currently defined — see REVIEW_RULES).
 AUTO_MERGE_RULE_NAMES: tuple[str, ...] = (
     "SSN_DOB", "NAME_DOB_EMAIL", "NAME_DOB_PHONE",
 )

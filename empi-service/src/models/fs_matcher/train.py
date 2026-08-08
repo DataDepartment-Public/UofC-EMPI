@@ -182,7 +182,7 @@ def _load_silver_labels(path: Path, label_col: str) -> pd.DataFrame:
     missing = [c for c in (*_REQUIRED_LABEL_COLS, label_col) if c not in df.columns]
     if missing:
         raise ValueError(
-            f"Silver labels {path} missing required column(s) {missing}; "
+            f"Label file {path} missing required column(s) {missing}; "
             f"have {sorted(df.columns)}."
         )
     df[label_col] = _coerce_binary_label(df[label_col])
@@ -196,6 +196,26 @@ def _canonicalize_pairs(df: pd.DataFrame) -> pd.DataFrame:
     out["PATID_A"] = a
     out["PATID_B"] = b
     return out
+
+
+def _merge_reviewer_labels(
+    labels: pd.DataFrame, reviewer_labels_path: Path | None, label_col: str,
+) -> pd.DataFrame:
+    """Fold in reviewer-confirmed labels (`scripts/export_reviewer_labels.py`'s
+    output — always a `reviewer_label` column) alongside the primary label
+    source. Reviewer labels win for any pair present in both: a human
+    reviewer's confirmation in the dashboard outranks a deterministic-rule
+    proxy or a separate hand-adjudication pass. No-op if not given."""
+    if reviewer_labels_path is None:
+        return labels
+    reviewer = _load_silver_labels(reviewer_labels_path, "reviewer_label")
+    reviewer = reviewer.rename(columns={"reviewer_label": label_col})
+    combined = pd.concat(
+        [_canonicalize_pairs(labels), _canonicalize_pairs(reviewer)], ignore_index=True,
+    )
+    return combined.drop_duplicates(
+        subset=["PATID_A", "PATID_B"], keep="last",
+    ).reset_index(drop=True)
 
 
 def _stratified_split(
@@ -282,6 +302,10 @@ def parse_args() -> argparse.Namespace:
                    help=f"Silver-labels CSV (PATID_A, PATID_B, silver_label). Default: {default_silver}.")
     p.add_argument("--label-col", default="silver_label",
                    help="Label column in --silver-labels (default: 'silver_label').")
+    p.add_argument("--reviewer-labels", type=Path, default=None,
+                   help="Optional reviewer-confirmed labels CSV (PATID_A, PATID_B, reviewer_label) "
+                        "from scripts/export_reviewer_labels.py. Wins over --silver-labels for any "
+                        "pair present in both.")
     p.add_argument("--test-size", type=float, default=0.2,
                    help="Fraction of silver labels held out for testing (default: 0.2).")
     p.add_argument("--split-seed", type=int, default=42,
@@ -365,6 +389,13 @@ def main() -> None:
     df_clean = pd.read_parquet(cleaned_path)
     scoring_pool = pd.read_parquet(pool_path)
     silver = _load_silver_labels(args.silver_labels, args.label_col)
+    if args.reviewer_labels is not None:
+        before = len(silver)
+        silver = _merge_reviewer_labels(silver, args.reviewer_labels, args.label_col)
+        logger.info(
+            "merged reviewer labels from %s: %d -> %d rows (reviewer wins on overlap)",
+            args.reviewer_labels, before, len(silver),
+        )
     train_labels, test_labels = _stratified_split(
         silver, args.label_col, args.test_size, args.split_seed,
     )

@@ -1,0 +1,16 @@
+name: empi-model-training
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - pandas>=2.3.3
+      - numpy>=2.4.6
+      - jellyfish>=1.2.1
+      - joblib>=1.5.3
+      - lightgbm>=4.7.0
+      - scikit-learn>=1.9.0
+      - splink>=4.0.16,<5.0.0
+      - mlflow>=3.14.0
+      - azureml-mlflow

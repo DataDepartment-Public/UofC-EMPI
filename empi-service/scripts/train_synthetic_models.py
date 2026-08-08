@@ -4,11 +4,11 @@ Neither model has a usable training CLI: `src/models/ml_matcher/train.py` is
 an explicit unimplemented scaffold, and the non-match gate has no `train.py`
 at all — both were, in practice, only ever trained from the Jupyter
 notebooks (`notebooks/ml_model/confident_nonmatch/pair_classifier_lightgbm_nonmatch_gate_v1.ipynb`
-and `notebooks/ml_model/confident_match/pair_classifier_lightgbm_ambiguous_v3.ipynb`)
+and `notebooks/ml_model/confident_match/pair_classifier_lightgbm_confident_match_v5.ipynb`)
 against real gold-labeled PHI data that must never exist in this environment.
 
 This script trains the identical model shape — same 12 features via
-`V3FeatureBuilder` (ported verbatim from those notebooks already), same
+`FeatureBuilderV5` (ported verbatim from those notebooks already), same
 LightGBM hyperparameters, same 60/20/20 split, same export/promote contract
 — against a synthetic pipeline run instead, so local dev sees genuine (not
 hand-mocked) SHAP explanations end-to-end.
@@ -48,11 +48,11 @@ from sklearn.model_selection import train_test_split  # noqa: E402
 
 from src.config import settings as default_settings, configure_logging  # noqa: E402
 from src.contracts import RunManifest  # noqa: E402
-from src.models.ml_matcher.lightgbm_v3 import (  # noqa: E402
+from src.models.ml_matcher.lightgbm_v5 import (  # noqa: E402
     CATEGORICAL_FEATURES,
     FEATURE_COLS,
-    MatchProbabilityAdapter,
-    V3FeatureBuilder,
+    DirectMatchAdapter,
+    FeatureBuilderV5,
 )
 from src.models.nonmatch_gate import registry as gate_registry  # noqa: E402
 from src.models.ml_matcher import registry as ml_registry  # noqa: E402
@@ -223,38 +223,38 @@ def _train_gate(features: pd.DataFrame, gold: pd.DataFrame, settings, seed: int)
 
 
 def _train_ml_matcher(features: pd.DataFrame, gold: pd.DataFrame, settings, seed: int) -> Path:
-    plausible = gold["final_gold_label"] | gold["ambiguous_pair"]
-    X = features.loc[plausible, FEATURE_COLS].reset_index(drop=True)
-    y = gold.loc[plausible, "ambiguous_pair"].astype(int).reset_index(drop=True)
+    """v5 semantics: trained on the WHOLE gold pool (no plausible-only
+    filter — that was v3's population choice), target class 1 = confident
+    match (`final_gold_label & ~ambiguous_pair`), so `predict_proba(X)[:, 1]`
+    is the served score directly (`DirectMatchAdapter`, no inversion)."""
+    X = features[FEATURE_COLS]
+    y = (gold["final_gold_label"] & ~gold["ambiguous_pair"]).astype(int)
     X_train, y_train, X_val, y_val, X_test, y_test = _split(X, y, seed)
-    logger.info("[ml_matcher] train=%d val=%d test=%d (ambiguous: %d/%d/%d)",
+    logger.info("[ml_matcher] train=%d val=%d test=%d (confident_match: %d/%d/%d)",
                 len(y_train), len(y_val), len(y_test),
                 int(y_train.sum()), int(y_val.sum()), int(y_test.sum()))
 
     model = _fit(X_train, y_train, X_val, y_val, seed)
 
-    proba_test_ambiguous = model.predict_proba(X_test)[:, 1]
-    score_test = 1.0 - proba_test_ambiguous  # P(confident match)
+    proba_test = model.predict_proba(X_test)[:, 1]  # P(confident match) -- served score, no inversion
     auto_merge_threshold = settings.ml_auto_merge_threshold
-    y_true_match = (1 - y_test).astype(int)  # not-ambiguous == confident match
-    y_pred = pd.Series(score_test >= auto_merge_threshold, index=y_test.index)
-    metrics = _binary_metrics(y_true_match, y_pred)
+    y_pred = pd.Series(proba_test >= auto_merge_threshold, index=y_test.index)
+    metrics = _binary_metrics(y_test, y_pred)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     ml_dir = Path(settings.ml_model_dir)
     ml_dir.mkdir(parents=True, exist_ok=True)
-    artifact = ml_dir / f"ml_model_{ts}.pkl"
+    artifact = ml_dir / f"ml_model_confident_match_v5_{ts}.pkl"
     import joblib
-    joblib.dump(MatchProbabilityAdapter(model), artifact)
+    joblib.dump(DirectMatchAdapter(model), artifact)
 
     meta = {
         "model_name": "ml_matcher", "model_file": artifact.name,
+        "model_version": "lightgbm_v5",
         "created_utc": datetime.now(timezone.utc).isoformat(), "git_sha": _git_sha(),
         "data_source": "synthetic (scripts/generate_synthetic_raw.py + train_synthetic_models.py)",
         "seed": seed, "feature_cols": list(FEATURE_COLS),
-        "thresholds": {
-            "auto_merge": auto_merge_threshold, "review_floor": settings.ml_review_floor,
-        },
+        "thresholds": {"auto_merge": auto_merge_threshold},
         "test_metrics": {"n_test": int(len(y_test)), "metrics_auto_merge": metrics},
     }
     ml_registry.meta_path_for(artifact).write_text(json.dumps(meta, indent=2))
@@ -295,7 +295,7 @@ def main() -> None:
             "meaningfully — regenerate synthetic data with a higher --dup-rate or --n."
         )
 
-    features = V3FeatureBuilder().build_features(gold[["PATID_A", "PATID_B"]], df_clean)
+    features = FeatureBuilderV5().build_features(gold[["PATID_A", "PATID_B"]], df_clean)
     assert (features["PATID_A"].values == gold["PATID_A"].values).all()
     assert (features["PATID_B"].values == gold["PATID_B"].values).all()
 

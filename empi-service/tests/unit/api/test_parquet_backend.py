@@ -190,7 +190,11 @@ class TestBulkPublishMethods:
     def test_replace_review_candidates_for_run_replaces_wholesale(self, backend):
         backend.begin()
         backend.replace_review_candidates_for_run(
-            "r1", [("P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0")]
+            "r1",
+            [(
+                "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
+                None, None,
+            )],
         )
         backend.commit()
         df = backend._tables["review_candidate"]
@@ -201,12 +205,26 @@ class TestBulkPublishMethods:
         # the first wholesale — it must not linger as a stale suggestion.
         backend.begin()
         backend.replace_review_candidates_for_run(
-            "r1", [("P3", "P4", "NAME_DOB_ADDRESS", 0.97, "NAME_DOB_ADDRESS", "B7", "r1", "t1")]
+            "r1",
+            [(
+                "P3", "P4", "NAME_DOB_ADDRESS", 0.97, "NAME_DOB_ADDRESS", "B7", "r1", "t1",
+                None, None,
+            )],
         )
         backend.commit()
         df = backend._tables["review_candidate"]
         assert len(df) == 1
         assert df.iloc[0]["patid_a"] == "P3"
+
+    def test_replace_review_candidates_for_run_carries_ml_score(self, backend):
+        backend.begin()
+        backend.replace_review_candidates_for_run(
+            "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0", 0.24, "human_review")]
+        )
+        backend.commit()
+        df = backend._tables["review_candidate"]
+        assert df.iloc[0]["ml_match_probability"] == 0.24
+        assert df.iloc[0]["ml_classification_tier"] == "human_review"
 
     def test_replace_cleaned_attrs_full_rebuild(self, backend):
         backend.begin()

@@ -4,7 +4,9 @@ This document describes the deterministic matching rules used in the EMPI (Enter
 
 > **Status:** Updated 2026-06-29. Originally regenerated 2026-06-20 from the current code (`src/models/deterministic_rules/`) and a full run on the real 163,364-record `MDM_Population.csv` (run `real_20260620`). Changes since the prior version: the SSN rule now requires a corroborating DOB (`SSN_DOB`, replacing the bare `EXACT_SSN`); first/last name agreement is **fuzzy** (single-typo tolerant); and the stage emits a **three-way** decision (match / reject / review).
 >
-> **2026-06-29 — rule demotion.** `NAME_DOB_SEX` and `NAME_DOB_ADDRESS` are now **review-tier**: they still fire and record full provenance, but a pair confirmed *only* by one of them is **routed to review, not auto-merged**. The silver evaluation ([Method 2](#method-2--silver-labels)) showed both adjudicate at only ~65% / ~67% precision and carry essentially all of the false merges; demoting them lifts **auto-merge precision from 83.1% to 99.8%** on the silver set (false merges 7,578 → 39) while preserving the ~14k true matches they confirm (those flow to the review band for the downstream probabilistic / FS stage). See [Match Rules](#match-rules), [Three-way decision](#three-way-decision), and the rule-tier note in [Method 2](#method-2--silver-labels).
+> **2026-06-29 — rule demotion (superseded below).** `NAME_DOB_SEX` and `NAME_DOB_ADDRESS` were demoted to **review-tier**: they still fired and recorded full provenance, but a pair confirmed *only* by one of them was routed to review, not auto-merged. The silver evaluation ([Method 2](#method-2--silver-labels)) showed both adjudicate at only ~65% / ~67% precision and carry essentially all of the false merges; demoting them lifted **auto-merge precision from 83.1% to 99.8%** on the silver set (false merges 7,578 → 39) while preserving the ~14k true matches they confirm (those flowed to the review band for the downstream probabilistic / FS stage). See the rule-tier note in [Method 2](#method-2--silver-labels) for the full evaluation this decision was based on.
+>
+> **Since removed.** Both rules have since been removed entirely rather than kept as a permanent review-tier detour — see [Match Rules](#match-rules) and [Three-way decision](#three-way-decision) for current behavior, and git history for the rules.py diff. Pairs they used to confirm now fall through to the downstream gate/ML matcher pipeline (LightGBM v5 + non-match gate) like any other rules-uncertain pair, rather than being force-routed to review at ~65-67% precision — the evaluation below (Method 1-4, Results Summary, Appendix) is retained verbatim as the historical record of why these two rules were never trustworthy on their own; it describes a prior code state (5 rules, 3-tier review split) that no longer matches the live `RULES` tuple (3 rules, all auto-merge).
 >
 > For the blocking stage itself see [Blocking-Guide.md](Blocking-Guide.md).
 
@@ -57,15 +59,13 @@ Each rule carries a **tier** that decides what a confirmed pair *does* (not whet
 - **auto-merge** — the pair is auto-merged (the `match` decision).
 - **review** — the pair is confirmed but routed to the downstream review / probabilistic stage instead of being auto-merged.
 
-The tiers are derived from the code (`AUTO_MERGE_RULES` / `REVIEW_RULES`). A pair confirmed only by a review-tier rule routes to **review**; a pair that also fires an auto-merge rule auto-merges (the higher-confidence auto-merge rule wins).
+The tiers are derived from the code (`AUTO_MERGE_RULES` / `REVIEW_RULES`). No review-tier rule is defined today — every rule below is auto-merge tier. (Two review-tier rules, `NAME_DOB_SEX` and `NAME_DOB_ADDRESS`, existed briefly between 2026-06-29 and their removal — see the status note above and [Removed rules](#removed-rules-name_dob_sex--name_dob_address) below.)
 
 | # | Rule | Confidence | Tier | Conditions |
 |---|------|-----------|------|------------|
 | 1 | **SSN_DOB** | 1.000 | auto-merge | `SSN_clean` **and** `BirthDT_clean` agree |
 | 2 | **NAME_DOB_EMAIL** | 0.990 | auto-merge | first + last + DOB + email agree |
 | 3 | **NAME_DOB_PHONE** | 0.985 | auto-merge | first + last + DOB + a shared phone |
-| 4 | **NAME_DOB_SEX** | 0.980 | **review** | first + last + DOB + sex agree |
-| 5 | **NAME_DOB_ADDRESS** | 0.970 | **review** | first + last + DOB + street address agree |
 
 ### Rule 1 — SSN_DOB (1.000)
 Matches records with identical, **valid** Social Security Numbers **corroborated by an agreeing date of birth**. The bare SSN-only rule (`EXACT_SSN`) was removed: an SSN match whose DOB is missing or disagreeing no longer auto-confirms and instead flows to the downstream probabilistic stage. SSN validity is still enforced in cleaning — structurally invalid SSNs (bad area/group/serial, known advertising SSNs) and low-entropy placeholders (e.g. `333333330`) are nulled out before this rule sees them. Requiring DOB trades a small amount of recall on single-source SSN matches for protection against typo'd / shared / placeholder SSNs that DOB cannot vouch for. Confirmed pairs whose last name disagrees are still surfaced via `is_suspicious`.
@@ -79,11 +79,8 @@ First name, last name, DOB **and** email all agree. This is the **only** way ema
 ### Rule 3 — NAME_DOB_PHONE (0.985)
 First name, last name, DOB agree and the two records share at least one cleaned phone number (set intersection of `Phones_set`).
 
-### Rule 4 — NAME_DOB_SEX (0.980) — **review-tier**
-First name, last name, DOB and sex at birth all agree. The most frequently triggered rule — but **demoted to the review tier** (2026-06-29). Against silver labels it adjudicates at only ~65% precision: name + DOB + sex is not a unique identity, because a common name + shared birthday + same sex collides for genuinely different people. A pair confirmed only by this rule now routes to **review** (the downstream probabilistic / FS stage) rather than auto-merging. See [Method 2](#method-2--silver-labels).
-
-### Rule 5 — NAME_DOB_ADDRESS (0.970) — **review-tier**
-First name, last name, DOB and street address (`AddressLine1_clean`) all agree. Also **demoted to the review tier** (2026-06-29): a shared street address is a *household* identifier, so co-resident relatives who share a birthday collide (~67% silver precision). A pair confirmed only by this rule routes to **review**, not auto-merge.
+### Removed rules: NAME_DOB_SEX / NAME_DOB_ADDRESS
+**NAME_DOB_SEX (0.980)** matched on first name, last name, DOB and sex at birth all agreeing — the most frequently triggered rule, but against silver labels it adjudicated at only ~65% precision: name + DOB + sex is not a unique identity, because a common name + shared birthday + same sex collides for genuinely different people. **NAME_DOB_ADDRESS (0.970)** matched on first name, last name, DOB and street address (`AddressLine1_clean`) all agreeing — a shared street address is a *household* identifier, so co-resident relatives who share a birthday collide (~67% silver precision). Both were demoted to review-tier on 2026-06-29, then removed entirely — pairs they used to confirm now fall through to the downstream gate/ML matcher pipeline like any other rules-uncertain pair. See [Method 2](#method-2--silver-labels) for the full evaluation.
 
 ---
 
@@ -97,7 +94,7 @@ buckets. The split is by **rule tier** (`apply_rules` + the `AUTO_MERGE_RULES` /
 | Decision | Condition | Destination |
 |----------|-----------|-------------|
 | **auto_merge** | confirmed by an **auto-merge-tier** rule (`SSN_DOB` / `NAME_DOB_EMAIL` / `NAME_DOB_PHONE`) | auto-merge |
-| **human_review** | confirmed **only** by a review-tier rule (`NAME_DOB_SEX` / `NAME_DOB_ADDRESS`), **OR** no rule fired and < 3 contradictions | `data/non_matches/` → downstream probabilistic / ML stage |
+| **human_review** | confirmed only by a review-tier rule (none defined today), **OR** no rule fired and < 3 contradictions | `data/non_matches/` → downstream probabilistic / ML stage |
 | **no_match** | no rule fired **and ≥3 strong identifiers strictly disagree** (full SSN / first / last / DOB) | dropped — written to `data/no_match/` for audit, **not** sent downstream |
 
 This is the same three-way vocabulary (`contracts.CLASSIFICATION_TIERS`) the
@@ -106,11 +103,12 @@ FS matcher and the pluggable ML matcher use — see
 this functional API onto the shared `src.models.base.PairClassifier`
 interface all three classifier stages implement.
 
-A review-tier rule confirmation is **never** reject-scored: `apply_rules` returns it
+A review-tier rule confirmation would never be reject-scored: `apply_rules` returns it
 as a confirmed pair (so `classify_non_matches` excludes it from the contradiction
-split), and the pipeline routes it straight to review. This is why demoting
-`NAME_DOB_SEX` / `NAME_DOB_ADDRESS` grows the review band rather than the reject
-pile — the ~14k true matches they confirm stay recoverable downstream.
+split), and the pipeline would route it straight to review. This machinery is why
+demoting `NAME_DOB_SEX` / `NAME_DOB_ADDRESS` (before their later removal) grew the
+review band rather than the reject pile — the ~14k true matches they confirmed
+stayed recoverable downstream.
 
 The reject decision is itself a deterministic rule — the **`STRONG_ID_CONFLICT`
 reject rule** (`REJECT_RULES[0]`), the third tier symmetric with the auto-merge and

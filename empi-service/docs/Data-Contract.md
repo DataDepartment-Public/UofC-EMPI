@@ -100,12 +100,16 @@ orchestrator never reads it, and neither does the API. `run_blocking.py` in
 particular produces a **structurally different, narrower** candidate pool than
 the orchestrator (see Stage 2) — never substitute one for the other.
 
-Stages 1-3, 4, and 6 are implemented and in production, on both of stage 6's
-backends (SQLite and Parquet local mode — see its own section). Stage 4.5
-(the ML matcher) is **scaffolding**: the pluggable interface, pipeline wiring,
-registry, and contracts are real; feature preprocessing and model training
-are a deliberate stub pending a real implementation — see
-`docs/ML-Matcher-Integration-Guide.md`.
+Every stage — 1 through 6, including 4.25 (the non-match gate) and 4.5 (the
+ML matcher) — is implemented and in production, on all three of Stage 6's
+backends (SQLite, Postgres, and Parquet local mode — see its own section).
+The served Stage 4.5 model is the LightGBM v5 confident-match classifier
+(`src/models/ml_matcher/lightgbm_v5.py`) — see
+`docs/ML-Model-LightGBM-v5.md`. `MLMatcher.train()` itself is still a
+deliberate stub (training always happens out-of-process — the notebook,
+`scripts/train_synthetic_models.py`, or `empi-model-training/`), not the
+serving path documented here; see `docs/ML-Matcher-Integration-Guide.md`
+for that distinction.
 
 Stage 4 and Stage 4.5 are structurally identical — both implement
 `src.models.base.PairClassifier` (`run(candidate_pairs, df_clean) ->
@@ -182,8 +186,8 @@ columns the contract validates (what downstream depends on):
 | `last_4_SSN` | string (4 digits) | yes | blocking (B9) |
 | `Email_clean` | string | yes | blocking (B6), rules |
 | `ZipCD_clean_base` | string (5 digits) | yes | blocking (B7) |
-| `AddressLine1_clean` | string | yes | rules (NAME_DOB_ADDRESS) |
-| `SexAtBirthDSC_clean` | string ∈ {MALE,FEMALE,OTHER} | yes | rules (NAME_DOB_SEX) |
+| `AddressLine1_clean` | string | yes | rules (no live rule today; see removed NAME_DOB_ADDRESS) |
+| `SexAtBirthDSC_clean` | string ∈ {MALE,FEMALE,OTHER} | yes | rules (no live rule today; see removed NAME_DOB_SEX) |
 | `Phones_set` | list&lt;string&gt; (see serialization) | yes | blocking (B5), rules (phone agreement) |
 
 ### Other cleaned / derived columns (produced, not yet consumed downstream)
@@ -266,15 +270,15 @@ meta-blocking (ARCS + Cardinality Node Pruning) — see `docs/Blocking-Guide.md`
 name predicates are **fuzzy** (Jaro-Winkler ≥ 0.92 or Damerau-Levenshtein ≤ 1);
 all other predicates are exact. Kept in sync with `contracts.RULE_NAMES`.
 Every rule fires and records full provenance regardless of tier — only the
-routing below differs by tier.
+routing below differs by tier. (Two review-tier rules, `NAME_DOB_SEX` and
+`NAME_DOB_ADDRESS`, were demoted then removed for low precision — see
+`docs/Deterministic-Rules-Guide.md`. No review-tier rule is defined today.)
 
 | Rule | Confidence | Tier | Agreement predicate |
 |---|---|---|---|
 | `SSN_DOB` | 1.000 | auto-merge | `SSN_clean` + `BirthDT_clean` |
 | `NAME_DOB_EMAIL` | 0.990 | auto-merge | First + Last + DOB + Email |
 | `NAME_DOB_PHONE` | 0.985 | auto-merge | First + Last + DOB + phone-set intersection |
-| `NAME_DOB_SEX` | 0.980 | **review** | First + Last + DOB + Sex |
-| `NAME_DOB_ADDRESS` | 0.970 | **review** | First + Last + DOB + `AddressLine1_clean` |
 
 ### 3a — Matches (auto-merge tier only)
 
@@ -282,16 +286,18 @@ routing below differs by tier.
 - **Location:** `data/auto_merge/matches_*.parquet`
 - **Grain:** one row per pair confirmed by an **auto-merge-tier** rule
   (`contracts.AUTO_MERGE_RULE_NAMES` = `SSN_DOB`, `NAME_DOB_EMAIL`,
-  `NAME_DOB_PHONE`). **`NAME_DOB_SEX` and `NAME_DOB_ADDRESS` never appear
-  here** — they're review-tier; a pair they confirm routes to `non_matches` +
-  `review_evidence` instead (see 3b).
+  `NAME_DOB_PHONE` — every rule defined today). `NAME_DOB_SEX` and
+  `NAME_DOB_ADDRESS` no longer exist as rules at all (removed after a stint
+  as review-tier); if a review-tier rule is reintroduced in the future, a
+  pair it confirms would route to `non_matches` + `review_evidence` instead
+  (see 3b).
 
 | Column | Dtype | Nullable | Notes |
 |---|---|---|---|
 | `PATID_A` | string | no | Carried unchanged from blocking. |
 | `PATID_B` | string | no | Carried unchanged from blocking. |
 | `match_rule` | string | no | Highest-confidence **auto-merge-tier** rule that fired (∈ `AUTO_MERGE_RULE_NAMES`). |
-| `confidence` | float64 | no | Confidence of `match_rule`, in **`[0.985, 1.000]`** — the auto-merge floor, not the full 5-rule range. |
+| `confidence` | float64 | no | Confidence of `match_rule`, in **`[0.985, 1.000]`** — the auto-merge floor, not the full 3-rule range. |
 | `rules_fired` | string | no | Pipe-delimited list of **every** rule that fired (any tier). |
 | `is_suspicious` | bool | no | `True` if DOB, last name, or (both-present) SSN disagree. |
 | `high_fanout_ssn` | bool | no | `True` if the pair's shared SSN is carried by ≥ `EMPI_SSN_FANOUT_THRESHOLD` patients. |
@@ -306,9 +312,11 @@ routing below differs by tier.
 - **Grain:** `non_matches` is a **union of two distinct provenances**, and
   Stage 4's FS matcher scores both **indistinguishably** — this is easy to
   miss if you only look at the `review_evidence` companion artifact below:
-  1. **Review-tier rule-confirmed pairs** — `NAME_DOB_SEX` (~65% adjudicated
-     precision) or `NAME_DOB_ADDRESS` (~67%) fired, but the rule's own tier
-     means it's routed here rather than auto-merged.
+  1. **Review-tier rule-confirmed pairs** — none possible today (no
+     review-tier rule is defined; `NAME_DOB_SEX` at ~65% adjudicated
+     precision and `NAME_DOB_ADDRESS` at ~67% held this tier briefly before
+     removal). `review_evidence_*.parquet` is still written every run, with
+     the same schema, but is always empty unless a future rule uses this tier.
   2. **Genuine rule-undecided pairs** — no rule fired at all, and
      `classify_non_matches` found **fewer than 3** strong-identifier
      contradictions (so not confident enough to reject either).
@@ -459,26 +467,32 @@ Full detail: `docs/Nonmatch-Gate-Guide.md`, `docs/Explanations-Guide.md`.
 
 ## Stage 4.5 — ML matcher (pluggable candidate/feature generator)  `[SCAFFOLD]`
 
-- **Producer:** `src/models/ml_matcher/` (`MLMatcher.score` for serving,
-  `python -m src.models.ml_matcher.train` — a CLI skeleton whose training
-  call is a deliberate stub). Invoked from `src/pipeline.py` when an active
-  model is resolvable (`ml_matcher.registry.resolve_active_model`) and the
-  `non_matches` pool is non-empty; otherwise Stage 4.5 is skipped with a
+- **Producer:** `src/models/ml_matcher/` (`MLMatcher.score` for serving —
+  the served model is the LightGBM v5 confident-match classifier,
+  `lightgbm_v5.py`'s `FeatureBuilderV5`/`DirectMatchAdapter`, see
+  `docs/ML-Model-LightGBM-v5.md`; `MLMatcher.train()` is a deliberate stub —
+  training always happens out-of-process, never through this in-service
+  method). Invoked from `src/pipeline.py` when an active model is
+  resolvable (`ml_matcher.registry.resolve_active_model`) and the
+  gate-plausible pool is non-empty; otherwise Stage 4.5 is skipped with a
   clear log line — structurally identical gating to Stage 4.
 - **Role:** structurally identical to Stage 4 — implements
-  `src.models.base.PairClassifier`, scores the same `non_matches` pool, and
-  emits the same shape of audit + candidate artifacts. Two differences from
-  Stage 4: (1) bring-your-own-model (`src.models.ml_matcher.base.MLModel`,
-  scikit-learn-shaped `fit`/`predict_proba` duck typing) and
-  bring-your-own-features (`FeatureBuilder`, run directly off
-  `candidate_pairs`/`df_clean`, optionally enriched with Stage 4's
-  `FSFeatures`); (2) model training/serialization is genuinely unimplemented
-  — see `docs/ML-Matcher-Integration-Guide.md` for the extension contract a
-  real model needs to satisfy.
-- **Status:** scaffold. The pluggable interface, pipeline wiring, registry
-  (active-model pointer + deploy-gate, mirroring Stage 4's), and contracts
-  below are real and enforced; `MLMatcher.train()` raises
-  `NotImplementedError` until a real training implementation exists.
+  `src.models.base.PairClassifier`, scores the gate-plausible pool (Stage
+  4.25's survivors), and emits the same shape of audit + candidate
+  artifacts. Differs from Stage 4 in being bring-your-own-model
+  (`src.models.ml_matcher.base.MLModel`, scikit-learn-shaped
+  `fit`/`predict_proba` duck typing) and bring-your-own-features
+  (`FeatureBuilder`, run directly off `candidate_pairs`/`df_clean`,
+  optionally enriched with Stage 4's `FSFeatures`) — see
+  `docs/ML-Matcher-Integration-Guide.md` for the extension contract the
+  served model satisfies.
+- **Status:** shipped and served in production, not scaffolding. The
+  pluggable interface, pipeline wiring, registry (active-model pointer +
+  deploy-gate, mirroring Stage 4's), contracts, and the trained model
+  itself are all real. Only the in-service `MLMatcher.train()` method
+  remains an intentional `NotImplementedError` stub — training happens via
+  the notebook, `scripts/train_synthetic_models.py`, or
+  `empi-model-training/`, never through this method.
 
 ### 4.5a — matches_ml (full audit frame, ClassificationResults-shaped)
 
@@ -648,14 +662,23 @@ Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED (same split as
 |---|---|---|---|
 | `id` | int64 | no (key, SQLite only — `AUTOINCREMENT`) | Parquet dedups on the 3-column key below instead of a surrogate id. |
 | `patid_a`, `patid_b` | string | no | Canonical pair, `patid_a < patid_b` (same ordering as `contracts.CandidatePairs`). |
-| `match_rule` | string | yes | Set only for the review-tier rule-confirmed subset (`NAME_DOB_SEX` / `NAME_DOB_ADDRESS`); `None` for uncertain pairs. |
+| `match_rule` | string | yes | Set only for the review-tier rule-confirmed subset (empty today — no review-tier rule is defined; formerly `NAME_DOB_SEX` / `NAME_DOB_ADDRESS`); `None` for uncertain pairs. |
 | `confidence` | float64 | yes | |
 | `evidence` | string | yes | `rules_fired`, when `match_rule` is set. |
 | `source_blocks` | string | yes | Pipe-delimited block IDs, passthrough from stage 2. |
 | `run_id` | string | no | |
 | `created_utc` | string (ISO-8601) | no | |
-| `fs_match_probability` | float64 | yes | Stage 4 (FS matcher) score, when scored. |
-| `fs_classification_tier` | string | yes | Stage 4's tier label. |
+| `fs_match_probability` | float64 | yes | Stage 4 (FS matcher) score — incremental scoring only (`insert_review_candidates`); batch publish never FS-scores a run. |
+| `fs_classification_tier` | string | yes | Stage 4's tier label, same scope as above. |
+| `ml_match_probability` | float64 | yes | Stage 4.5 (ML matcher) `match_probability`, threaded in from `ml_features` at batch-publish time — null when no ML model scored the run, or the pair. |
+| `ml_classification_tier` | string | yes | Stage 4.5's `classification_tier` (`human_review`/`auto_merge`), same scope as above. |
+
+`list_review_candidates`/`review_candidates_for_patid` sort and filter on
+`COALESCE(confidence, ml_match_probability)` DESC, not `confidence` alone —
+most queue pairs have no rule confidence at all (no rule fired), only an ML
+score, so sorting/filtering on `confidence` alone would leave the ML-scored
+majority in insertion order or hide it entirely (`NULL >= x` is never true
+in SQL).
 
 Key / replace semantics: a **batch publish replaces wholesale per `run_id`**
 (`replace_review_candidates_for_run` — a pair no longer in the latest run's
@@ -750,20 +773,36 @@ semantics as `record_attrs`.
 
 ### 6e — Reviewer audit log
 
-`audit_log` — append-only record of every manual `/audit/merge` or
-`/audit/unmerge` action. Also the source of truth for which PATIDs are
-reviewer-**locked** (see the sticky-unmerge invariant above).
+`audit_log` — append-only record of every manual `/audit/merge`,
+`/audit/unmerge`, or `/audit/dismiss` action. Also the source of truth for
+which PATIDs are reviewer-**locked** (see the sticky-unmerge invariant
+above), and — via `related_patids` — the input to
+`scripts/export_reviewer_labels.py` (retraining labels derived from
+reviewer-confirmed matches; see `empi-model-training/README.md`).
 
 | Column | Dtype | Nullable | Notes |
 |---|---|---|---|
 | `id` | int64 | no (key) | SQLite: native `AUTOINCREMENT`. Parquet: scan existing max `id` + 1 (no autoincrement primitive) — same convention as `mid` minting. |
 | `ts_utc` | string (ISO-8601) | no | |
 | `user` | string | no | Reviewer id from the trusted `X-Reviewer-Id` header. |
-| `action` | string ∈ {`merge`, `unmerge`, `split`} | no | `split` is reserved — not yet emitted by any route. |
+| `action` | string ∈ {`merge`, `unmerge`, `dismiss`, `split`, `view_raw`, `view_ssn_clean`} | no | `split` is reserved — not yet emitted by any route. `view_raw`/`view_ssn_clean` are read-access log entries (see below), not mutations — they still land in this table since it's the audit trail for all PHI access, not just merge/unmerge state changes. |
 | `patids` | string | no | Comma-joined. |
 | `mid` | string | no | |
 | `prev_state`, `next_state` | string | no | Human-readable state labels (e.g. `"Merged"`, `"Needs review"`). |
 | `run_id` | string | yes | |
+| `related_patids` | string | yes | Comma-joined snapshot, captured at write time, of the *other* patids relevant to reconstructing this event's implied pairs. `merge`: the entity's members immediately before this merge. `unmerge`: who stayed behind. `dismiss`: `NULL` (`patids` already holds both sides). Exists so a later export never has to reconstruct past membership from `entity_member`, which only ever holds current state — see `src/api/routers/audit.py`. Rows written before this column existed have it `NULL`; `export_reviewer_labels.py` skips unmerge rows in that state rather than guessing. |
+| `prev_mid` | string | yes | Undo provenance only: the `mid` this row's action reversed *from* (e.g. an undo-of-merge row's `prev_mid` is the entity the folded-in patid used to belong to). `NULL` for every non-undo row. |
+| `undo_of` | int | yes | Undo provenance only: the `id` of the audit row this row reverses. `NULL` for every non-undo row — see `POST /audit/{id}/undo`. |
+| `undone` | bool | no, default `false` | Set `true` on the *original* row once it's been reversed — the dashboard's audit table uses this to gray out an already-undone row's Undo button rather than trusting client state. |
+
+Two distinct read-access actions log PHI exposure without changing any
+state: `view_raw` (`GET /records/{patid}/raw` — the un-scrubbed `*_raw`
+source fields, "View Raw Data") and `view_ssn_clean` (`GET
+/records/{patid}/ssn-clean` — the *cleaned/normalized* SSN from
+`cleaned_attrs`, backing the dashboard's SSN-reveal toggle). These are two
+separate endpoints logged as two separate actions, not one shared
+PHI-exposure surface — a reviewer revealing just the SSN doesn't also
+trigger a `view_raw` entry, and vice versa.
 
 Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED
 (`ParquetIndexBackend.insert_audit_log`/`list_audit_log`).
@@ -846,7 +885,7 @@ whether that's by design.
 | `data/empi.db` | `src/api/ingest/publish.py` | `src/api/backends/sql_backend.py` + routers | Active — serves the review dashboard |
 | `data/local_index/` | `src/api/ingest/publish.py` / `publish_local.py` (batch), `src/api/ingest/incremental.py` / `local_score.py` (incremental) | `src/api/backends/parquet_backend.py`-backed routes (records/dashboard/audit), `src/api/ingest/local_score.py` | Active — full parity with `data/empi.db` (Stage 6) |
 | `models/fs/` *(not under `data/`)* | `fs_matcher/train.py` | Stage 4 (`registry.resolve_active_model`) | See `docs/FS-Matcher-Production-Guide.md` for the full model-store layout |
-| `models/ml/` *(not under `data/`)* | `ml_matcher/train.py` (scaffold — training unimplemented) | Stage 4.5 (`ml_matcher.registry.resolve_active_model`) | See `docs/ML-Matcher-Integration-Guide.md` |
+| `models/ml/` *(not under `data/`)* | the LightGBM v5 notebook's export + promote cell, or `scripts/train_synthetic_models.py` / `empi-model-training/` | Stage 4.5 (`ml_matcher.registry.resolve_active_model`) | See `docs/ML-Model-LightGBM-v5.md` |
 | `models/nonmatch_gate/` *(not under `data/`)* | the gate notebook's export + promote cell (`notebooks/ml_model/confident_nonmatch/`) | Stage 4.25 (`nonmatch_gate.registry.resolve_active_model`) | See `docs/Nonmatch-Gate-Guide.md` |
 
 ---

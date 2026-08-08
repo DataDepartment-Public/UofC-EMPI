@@ -12,11 +12,13 @@ so the cleaning stage has real work to do:
     - invalid-marker records (DO NOT USE, BABY BOY, TEST) → valid_record=False
 
 It also PLANTS true duplicate pairs that are detectable end-to-end. Each
-duplicate shares the *canonical* values a given deterministic rule needs, but
-rendered with different messy formatting — so the two records still clean to the
-same value and survive blocking + rule matching. Scenarios cover every rule:
-SSN_DOB, EMAIL_EXACT, NAME_DOB_PHONE, NAME_DOB_EMAIL, NAME_DOB_ADDRESS,
-NAME_DOB_SEX.
+duplicate shares canonical values, rendered with different messy formatting —
+so the two records still clean to the same value and survive blocking. Some
+scenario names track a currently-active deterministic rule (SSN_DOB,
+NAME_DOB_PHONE, NAME_DOB_EMAIL); others (EMAIL_EXACT, NAME_DOB_ADDRESS,
+NAME_DOB_SEX) predate rules that have since been removed as too imprecise but
+remain genuine duplicates worth planting for ML gold-label purposes — see
+CONFIDENT_SCENARIOS below.
 
 USAGE:
     python scripts/generate_synthetic_raw.py

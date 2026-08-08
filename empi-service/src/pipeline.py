@@ -112,9 +112,10 @@ from src.models.deterministic_rules import (  # noqa: E402
     classify_non_matches,
     get_match_stats,
 )
-# Every registry's resolve_active_model imports no heavy deps (json/pathlib
-# only); the FS matcher (which pulls splink), the non-match gate and the ML
-# matcher (lightgbm/joblib) are lazy-imported inside their stages.
+from src.models import model_cache  # noqa: E402
+# Both registries' resolve_active_model import no heavy deps (json/pathlib
+# only); the FS matcher (which pulls splink) and the ML matcher (whose model
+# format is up to its implementer) are lazy-imported inside their stages.
 from src.models.fs_matcher.registry import resolve_active_model as resolve_active_fs_model  # noqa: E402
 from src.models.ml_matcher.registry import resolve_active_model as resolve_active_ml_model  # noqa: E402
 from src.models.nonmatch_gate.registry import resolve_active_model as resolve_active_gate_model  # noqa: E402
@@ -282,8 +283,9 @@ def run_pipeline(
     confirmed = apply_rules(
         candidate_pairs, cleaned, ssn_fanout_threshold=settings.ssn_fanout_threshold
     )
-    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; the rest
-    # (NAME_DOB_SEX / NAME_DOB_ADDRESS) are confirmed but routed to review.
+    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; any
+    # review-tier rule (none defined today — see REVIEW_RULES) would be
+    # confirmed but routed to review instead.
     is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
     matches = confirmed[is_auto].reset_index(drop=True)
     review_confirmed = confirmed[~is_auto].reset_index(drop=True)
@@ -367,7 +369,7 @@ def run_pipeline(
             classification_config_from_settings,
         )
         _model = FSMatcher(classification_config=classification_config_from_settings(settings))
-        _trained = FSMatcher.load_settings(active_fs_model)
+        _trained = model_cache.get_or_load("fs_matcher", active_fs_model, FSMatcher.load_settings)
         classified = _model.score(non_matches, cleaned, _trained)
 
         # Uniform 5-col shape (src.contracts.ClassificationResults), shared with
@@ -509,7 +511,7 @@ def run_pipeline(
         from src.models.ml_matcher.registry import load_model_artifact
 
         _ml_model = MLMatcher(
-            model=load_model_artifact(active_ml_model),
+            model=model_cache.get_or_load("ml_matcher", active_ml_model, load_model_artifact),
             feature_builder=FeatureBuilderV5(),
             classification_config=MLClassificationConfig(
                 auto_merge_threshold=settings.ml_auto_merge_threshold,

@@ -176,14 +176,14 @@ could work through top to bottom.
 |----|-------------|
 | FR-42 | Two-panel layout: a candidate list on the left, a dynamic detail/explanation panel on the right. Selecting a candidate updates the right panel in place — no page navigation. |
 | FR-43 | The left panel is **candidate-grain**: one row per pending pair (`patid_a`/`patid_b`), not per cluster — the same cluster can surface multiple rows if it has multiple pending candidates. |
-| FR-44 | Left panel shows, per row: both patients' names, birthdate, masked SSN, match-confidence badge, rule tag (or "Blocking only — no rule" if unconfirmed), and a "+N in cluster" indicator when either side already belongs to a multi-member cluster. |
+| FR-44 | Left panel shows, per row: both patients' names, birthdate, masked SSN, a match-confidence percentage (rule confidence, falling back to the ML matcher's score when no rule fired — no separate rule/ML-tier tag), and a "+N in cluster" indicator when either side already belongs to a multi-member cluster. |
 | FR-45 | Left panel supports: a **Needs review** / **Already reviewed** toggle, a confidence-range filter, and a name/DOB search. Default sort is confidence descending, with unconfirmed (no-rule) candidates sorted last. |
 | FR-46 | A candidate counts as "reviewed" once it is either merged (both sides now share a master record) or explicitly dismissed (FR-49). |
 | FR-47 | Right panel shows: both patients' names and de-emphasized IDs, a confidence/rule/predicted-class/cluster-context summary, a **pipeline trail** (FR-48), and the full field-by-field feature comparison (§4's FR-37 table). |
 | FR-48 | The pipeline trail shows the value's path through the pipeline: Raw → Cleaned → Deterministic rule → ML signal (labeled **Non-match gate** or **ML matcher**, whichever actually scored the pair). All four stages show real data. The ML signal stage reads `GET /explanations/{model}/{patid_a}/{patid_b}` and shows the model's score, tier, and run id; a pair the deterministic rules resolved without reaching either model (or that the gate dropped before the ML matcher saw it) shows an honest "Not scored by the ML pipeline" state — never a fabricated score. The Fellegi-Sunter/Splink matcher (Stage 4 in the backend pipeline) is intentionally not part of this trail — it remains an audit-only candidate/feature generator kept in the backend for lineage, not a reviewer-facing decision signal (see `empi-service/docs/FS-Matcher-Production-Guide.md`). |
 | FR-49 | A **"Not a match"** action lets a reviewer explicitly dismiss a candidate as a false positive. Recorded as an audit-log entry (`action=dismiss`); the candidate moves to "Already reviewed" and does not reappear in the default queue. |
 | FR-50 | A **"Search manually for a different record"** action lets a reviewer propose a match blocking never surfaced as a candidate, sharing the same search/compare/merge flow as FR-27. |
-| FR-51 | SSN fields support a reveal-in-place toggle, sourced from the same raw-record data the "View raw data" drawer already fetches — no separate PII exposure surface. Every fetch of that raw/unmasked data (from either affordance) is written to the backend audit log (`action=view_raw`) for PHI-access accountability; it's a compliance record, not a reviewer decision, so it's excluded from the Merge audit log table above (§3.3) and only queryable directly against the database. |
+| FR-51 | SSN fields support a reveal-in-place toggle (`SsnReveal.tsx`), sourced from `GET /records/{patid}/ssn-clean` — the pipeline-normalized SSN, a **separate** endpoint from the "View raw data" drawer's `GET /records/{patid}/raw`, preferred specifically so a reviewer sanity-checks against the value the matching engine actually trusted, not raw source-text noise. Every fetch from either endpoint is written to the backend audit log, but as two distinct actions (`view_ssn_clean` vs `view_raw`) for PHI-access accountability; these are compliance records, not reviewer decisions, so they're excluded from the Merge audit log table above (§3.3) and only queryable directly against the database. |
 
 ## 6. System Update & Sync Behavior
 
@@ -201,7 +201,7 @@ Operator configuration, not a reviewer workflow — no audit-log entry is writte
 
 | ID | Requirement |
 |----|-------------|
-| FR-54 | Show the three live ML decision thresholds — gate threshold, ML auto-merge threshold, ML review floor — with their current values and a one-line description of what each controls. |
+| FR-54 | Show the three live ML decision thresholds — gate threshold, ML auto-merge threshold, FS review floor — with their current values and a one-line description of what each controls. |
 | FR-55 | Let an operator edit and save all three thresholds; saving applies immediately to the running backend and persists across a restart (`empi-service/data/config/thresholds.json`), but only affects scoring done after the change — it never rewrites tiers a prior run already published. |
 | FR-56 | Show a success or error toast on save. |
 
@@ -211,5 +211,5 @@ Operator configuration, not a reviewer workflow — no audit-log entry is writte
 
 - **FR-10** — confirm the auto-match-rate denominator (total candidate matches vs. total records).
 - **FR-14 / FR-15** — performance trend is limited to **auto-match rate** and **review rate** (both derivable from classification counts alone). Precision/recall are excluded because no ground-truth labels exist to compute them; revisit if gold labels become available. See [Deterministic-Rules-Guide.md](../../empi-service/docs/Deterministic-Rules-Guide.md).
-- **FR-30 / FR-31 / FR-52 / FR-53** — confirm audit-log retention, immutability guarantees, and access policy (including for the newer `view_raw` PHI-access entries, FR-51).
-- **FR-54–56 (Admin tab)** — no authentication yet, by design for this build; must be gated before any non-local deployment. See the dashboard's `docs/Application-Architecture.md` §"Identity / auth" and `empi-service/src/api/routers/admin.py`'s own docstring.
+- **FR-30 / FR-31 / FR-52 / FR-53** — confirm audit-log retention, immutability guarantees, and access policy (including for the `view_raw`/`view_ssn_clean` PHI-access entries, FR-51).
+- **FR-54–56 (Admin tab)** — gated the same way as every other tab: Entra ID sign-in (Easy Auth) in front of the whole dashboard app in Azure (`terraform/auth.tf`). The `/admin/*` FastAPI routes themselves still carry no role-based authorization internally — their protection is the backend having no public ingress at all, not a per-route check. See `docs/Application-Architecture.md` §"Identity / auth" and `empi-service/src/api/routers/admin.py`'s own docstring.

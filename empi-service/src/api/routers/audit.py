@@ -71,6 +71,13 @@ def _do_merge(
         if undo_of is None
         else f"Restored by undoing audit entry #{undo_of}"
     )
+    # Snapshot taken BEFORE the mutation loop below -- this entity's
+    # membership at the moment of the merge, for audit_log.related_patids
+    # (see sql_backend.py's audit_log DDL comment). Combined with body.patids
+    # (who's being added), this lets a later export derive every
+    # newly-confirmed pair without reconstructing past state from
+    # entity_member, which only ever holds current membership.
+    prior_members = [m["patid"] for m in target["members"]]
 
     backend.begin()
     try:
@@ -91,6 +98,7 @@ def _do_merge(
             patids=",".join(patids), mid=mid,
             prev_state=prev_state, next_state="Merged",
             run_id=target["entity"]["run_id"],
+            related_patids=",".join(prior_members) if prior_members else None,
             undo_of=undo_of,
         )
         backend.commit()
@@ -155,6 +163,10 @@ def _do_unmerge(
             patids=patid, mid=new_mid,
             prev_state="Merged", next_state="Unmerged",
             run_id=source["entity"]["run_id"],
+            # Who stayed behind in body.mid, captured now rather than
+            # reconstructed later from entity_member's current-state-only
+            # table -- see audit_log.related_patids' DDL comment.
+            related_patids=",".join(remaining_patids) if remaining_patids else None,
             prev_mid=mid, undo_of=undo_of,
         )
         backend.commit()

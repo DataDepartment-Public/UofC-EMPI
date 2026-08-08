@@ -58,12 +58,21 @@ ENV PATH="/opt/venv/bin:${PATH}" \
 
 WORKDIR /app
 COPY --chown=empi:empi src ./src
+# scripts/init_db.py in particular is a required ops step, not optional --
+# see this image's docker-compose.yml usage comment ("docker compose exec
+# empi-service python scripts/init_db.py"). scripts/research/ is excluded
+# via .dockerignore (ad-hoc analysis, not part of the ops surface).
+COPY --chown=empi:empi scripts ./scripts
 
 # Runtime-populated directories, empty at build time — see module docstring.
+# Mirrors src/config.py's Settings.ensure_dirs() (the actual runtime source
+# of truth, called from main.py's lifespan and pipeline.py -- this list is
+# just so the image isn't misleading documentation, not load-bearing).
 RUN mkdir -p \
-        data/raw data/processed data/blocking data/matches data/matches_model \
-        data/non_matches data/rejects data/clusters data/runs data/FS_output \
-        data/local_index models/fs models/artifacts models/experiments logs \
+        data/raw data/processed data/blocking data/auto_merge data/non_matches \
+        data/no_match data/clusters data/runs data/evaluations data/fs_output \
+        data/gate_output data/ml_output data/local_index \
+        models/fs models/nonmatch_gate models/ml logs \
     && chown -R empi:empi /app
 
 USER empi

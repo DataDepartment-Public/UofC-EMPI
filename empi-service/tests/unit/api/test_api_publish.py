@@ -49,6 +49,7 @@ def fixture_settings(tmp_path):
     settings.auto_merge_dir = tmp_path / "data" / "auto_merge"
     settings.non_matches_dir = tmp_path / "data" / "non_matches"
     settings.processed_dir = tmp_path / "data" / "processed"
+    settings.ml_output_dir = tmp_path / "data" / "ml_output"
     settings.ensure_dirs()
     return settings
 
@@ -212,6 +213,79 @@ def _write_run_with_gate_drop(settings: Settings, run_id: str):
     return manifest
 
 
+def _write_run_with_ml_scores(settings: Settings, run_id: str):
+    # Same P1-P5 shape as `_write_run`, but P4<->P5 has no rule confirmation
+    # (no review_evidence row) — it only carries an ML matcher score, the
+    # common case that motivated threading `ml_features` into
+    # `_review_candidate_rows` (most review-queue pairs have no rule at
+    # all, only an ML score).
+    cleaned = pd.DataFrame({
+        "PATID": ["P1", "P2", "P3", "P4", "P5"],
+        "FirstNM_clean": ["Jane", "Jane", "John", "Amy", "Amy"],
+        "LastNM_clean": ["Doe", "Doe", "Smith", "Lee", "Lee"],
+        "BirthDT_clean": pd.to_datetime(
+            ["1990-01-01", "1990-01-01", "1985-05-05", "1975-03-03", "1975-03-03"]
+        ),
+        "SSN_clean": ["123456789", "123456789", None, None, None],
+        "last_4_SSN": ["6789", "6789", None, None, None],
+        "Email_clean": [None, None, None, None, None],
+        "ZipCD_clean_base": ["60601", "60601", None, None, None],
+        "AddressLine1_clean": [None, None, None, None, None],
+        "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE", "FEMALE", "FEMALE"],
+        "Phones_set": [set(), set(), set(), set(), set()],
+        "FirstNM_raw": ["JANE", "JANE", "JOHN", "AMY", "AMY"],
+        "SSN_raw": ["123-45-6789", "123456789", None, None, None],
+        "valid_record": [True, True, True, True, True],
+    })
+    cleaned_path = settings.processed_dir / f"cleaned_{run_id}.parquet"
+    cleaned.to_parquet(cleaned_path, index=False)
+
+    matches = pd.DataFrame({
+        "PATID_A": ["P1"], "PATID_B": ["P2"],
+        "match_rule": ["SSN_DOB"], "confidence": [1.0],
+        "rules_fired": ["SSN_DOB"], "is_suspicious": [False],
+        "high_fanout_ssn": [False], "cluster_id": [0],
+        "source_blocks": ["B1"], "n_blocks": [1],
+    })
+    matches_path = settings.auto_merge_dir / f"matches_{run_id}.parquet"
+    matches.to_parquet(matches_path, index=False)
+
+    non_matches = pd.DataFrame({
+        "PATID_A": ["P4"], "PATID_B": ["P5"],
+        "source_blocks": ["B3"], "n_blocks": [1],
+    })
+    non_matches_path = settings.non_matches_dir / f"non_matches_{run_id}.parquet"
+    non_matches.to_parquet(non_matches_path, index=False)
+
+    ml_features = pd.DataFrame({
+        "PATID_A": ["P4"], "PATID_B": ["P5"],
+        "match_probability": [0.24], "classification_tier": ["human_review"],
+    })
+    ml_features_path = settings.ml_output_dir / f"ml_features_{run_id}.parquet"
+    ml_features.to_parquet(ml_features_path, index=False)
+
+    clusters = pd.DataFrame({
+        "PATID": ["P1", "P2", "P3", "P4", "P5"], "cluster_id": [0, 0, 1, 2, 3],
+    })
+    clusters_path = settings.clusters_dir / f"clusters_{run_id}.parquet"
+    clusters.to_parquet(clusters_path, index=False)
+
+    def ref(path, rows):
+        return ArtifactRef(path=str(path.relative_to(settings.project_root)), rows=rows, sha256="x")
+
+    manifest = RunManifest(
+        run_id=run_id, created_utc="2026-07-01T00:00:00Z",
+        raw_input=ref(cleaned_path, 5), cleaned=ref(cleaned_path, 5),
+        candidate_pairs=ref(matches_path, 1), matches=ref(matches_path, 1),
+        non_matches=ref(non_matches_path, 1),
+        ml_features=ref(ml_features_path, 1),
+        clusters=ref(clusters_path, 5),
+        counts={},
+    )
+    (settings.runs_dir / f"run_{run_id}.json").write_text(manifest.model_dump_json())
+    return manifest
+
+
 class TestPublishRun:
     def test_fresh_publish_creates_entities(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -248,6 +322,29 @@ class TestPublishRun:
         assert len(candidates) == 1
         assert candidates[0]["match_rule"] == "NAME_DOB_SEX"
         assert candidates[0]["confidence"] == 0.98
+
+    def test_review_candidate_carries_ml_score(self, conn, backend, fixture_settings):
+        _write_run_with_ml_scores(fixture_settings, "r-ml")
+        publish.publish_run(backend, "r-ml", fixture_settings)
+
+        candidates = sql_backend.review_candidates_for_patid(conn, "P4")
+        assert len(candidates) == 1
+        # No rule fired for P4<->P5 in this fixture — confidence stays null,
+        # but the ML matcher's score must still land on the row.
+        assert candidates[0]["confidence"] is None
+        assert candidates[0]["ml_match_probability"] == pytest.approx(0.24)
+        assert candidates[0]["ml_classification_tier"] == "human_review"
+
+        # The queue list/sort/filter fall back to the ML score when there's
+        # no rule confidence (sql_backend.list_review_candidates' COALESCE).
+        rows, total = sql_backend.list_review_candidates(conn, reviewed=False)
+        assert total == 1
+        assert rows[0]["ml_match_probability"] == pytest.approx(0.24)
+        filtered_rows, filtered_total = sql_backend.list_review_candidates(
+            conn, reviewed=False, confidence_min=0.2
+        )
+        assert filtered_total == 1
+        assert filtered_rows[0]["patid_a"] == "P4"
 
     def test_gate_dropped_pair_resolves_to_none_not_review(self, conn, backend, fixture_settings):
         _write_run_with_gate_drop(fixture_settings, "r2")

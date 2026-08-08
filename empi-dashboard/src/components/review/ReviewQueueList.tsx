@@ -85,7 +85,7 @@ export function ReviewQueueList({
           </span>
         </div>
         <div className="mt-1.5 text-[10.5px] text-gray">
-          ↓ Sorted by confidence, highest first
+          ↓ Sorted by confidence (rule, or ML match score), highest first
         </div>
       </div>
 
@@ -170,15 +170,12 @@ function CandidateRow({
   selected: boolean;
   onClick: () => void;
 }) {
-  const confPct = item.confidence != null ? Math.round(item.confidence * 100) : null;
-  const confColor =
-    confPct == null
-      ? "text-gray"
-      : confPct >= 90
-        ? "text-status-auto"
-        : confPct >= 75
-          ? "text-status-review-display"
-          : "text-status-nomatch-display";
+  // No rule fired for most queue pairs (confidence null) — fall back to the
+  // Stage 4.5 ML matcher's score so the list isn't just showing "—" for the
+  // vast majority of rows. Matches the backend's own sort/filter fallback
+  // (sql_backend.list_review_candidates' COALESCE).
+  const displayScore = item.confidence ?? item.ml_match_probability;
+  const confPct = displayScore != null ? Math.round(displayScore * 100) : null;
   const inCluster = item.member_count_a > 1 || item.member_count_b > 1;
 
   return (
@@ -207,19 +204,9 @@ function CandidateRow({
             </span>
           )}
         </div>
-        <span
-          className={clsx(
-            "mt-1 inline-block rounded-full px-2 py-0.5 text-[9.5px] font-bold",
-            item.match_rule
-              ? "bg-status-review-display/15 text-status-review-display"
-              : "bg-bg text-gray-2",
-          )}
-        >
-          {item.match_rule ?? "Blocking only — no rule"}
-        </span>
       </div>
       <div className="flex flex-shrink-0 flex-col items-end gap-1">
-        <span className={clsx("text-[13px] font-extrabold tabular-nums", confColor)}>
+        <span className="text-[13px] font-extrabold tabular-nums text-status-auto">
           {confPct != null ? `${confPct}%` : "—"}
         </span>
         {item.reviewed && (

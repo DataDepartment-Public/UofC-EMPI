@@ -1,43 +1,53 @@
 # eMPI Service API — Design
 
-> **Implementation status (2026-07-14):** all build-order steps (1-5) are
-> implemented and in production. `src/api/` — `sql_backend.py` (SQLite),
-> `parquet_backend.py` (local Parquet index), `index_backend.py` (the
-> pluggable-storage seam both go through), `publish.py` / `publish_local.py`
-> (batch publish), `incremental.py` / `local_score.py` (single/few-record
-> scoring), five routers (`health`, `runs`, `records`, `audit`, `dashboard`),
-> `jobs.py`, `deps.py`, `schemas.py`, `main.py`. The `empi-dashboard/` Next.js
-> app (step 5) is built and consumes these routes via its BFF route handlers
-> — see [Application-Architecture.md](Application-Architecture.md). Tests:
-> `tests/unit/test_api_store.py`, `test_api_publish.py`, `test_incremental.py`,
-> `test_parquet_backend.py`, `test_api_deps.py`,
-> `tests/integration/test_api.py`. Run locally with
-> `uvicorn src.api.main:app --reload`. Two deliberate deviations from the
-> literal spec, both noted inline in the code: `POST /audit/*` takes reviewer
-> identity from the `X-Reviewer-Id` header only (never the request body — see
-> `schemas.py`), and `POST /runs`'s `input_path` travels as a form field, not
-> a raw JSON body (FastAPI can't mix `File` and `Body` params on one route —
-> see `routers/runs.py`).
+> **Implementation status (2026-08-07):** every route below is implemented
+> and in production, not proposed. `src/api/` — `sql_backend.py` (SQLite),
+> `postgres_backend.py` (Azure Database for PostgreSQL, AAD-only auth —
+> the deployed target, see `terraform/postgres.tf`), `parquet_backend.py`
+> (local Parquet index), `index_backend.py` (the pluggable-storage seam all
+> three go through), `publish.py` / `publish_local.py` (batch publish),
+> `incremental.py` / `local_score.py` (single/few-record scoring), eight
+> routers (`health`, `runs`, `records`, `audit`, `dashboard`, `admin`,
+> `explanations`), `jobs.py`, `deps.py`, `schemas.py`, `main.py`. The
+> `empi-dashboard/` Next.js app consumes these routes via its BFF route
+> handlers — see [Application-Architecture.md](Application-Architecture.md).
+> Run locally with `uvicorn src.api.main:app --reload`. Two deliberate
+> deviations from a literal REST spec, both noted inline in the code:
+> `POST /audit/*` takes reviewer identity from the `X-Reviewer-Id` header
+> only (never the request body — see `schemas.py`), and `POST /runs`'s
+> `input_path` travels as a form field, not a raw JSON body (FastAPI can't
+> mix `File` and `Body` params on one route — see `routers/runs.py`).
 >
 > **Storage is fully pluggable** (`src/api/backends/index_backend.py`,
-> `EMPI_INDEX_BACKEND`): SQLite (`empi.db`, default) or a local Parquet index
-> (`data/local_index/`, `EMPI_INDEX_BACKEND=parquet`) — every route below,
-> including `/audit/*`, works identically against either. A `python -m
-> src.api.ingest.local_score` / `python -m src.api.ingest.publish_local` CLI pair needs no
-> FastAPI/uvicorn at all for the Parquet path. Full schema + per-table status:
-> [Data-Contract.md](Data-Contract.md) Stage 6.
+> `EMPI_INDEX_BACKEND`): **SQLite** (`empi.db`, the default for local/dev),
+> **Postgres** (`EMPI_INDEX_BACKEND=postgres`, AAD-token auth via the
+> backend App Service's own managed identity — no stored password; the
+> production target), or a **local Parquet index** (`data/local_index/`,
+> `EMPI_INDEX_BACKEND=parquet`) — every route below, including `/audit/*`,
+> works identically against all three. A `python -m
+> src.api.ingest.local_score` / `python -m src.api.ingest.publish_local`
+> CLI pair needs no FastAPI/uvicorn at all for the Parquet path. Full
+> schema + per-table status: [Data-Contract.md](Data-Contract.md) Stage 6.
 
 Design for wrapping the in-process eMPI pipeline (`src/pipeline.py`) in a **FastAPI**
-service. The service exposes four concerns:
+service. The service exposes six concerns:
 
 1. **Health** — liveness/readiness for the deploy target and the dashboard.
-2. **Runs** — accept new raw data and execute `clean → block → rules → FS
-   matcher → cluster` as a background job, tracked by `run_id`.
-3. **Records / Dashboard** — read models for the reviewer UI, plus incremental
-   single/few-record scoring against the existing published population.
-4. **Audit** — the reviewer-facing merge/unmerge actions. These call the API,
-   which **updates the final resolved output in the resolved-output index**
-   (the system of record) and appends an immutable audit entry.
+2. **Runs** — accept new raw data and execute `clean → block → deterministic
+   rules → FS matcher (audit-only) → non-match gate → ML matcher → cluster`
+   as a background job, tracked by `run_id`.
+3. **Records / Review queue / Dashboard** — read models for the reviewer
+   UI, plus incremental single/few-record scoring against the existing
+   published population.
+4. **Audit** — the reviewer-facing merge/unmerge/dismiss/undo actions.
+   These call the API, which **updates the final resolved output in the
+   resolved-output index** (the system of record) and appends an immutable
+   audit entry — including PHI-access reads (`view_raw`, `view_ssn_clean`),
+   not just state-changing actions.
+5. **Explanations** — per-pair SHAP contribution vectors for the non-match
+   gate and ML matcher's decisions, served read-only.
+6. **Admin** — live model hot-reload and live-tunable decision thresholds;
+   not reviewer-facing, no dashboard route calls the model ones directly.
 
 > **Scope:** backend contract only. The front-end (per
 > [Dashboard-Guide.md](../../empi-dashboard/docs/Dashboard-Guide.md)) is the
@@ -57,40 +67,43 @@ service. The service exposes four concerns:
    Parquet artifacts ◀───┼──  data/{processed,blocking,matches,...}     │
    RunManifest JSON  ◀───┼──  data/runs/run_<id>.json                   │
                          │        │                                     │
-                         │        ▼  load final output                  │
-   reviewer ──POST/audit─▶│   SQLite (empi.db)  ◀── system of record ───┼─▶ GET /clusters
-                         │     entities / members / audit_log           │   GET /records
-                         └──────────────────────────────────────────────┘
+                         │        ▼  publish() loads final output        │
+   reviewer ──POST/audit─▶│  SQLite / Postgres / local Parquet          │
+                         │   entities / members / review_candidate /    │
+                         │   audit_log  ◀── system of record ───────────┼─▶ GET /records
+                         └──────────────────────────────────────────────┘   GET /review-queue
 ```
 
 Two storage tiers, by purpose:
 
 | Tier | Holds | Why |
 |---|---|---|
-| **Parquet + manifest** (today) | per-stage batch artifacts (cleaned, candidate_pairs, matches, …) | columnar, versioned, reproducible; already built |
-| **SQLite `empi.db`** (new) | the **final resolved output** + audit log | transactional, concurrent-safe under a web server, queryable for the dashboard, mutable by reviewers |
+| **Parquet + manifest** | per-stage batch artifacts (cleaned, candidate_pairs, matches, gate_results, ml_features, …) | columnar, versioned, reproducible |
+| **Resolved-output index** (SQLite / Postgres / local Parquet) | the **final resolved output** + review queue + audit log | transactional, concurrent-safe under a web server, queryable for the dashboard, mutable by reviewers |
 
 The pipeline stays a pure batch function that writes Parquet + a manifest. A thin
-**publish** step loads that run's final output into `empi.db`. Reviewer edits then
-mutate `empi.db` directly — never the Parquet artifacts, which remain the immutable
-record of "what the algorithm produced for run X."
+**publish** step loads that run's final output into the resolved-output index. Reviewer
+edits then mutate the index directly — never the Parquet artifacts, which remain the
+immutable record of "what the algorithm produced for run X."
 
 ---
 
-## 2. The final-output data model (SQLite)
+## 2. The final-output data model
 
-The pipeline currently derives clusters in-memory via `assign_clusters` (union-find)
-and never persists a per-record assignment. The service makes that output durable so
-the dashboard can read it and reviewers can edit it.
+The pipeline derives clusters in-memory via `assign_clusters` (union-find) and
+never persists a per-record assignment on its own. The service makes that
+output durable so the dashboard can read it and reviewers can edit it.
 
 ```sql
 -- One row per resolved master entity (a cluster, or a singleton).
 CREATE TABLE entity (
-    mid          TEXT PRIMARY KEY,      -- master id, e.g. "M-20001"
+    mid          TEXT PRIMARY KEY,      -- master id, e.g. "M-000034"
     run_id       TEXT NOT NULL,         -- run that last (re)published this entity
     origin       TEXT NOT NULL,         -- 'deterministic' | 'review' | 'merge' | 'none'
     is_merged    INTEGER NOT NULL,      -- 0/1
     confidence   REAL,                  -- carried from matches when applicable
+    match_rule   TEXT,                  -- the rule that confirmed it, when applicable
+    evidence     TEXT,                  -- rules_fired / "Manually merged by <reviewer>"
     updated_utc  TEXT NOT NULL
 );
 
@@ -104,65 +117,65 @@ CREATE TABLE entity_member (
     updated_utc  TEXT NOT NULL
 );
 
--- Append-only audit trail. Never updated or deleted.
+-- One row per unresolved pair awaiting review (backs GET /review-queue).
+CREATE TABLE review_candidate (
+    id                      INTEGER PRIMARY KEY,
+    patid_a, patid_b        TEXT NOT NULL,
+    match_rule              TEXT,       -- set only for the (currently empty) review-tier rule set
+    confidence               REAL,
+    evidence, source_blocks TEXT,
+    run_id                  TEXT NOT NULL,
+    created_utc             TEXT NOT NULL,
+    fs_match_probability    REAL,       -- incremental scoring only
+    fs_classification_tier  TEXT,
+    ml_match_probability    REAL,       -- Stage 4.5 score, threaded in at batch publish
+    ml_classification_tier  TEXT
+);
+
+-- Append-only audit trail. Never updated in place except the `undone` flag.
 CREATE TABLE audit_log (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts_utc       TEXT NOT NULL,
-    user         TEXT NOT NULL,         -- reviewer identity (see §5 auth)
-    action       TEXT NOT NULL,         -- 'merge' | 'unmerge' | 'split'
-    patids       TEXT NOT NULL,         -- comma-separated PATIDs acted on
-    mid          TEXT NOT NULL,         -- entity affected (or created)
-    prev_state   TEXT NOT NULL,         -- human-readable, e.g. "Needs review"
-    next_state   TEXT NOT NULL,         -- e.g. "Merged"
-    run_id       TEXT                   -- run the entity belonged to when edited
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc         TEXT NOT NULL,
+    user           TEXT NOT NULL,         -- reviewer identity (see §5 auth)
+    action         TEXT NOT NULL,         -- 'merge'|'unmerge'|'dismiss'|'split'|'view_raw'|'view_ssn_clean'
+    patids         TEXT NOT NULL,         -- comma-separated PATIDs acted on
+    mid            TEXT NOT NULL,         -- entity affected (or created)
+    prev_state     TEXT NOT NULL,         -- human-readable, e.g. "Needs review"
+    next_state     TEXT NOT NULL,         -- e.g. "Merged"
+    run_id         TEXT,                  -- run the entity belonged to when edited
+    related_patids TEXT,                  -- snapshot for retraining-label export; see Data-Contract.md §6e
+    prev_mid       TEXT,                  -- undo provenance: the mid this action reversed from
+    undo_of        INTEGER,               -- undo provenance: the audit_log.id this row reverses
+    undone         INTEGER NOT NULL DEFAULT 0  -- set true on the original row once reversed
 );
 ```
 
-`audit_log` maps 1:1 onto the demo's `AUDIT` array
-(`{user, ts, ids, prev, next, mid}`), so the dashboard's audit table renders with no
-shape change.
-
-**Incremental-scoring index** (`src/api/backends/sql_backend.py`, feeds `POST
-/records/score` — see §3): two more tables, rebuilt wholesale by every full
-publish and incrementally appended to between publishes.
-
-```sql
--- On-disk mirror of blocking.BlockingIndex — a persisted posting list so a
--- single-record score is an indexed lookup, not a full-population rebuild.
--- B1 (SSN) / B6 (email) key values are SHA-256 hashed (direct identifiers);
--- every other block's key is already a lossy derived signal.
-CREATE TABLE block_key (
-    block_id   TEXT NOT NULL,   -- B1 | B3 | B4 | B5 | B6 | B7 | B8 | B9
-    key_value  TEXT NOT NULL,
-    patid      TEXT NOT NULL,
-    PRIMARY KEY (block_id, key_value, patid)
-);
-
--- SQL-queryable mirror of the CleanedRecords contract (src/contracts.py),
--- one row per valid PATID — lets rule evaluation for a handful of candidates
--- skip a ~163k-row Parquet read.
-CREATE TABLE cleaned_attrs (
-    patid TEXT PRIMARY KEY, first_nm TEXT, last_nm TEXT, birth_dt TEXT,
-    ssn TEXT, ssn_last4 TEXT, email TEXT, zip_base TEXT, address1 TEXT,
-    sex TEXT, phones_json TEXT, run_id TEXT NOT NULL
-);
-```
+Full column-level schema for every table (including the incremental-scoring
+lookup indexes `block_key`/`cleaned_attrs` and the display-denormalization
+tables `record_attrs`/`record_raw`): [Data-Contract.md](Data-Contract.md)
+Stage 6.
 
 ### Reconciliation: re-runs vs. human edits
 
-Because `empi.db` is the system of record and the pipeline is the algorithm's opinion,
-a **re-run must not silently clobber a reviewer's decisions.** The publish step is a
-*merge*, not a *truncate*:
+Because the resolved-output index is the system of record and the pipeline is
+the algorithm's opinion, a **re-run must not silently clobber a reviewer's
+decisions.** The publish step is a *merge*, not a *truncate*:
 
 - New entities the reviewer never touched → upserted from the run.
 - Entities a reviewer edited (any `audit_log` row referencing their members) →
   the human decision **wins**; the run's proposed grouping for those PATIDs is recorded
-  as a *suggestion* but not auto-applied.
+  as a *suggestion* (`entity_suggestion`) but not auto-applied.
 - Brand-new PATIDs in the run → placed by the algorithm as normal.
 
-This keeps the answer the user gave ("the API updates the final output in the
-database") consistent across repeated pipeline runs. The reconciliation policy is the
-one design decision worth a second look before coding — it's called out again in §6.
+**Caveat this reconciliation does not cover:** if a run publishes an entirely
+different source population (different PATID scheme — e.g. swapping a
+synthetic test dataset for a real one), old entities/review candidates whose
+patids don't appear in the new run are never *deleted*, only left un-upserted
+— they linger in the index (deduped correctly at read time within a table,
+but not purged across tables) until something explicitly clears them. This
+is a real, encountered gap, not a hypothetical: see `to-do.md`'s
+2026-08-07 entry. Swapping datasets in a long-lived environment should wipe
+and republish, not just publish on top.
 
 ---
 
@@ -175,20 +188,18 @@ GET /health        → 200 {"status":"ok"}                     # liveness
 GET /health/ready  → 200/503 {checks: {db, data_dirs, last_run_id}}  # readiness
 ```
 
-`ready` verifies `empi.db` is reachable and the data dirs are writable; returns the
-last `run_id` so the dashboard can show "data current as of …".
-
 ### Runs (pipeline on new data)
 
 ```
 POST /runs
-  body: multipart file upload  OR  {"input_path": "data/raw/..."}
+  body: multipart file upload  OR  form field {"input_path": "data/raw/..."}
   → 202 {"run_id": "...", "status": "queued"}
 ```
 
 Saves the upload under `data/raw/`, then schedules `run_pipeline(raw_input=...)` via
-`BackgroundTasks`. Returns immediately — the pipeline is minutes-long and must not
-block the request.
+`BackgroundTasks`, and **auto-publishes on success** in the same background job — no
+separate publish call needed. Returns immediately — the pipeline can be minutes-long
+against a real population and must not block the request.
 
 ```
 GET /runs            → [{run_id, status, counts, created_utc}, ...]
@@ -196,12 +207,43 @@ GET /runs/{run_id}   → the full RunManifest (reuse src/contracts.RunManifest a
                        response model) + status: queued|running|succeeded|failed
 ```
 
-Status store: a small `run_status` dict in memory for in-flight jobs, backed by the
-presence of `data/runs/run_<id>.json` for completed ones (the manifest *is* the
-durable success record). On failure the background task records the traceback summary
-against the `run_id`.
+### Records / Review queue (read models for the dashboard)
 
-### Records — incremental score (single/batch, no full re-run)
+```
+GET /records?search=&origin=&is_merged=&birth_date=&ssn_last4=
+    &updated_after=&updated_before=&page=&page_size=
+                                     → paginated master rows + their candidate members
+GET /clusters/{mid}                 → one entity, its members, and field values
+GET /records/{patid}/raw            → the un-scrubbed *_raw source fields ("View Raw
+                                       Data" drawer) — writes a `view_raw` audit_log
+                                       entry on every successful call
+GET /records/{patid}/ssn-clean      → the pipeline-normalized SSN (`cleaned_attrs.ssn`,
+                                       the value blocking/rules actually matched on) —
+                                       backs the SSN-reveal toggle specifically, in
+                                       preference to the raw endpoint above (a
+                                       reviewer should sanity-check against the value
+                                       the matching engine trusted, not raw source
+                                       noise). A SEPARATE endpoint from `.../raw`,
+                                       logged as its own `view_ssn_clean` audit action
+                                       — the two are not interchangeable and not
+                                       logged identically.
+GET /review-queue?confidence_min=&confidence_max=&reviewed=&search=&page=&page_size=
+                                     → candidate-grain review queue (one row per
+                                       pending pair, not per cluster). Sorted/filtered
+                                       on COALESCE(confidence, ml_match_probability) —
+                                       most pairs have no rule confidence, only an ML
+                                       score.
+POST /records/score
+GET /records/score/{run_id}         → incremental single/batch scoring against the
+                                       existing published population, no full re-run
+                                       (see §3 continued below)
+```
+
+These go through `IndexBackend` (`entity` ⨝ `entity_member` ⨝ `record_attrs` ⨝
+`review_candidate`), not a raw connection — identical results whether the
+backend is SQLite, Postgres, or the local Parquet index.
+
+**Incremental scoring detail** (`POST /records/score`):
 
 ```
 POST /records/score
@@ -217,122 +259,110 @@ GET /records/score/{run_id}
 ```
 
 Scores one or a batch of new records against the **existing published
-population** and writes the result straight into `empi.db`, without
-re-running `clean → block → rules → cluster` over the whole dataset (`POST
-/runs`'s job). Always a background job — same 202 + poll pattern as `POST
-/runs`, regardless of batch size (`src/api/jobs.py`'s `score_records_job`,
-tracked in a registry separate from full-pipeline runs and not listed by `GET
-/runs`).
-
-**Storage backend.** Scoring is written against `src.api.backends.index_backend.IndexBackend`,
-not a raw connection — `src/api/ingest/incremental.py` never imports `store`
-directly. Two implementations:
-
-- `SqlIndexBackend` (default, `EMPI_INDEX_BACKEND=sqlite`) — thin adapter
-  over `sql_backend.py` + `empi.db`. `sql_backend.py`'s own SQL stays SQLite-flavored;
-  the adapter takes its store module and connection as parameters, so a
-  future Postgres-flavored store module could swap in without changing the
-  adapter — scaffolding for that, not a built multi-engine store today.
-- `ParquetIndexBackend` (`EMPI_INDEX_BACKEND=parquet`) — nine Parquet files
-  under `settings.local_index_dir` (`block_key`, `cleaned_attrs`, `entity`,
-  `entity_member`, `review_candidate`, `entity_suggestion`, `record_attrs`,
-  `record_raw`, `audit_log`), loaded into memory and written back on commit.
-  No `empi.db` — but full parity with it, including reviewer locking
-  (`locked_patids()` reads the local `audit_log` table for real) and the
-  dashboard read routes below. No FastAPI/uvicorn needed for either write
-  path:
-
-  ```
-  python -m src.api.ingest.local_score --input record.json [--data-dir data/local_index]
-  python -m src.api.ingest.publish_local --run-id <run_id> [--data-dir data/local_index]
-  ```
-
-  `--input` is a JSON file (one record object or a list), same raw-column
-  shape as `POST /records/score`'s body. `EMPI_INDEX_BACKEND=parquet` also
-  lets the *live* API (including the dashboard and `/audit/*`) run against
-  the same Parquet files instead of `empi.db` — see
-  [Data-Contract.md](Data-Contract.md) Stage 6 for the full schema and a note
-  on the process-local lock (`deps.py::_PARQUET_BACKEND_LOCK`) that
-  serializes concurrent requests against this backend.
-
-Implementation (`src/api/ingest/incremental.py`): each record is cleaned via the
-same `transform_dataframe` normalization as the batch pipeline, candidates
-are found via an indexed lookup against the persisted block-key table (§2)
-rather than rebuilding a `blocking.BlockingIndex` from the full population,
-deterministic rules run over a tiny reconstructed frame, and:
+population**, without re-running `clean → block → rules → cluster` over the
+whole dataset (`POST /runs`'s job). Always a background job — same 202 +
+poll pattern as `POST /runs` (`src/api/jobs.py`'s `score_records_job`,
+tracked in a registry separate from full-pipeline runs and not listed by
+`GET /runs`). Implementation (`src/api/ingest/incremental.py`): each record
+is cleaned via the same normalization as the batch pipeline, candidates are
+found via an indexed lookup against the persisted block-key table rather
+than rebuilding a `BlockingIndex` from the full population, deterministic
+rules run over a tiny reconstructed frame, and:
 
 - **auto-merge tier** → joins the record into an existing entity (or bridges
-  two previously-separate entities if the record's matches span more than
-  one — the same union `assign_clusters` performs at batch time, done
-  directly against the backend here). Reviewer-locked candidates
-  (`backend.locked_patids()`, §2 Reconciliation) are never auto-merged into;
-  an `entity_suggestion` row is written instead.
+  two previously-separate entities). Reviewer-locked candidates
+  (`backend.locked_patids()`) are never auto-merged into; an
+  `entity_suggestion` row is written instead.
 - **review tier** → a `review_candidate` row, optionally scored by the active
-  FS model (same Stage 4 as the batch pipeline) if one is configured.
-- The record's own `block_key`/`cleaned_attrs` rows are appended immediately
-  after it's scored, so a later record in the same batch (or a later call)
-  can find it as a candidate.
+  FS model if one is configured (`fs_match_probability`/`fs_classification_tier`
+  — the ML matcher and non-match gate are batch-publish-only today, not
+  wired into the incremental path).
 
-### Clusters / records (read models for the Dataset tab)
+The Parquet backend has a CLI equivalent needing no FastAPI/uvicorn process:
 
 ```
-GET /records?search=&origin=&is_merged=&birth_date=&ssn_last4=
-    &updated_after=&updated_before=&page=&page_size=
-                                     → paginated master rows + their candidate members
-GET /clusters/{mid}                 → one entity, its members, and field values
-GET /records/{patid}/raw            → the un-scrubbed *_raw source fields ("View Raw Data")
+python -m src.api.ingest.local_score --input record.json [--data-dir data/local_index]
+python -m src.api.ingest.publish_local --run-id <run_id> [--data-dir data/local_index]
 ```
 
-These go through `IndexBackend` (`entity` ⨝ `entity_member` ⨝ `record_attrs` ⨝
-`review_candidate`), not a raw connection — identical results whether the
-backend is SQLite or the local Parquet index. They back the dashboard Dataset
-view; `GET /records/{patid}/raw` reads the one JSON blob `publish.py` (or
-`incremental.py`) denormalized per PATID.
-
-### Audit (merge / unmerge)
+### Audit (merge / unmerge / dismiss / undo)
 
 ```
 POST /audit/merge
-  body: {"mid": "M-...", "patids": ["P1","P2",...], "user": "reviewer.jclark"}
+  headers: X-Reviewer-Id: <reviewer>
+  body: {"mid": "M-...", "patids": ["P1","P2",...]}
   → 200 {audit_id, entity}    # entity reflects is_merged=1, origin='merge'
 
 POST /audit/unmerge
-  body: {"mid": "M-...", "patid": "P2", "user": "..."}   # split one record out
+  headers: X-Reviewer-Id: <reviewer>
+  body: {"mid": "M-...", "patid": "P2"}   # split one record out into a fresh mid
   → 200 {audit_id, new_mid, entity}
+
+POST /audit/dismiss
+  headers: X-Reviewer-Id: <reviewer>
+  body: {"patid_a": "P1", "patid_b": "P2"}   # "Not a match" on a review-queue pair
+  → 200 {audit_id}
+
+POST /audit/{audit_id}/undo
+  headers: X-Reviewer-Id: <reviewer>
+  → 200 {audit_id, reversed_action, entity, new_mids}
+  # reverses a prior merge/unmerge by id; marks the original row undone=true,
+  # writes a new row with prev_mid/undo_of set. 404 if already undone.
 
 GET /audit?limit=&since=  → [audit_log rows, newest first]
 ```
 
-Each write is **one backend transaction** (`begin()`/`commit()`/`rollback()` on
-whichever `IndexBackend` is active): mutate `entity`/`entity_member`, then
-insert the `audit_log` row. Either both land or neither does — the audit
-trail can never disagree with the stored output. `merge` collapses members
-into one `mid`; `unmerge` detaches a `patid` into a fresh standalone `mid`.
+Every write body deliberately omits reviewer identity — it comes from the
+`X-Reviewer-Id` header only (see the status banner at the top of this doc).
+Each write is **one backend transaction** (`begin()`/`commit()`/`rollback()`
+on whichever `IndexBackend` is active): mutate `entity`/`entity_member`, then
+insert the `audit_log` row. Either both land or neither does.
 
-### Explanations (why a model decided a pair)
+### Explanations (per-pair SHAP)
 
 ```
-GET /explanations/{model_name}/{patid_a}/{patid_b}[?run_id=]
-  model_name: nonmatch_gate | ml_matcher
-  → 200 PairExplanation   # plot-ready SHAP waterfall
-  → 404                   # unknown model/run, no explanation artifact, or the
-                          #   pair was never scored by that model
+GET /explanations/{model_name}/{patid_a}/{patid_b}[?run_id=<run_id>]
+  → 200 PairExplanation   # feature-level SHAP waterfall for the gate's or
+                            # ML matcher's decision on this pair
+  → 404 if this model never scored this pair (e.g. the gate dropped it
+    before the ML matcher ever saw it, or no model was active for the run)
 ```
 
-The **only read route that does not go through `IndexBackend`.** Explanations are
-immutable evidence about a decision a specific model made during a specific run, so
-this route resolves the run's `RunManifest` and reads the pipeline's Parquet
-artifact — the one whose sha256 the manifest records. No model is loaded in the
-request path and nothing is recomputed, so promoting a new model tomorrow cannot
-silently change the explanation shown for a decision made today.
+`model_name` is `nonmatch_gate` or `ml_matcher`. Full contract (payload
+shape, waterfall semantics, sign conventions):
+[Explanations-Guide.md](Explanations-Guide.md) — front-end readers only need
+its §2.
 
-A 404 is frequently a **normal** answer: deterministic auto-merges and rule rejects
-are never scored by either model (their explanation is `match_rule`/`rules_fired`),
-and a pair the gate dropped never reaches the ML matcher. Pass the entity's `run_id`
-so the explanation provably matches the score shown beside it.
+### Admin (model hot-swap + live thresholds)
 
-Full payload contract — the one your front-end needs — is
-`docs/Explanations-Guide.md` §2.
+```
+POST /admin/models/reload
+  → 200 {"invalidated": [...], "fs_active_model": {...} | null,
+         "ml_active_model": {...} | null, "gate_active_model": {...} | null}
+
+GET /admin/models/status
+  → 200 {"cached": {...}, "fs_active_model": {...} | null,
+         "ml_active_model": {...} | null, "gate_active_model": {...} | null}
+
+GET /admin/thresholds   → 200 ThresholdSettings
+PUT /admin/thresholds
+  body: ThresholdSettings {
+    gate_threshold: float,           # P(plausible) floor to reach the ML matcher
+    ml_auto_merge_threshold: float,  # ML matcher's auto_merge tier floor
+    fs_review_floor: float,          # FS matcher's human_review tier floor
+  }
+  → 200 ThresholdSettings   # persisted to data/config/thresholds.json,
+                            # applied on next app startup AND live via
+                            # threshold_store — no restart required
+```
+
+`/admin/models/*` is not reviewer-facing (no dashboard route calls it
+directly — it's the champion-promotion CI workflow's job). `src/models/
+model_cache.py` caches each model's deserialized artifact in memory, keyed
+by `(path, mtime)` — a promoted model (new `active.json` pointer) is picked
+up automatically the next time anything asks for it; `/admin/models/reload`
+just makes that moment immediate and observable. `/admin/thresholds` **is**
+reviewer-facing — it backs the dashboard's Admin tab.
 
 ---
 
@@ -341,19 +371,25 @@ Full payload contract — the one your front-end needs — is
 ```
 src/api/
   main.py              # FastAPI app, lifespan (init db, configure_logging once)
-  deps.py              # get_settings, get_db (raw SQLite), get_backend (IndexBackend;
+  deps.py              # get_settings, get_db (raw connection), get_backend (IndexBackend;
                        #   holds the Parquet-mode concurrency lock for its duration)
   schemas.py           # request/response models; some reuse contracts.RunManifest etc.
   jobs.py              # background-job wrappers (run/score) + in-memory status registries
-  index_backend.py     # IndexBackend protocol + SqlIndexBackend + build_index_backend
-  store.py             # SQLite: schema, entity/member/audit_log CRUD, dashboard aggregates
-  parquet_backend.py   # ParquetIndexBackend — the same operations over local Parquet files
-  publish.py           # one RunManifest's output -> IndexBackend (batch)
-  publish_local.py     # publish.py's batch path with no FastAPI/uvicorn — Parquet only
-  incremental.py       # one/few new records -> IndexBackend, no full pipeline re-run
-  local_score.py       # incremental.py's path with no FastAPI/uvicorn — Parquet only
+  threshold_store.py   # live-tunable decision thresholds, backed by data/config/thresholds.json
+  backends/
+    index_backend.py   # IndexBackend protocol + SqlIndexBackend + build_index_backend
+    sql_backend.py      # SQLite implementation
+    postgres_backend.py # Postgres implementation (AAD-token auth, no stored password)
+    parquet_backend.py  # local Parquet implementation
+  ingest/
+    publish.py / publish_local.py     # batch: run output -> index (reuses assign_clusters)
+    incremental.py / local_score.py   # single/few-record scoring -> index
   routers/
-    health.py  runs.py  records.py  audit.py  dashboard.py  explanations.py
+    health.py  runs.py  records.py  audit.py  dashboard.py  admin.py  explanations.py
+
+src/models/
+  model_cache.py         # mtime-keyed in-memory cache for the FS/ML matcher and
+                         #   non-match gate artifacts — see "Admin" above
 ```
 
 `run_pipeline()` itself is **not modified** by any of this — the service calls it
@@ -363,23 +399,35 @@ as-is. `assign_clusters` is reused to seed initial entities on publish.
 
 ## 5. Cross-cutting concerns
 
-- **Concurrency / `configure_logging`** — its module-level `_LOGGING_CONFIGURED`
-  guard means call it **once** in the app lifespan, not per request. `run_pipeline`
-  re-calls it harmlessly (idempotent). Guard against two overlapping `POST /runs`
-  writing the same `run_id` (timestamp collisions) by appending a short suffix.
-  Separately, the Parquet backend needs its own concurrency guard
-  (`deps.py::_PARQUET_BACKEND_LOCK`) since it wasn't originally designed for a
-  live multi-request server — see §2.
-- **PHI / HIPAA** — keep the existing "aggregate counts only" logging rule. The audit
-  endpoints handle PATIDs and reviewer identity, so they need real auth before any
-  non-local deploy. For local, the `user` comes from a request header
-  (`X-Reviewer-Id`), set by the dashboard's BFF from a server-side session — the
-  browser never sets it directly. Do **not** log field values.
-- **Validation** — reuse pandera/pydantic. Request bodies are pydantic models;
-  `RunManifest` is the run response model unchanged.
-- **Idempotency** — `POST /audit/*` should be safe to retry; dedupe on
-  `(action, sorted(patids), mid)` within a short window, or have the client send an
-  idempotency key.
+- **Concurrency** — the backend is a **single-instance** service by design:
+  `jobs.py`'s in-flight run/score registries are in-process dicts, so a
+  second replica or `--workers > 1` would silently 404 on runs/scores it
+  didn't start. The Parquet backend additionally needs its own
+  process-local lock (`deps.py::_PARQUET_BACKEND_LOCK`) since it wasn't
+  designed for a live multi-request server.
+- **SQLite thread affinity** — `sql_backend.get_connection` opens with
+  `check_same_thread=False` deliberately: FastAPI runs a sync generator
+  dependency's setup, the route handler, and its teardown as separate
+  `anyio` worker-thread dispatches that aren't guaranteed to land on the
+  same OS thread under concurrent load, which otherwise intermittently
+  raised `sqlite3.ProgrammingError` on `backend.close()`. The connection is
+  still only ever used sequentially within one request's lifetime.
+- **PHI / HIPAA** — keep the "aggregate counts only" logging rule. Every PHI
+  read (`GET /records/{patid}/raw`, `GET /records/{patid}/ssn-clean`) and
+  every mutation is written to `audit_log`. Reviewer identity comes from
+  the `X-Reviewer-Id` header, set by the dashboard's BFF from the
+  authenticated Entra ID principal in a real deploy (Easy Auth's
+  `X-MS-CLIENT-PRINCIPAL-NAME`, see `empi-dashboard/src/lib/server-api.ts`)
+  or a hardcoded fallback identity in local dev (no Azure platform in front
+  of the container locally). The browser never sets this header itself.
+- **Schema management is decoupled from the app lifecycle** — `lifespan`
+  never calls `init_db()` on boot; the app only ever connects to an
+  already-correct database and logs a loud error (without crashing) if the
+  expected schema isn't there. `scripts/init_db.py` is the explicit way to
+  create or update it — run once per environment, and again whenever
+  `_COLUMN_MIGRATIONS` (in `sql_backend.py`/`postgres_backend.py`) gains a
+  new entry. Not a versioned migration framework — the same schema-setup
+  logic that always existed, just no longer implicit.
 
 ---
 
@@ -387,19 +435,11 @@ as-is. `assign_clusters` is reused to seed initial entities on publish.
 
 1. **Reconciliation policy (§2)** — "human edit wins on re-run." A re-run does
    **not** re-merge PATIDs a reviewer explicitly **unmerged** — an unmerge is
-   sticky until the reviewer reverses it.
-2. **Identity** — header-based `X-Reviewer-Id`, set by the dashboard's BFF.
+   sticky until the reviewer reverses it (or an `undo`).
+2. **Identity** — header-based `X-Reviewer-Id`, set by the dashboard's BFF
+   from the authenticated Entra ID principal (Easy Auth) in Azure.
 3. **Singletons** — every source record gets an `entity` row (singletons
-   included, matching `ClusterAssignments` in `contracts`) — this makes
-   `GET /records` a single clean query.
-
----
-
-## 7. Build order (once approved)
-
-1. `sql_backend.py` + schema + `publish.py`; unit-test publish against an existing
-   `data/runs/run_*.json`.
-2. `health` + `runs` routes over the unmodified `run_pipeline` (the §6 "minimal slice").
-3. `records`/`clusters` read models.
-4. `audit` merge/unmerge transactions + the reconciliation step in `publish.py`.
-5. Wire the demo dashboard's `fetch` calls to the live routes.
+   included) — this makes `GET /records` a single clean query.
+4. **The ML matcher and non-match gate are batch-publish-only** — neither
+   is wired into `POST /records/score`'s incremental path today. Only the
+   FS matcher scores incrementally.

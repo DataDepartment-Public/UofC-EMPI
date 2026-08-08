@@ -182,15 +182,17 @@ export function ShapWaterfall({ explanation, maxFeatures = 8 }: Props) {
             }}
           />
           <Bar dataKey="range" shape={<ArrowBar />}>
+            {/* The remainder bar is coloured like any other: it moves the
+                confidence the same way, and greying it out read as a
+                separate kind of thing rather than "the rest of the
+                features, net". Its label already names it. */}
             {bars.map((d, i) => (
               <Cell
                 key={i}
                 fill={
-                  d.isRemainder
-                    ? "var(--gray)"
-                    : d.direction === "positive"
-                      ? "var(--status-auto)"
-                      : "var(--status-nomatch)"
+                  d.direction === "positive"
+                    ? "var(--status-auto)"
+                    : "var(--status-nomatch)"
                 }
               />
             ))}

@@ -39,7 +39,21 @@ export function decodeExplainPayload(raw: string | null): ExplainPayload | null 
 /** One bar of the waterfall, positioned on a 0–100 confidence axis. */
 export interface WaterfallBar {
   label: string;
-  /** [start, end] in percent — where the bar is drawn. */
+  /** Confidence this bar starts from, in percent. */
+  start: number;
+  /** Confidence it ends at — below `start` when the feature lowered it. */
+  end: number;
+  /**
+   * `[lo, hi]` — the same span as `start`/`end` but always ascending, which
+   * is what recharts is given.
+   *
+   * Recharts anchors a range bar at the *first* element and extends it
+   * rightward by the absolute difference, so a descending `[96, 87]` is
+   * drawn from 96 to 105 — mirrored onto the wrong side of its own start,
+   * breaking the chain for that bar and every bar after it. Handing it an
+   * ascending pair positions the bar correctly; travel direction is carried
+   * by `deltaPct` instead, and the arrow head is drawn from that.
+   */
   range: [number, number];
   direction: "positive" | "negative";
   /** Signed width in percentage points: `end - start`. */
@@ -100,11 +114,16 @@ export function toProbabilityWaterfall(
   const bars: WaterfallBar[] = [];
   let cursor = basePct;
 
+  const ascending = (a: number, b: number): [number, number] =>
+    a <= b ? [a, b] : [b, a];
+
   for (const f of shown) {
     const end = f.cumulative_prob * 100;
     bars.push({
       label: f.label,
-      range: [cursor, end],
+      start: cursor,
+      end,
+      range: ascending(cursor, end),
       direction: f.direction,
       deltaPct: end - cursor,
       displayValue: f.display_value ?? (f.value != null ? String(f.value) : "—"),
@@ -116,7 +135,9 @@ export function toProbabilityWaterfall(
   if (hidden > 0) {
     bars.push({
       label: `${hidden} other feature${hidden === 1 ? "" : "s"}`,
-      range: [cursor, finalPct],
+      start: cursor,
+      end: finalPct,
+      range: ascending(cursor, finalPct),
       direction: finalPct >= cursor ? "positive" : "negative",
       deltaPct: finalPct - cursor,
       displayValue: "—",

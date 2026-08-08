@@ -51,11 +51,37 @@ describe("toProbabilityWaterfall", () => {
     const e = makeExplanation(-0.5, [1.5, -0.75, 0.25]);
     const w = toProbabilityWaterfall(e);
     for (let i = 1; i < w.bars.length; i++) {
-      expect(w.bars[i].range[0]).toBeCloseTo(w.bars[i - 1].range[1], 10);
+      expect(w.bars[i].start).toBeCloseTo(w.bars[i - 1].end, 10);
     }
-    const last = w.bars[w.bars.length - 1].range[1];
+    const last = w.bars[w.bars.length - 1].end;
     expect(last).toBeCloseTo(e.decision.score * 100, 10);
     expect(w.finalPct).toBeCloseTo(e.decision.score * 100, 10);
+  });
+
+  it("hands recharts an ascending range even when confidence falls", () => {
+    // Recharts anchors a range bar at the first element and extends it
+    // rightward by the absolute difference, so a descending pair lands
+    // mirrored onto the wrong side of its own start — and every later bar
+    // inherits the offset, visibly breaking the chain.
+    const w = toProbabilityWaterfall(makeExplanation(2, [-1.5]));
+    const bar = w.bars[0];
+    expect(bar.end).toBeLessThan(bar.start); // confidence really fell
+    expect(bar.range[0]).toBeLessThan(bar.range[1]); // but the range ascends
+    expect(bar.range).toEqual([bar.end, bar.start]);
+    expect(bar.deltaPct).toBeLessThan(0); // direction survives in deltaPct
+  });
+
+  it("keeps every bar's drawn span flush with its neighbours", () => {
+    // The end-to-end property the chain depends on, checked on the spans
+    // actually handed to the chart, across a mix of rises and falls.
+    const w = toProbabilityWaterfall(makeExplanation(-0.5, [2, -1.2, -0.6, 1.1]));
+    for (let i = 1; i < w.bars.length; i++) {
+      const prev = w.bars[i - 1];
+      const cur = w.bars[i];
+      const prevEdges = new Set(prev.range.map((v) => v.toFixed(9)));
+      expect(prevEdges.has(cur.start.toFixed(9))).toBe(true);
+      expect(cur.range.map((v) => v.toFixed(9))).toContain(cur.start.toFixed(9));
+    }
   });
 
   it("converts cumulative points, never a bar width on its own", () => {

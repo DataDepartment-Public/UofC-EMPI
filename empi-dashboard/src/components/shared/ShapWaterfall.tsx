@@ -11,7 +11,99 @@ import {
   YAxis,
 } from "recharts";
 import { toProbabilityWaterfall } from "@/lib/explain";
+import type { WaterfallBar } from "@/lib/explain";
 import type { PairExplanation } from "@/lib/schemas";
+
+/** How far the arrow head juts past the body, in px. */
+const TIP_PX = 7;
+/** Below this pixel width there's no room for a head, so the bar degrades to
+ * a plain sliver rather than collapsing into a pure triangle. */
+const MIN_ARROW_PX = 4;
+
+interface ArrowBarProps {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  fill?: string;
+  payload?: WaterfallBar;
+}
+
+/** A waterfall bar drawn as an arrow: a pointed head at the leading edge
+ * showing which way the confidence moved, and a matching notch cut into the
+ * trailing edge so consecutive bars read as one flowing chain — the shape
+ * the reference SHAP waterfall uses.
+ *
+ * The head points along the bar's *direction of travel*, which is the sign
+ * of `deltaPct`, not the on-screen left-to-right order: a bar that lowers
+ * confidence runs right-to-left and must point left. Recharts hands us an
+ * already-normalized `x`/`width` (always left edge + positive width), so the
+ * direction has to come from the payload.
+ *
+ * Geometry is clamped so a hairline bar can't invert: the head and notch
+ * each take at most a quarter of the width. */
+export function arrowBarPath({
+  x,
+  y,
+  width,
+  height,
+  pointsRight,
+}: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  pointsRight: boolean;
+}): string | null {
+  const w = Math.abs(width);
+  // Too narrow to shape — the caller falls back to a plain sliver so a
+  // near-zero contribution is still visible as *something*.
+  if (w < MIN_ARROW_PX) return null;
+
+  const tip = Math.min(TIP_PX, w / 2);
+  const midY = y + height / 2;
+  const left = x;
+  const right = x + w;
+  const bottom = y + height;
+
+  // Head on the leading edge only; the trailing edge stays flat. A notch cut
+  // into the tail would pull the bar's visible start inward by `tip`, opening
+  // a gap where it should butt up against the previous bar's tip — the chain
+  // has to stay unbroken, since each bar begins exactly where the last ended.
+  return pointsRight
+    ? [
+        `M ${left} ${y}`,
+        `L ${right - tip} ${y}`,
+        `L ${right} ${midY}`, // head
+        `L ${right - tip} ${bottom}`,
+        `L ${left} ${bottom}`,
+        "Z",
+      ].join(" ")
+    : [
+        `M ${right} ${y}`,
+        `L ${left + tip} ${y}`,
+        `L ${left} ${midY}`, // head
+        `L ${left + tip} ${bottom}`,
+        `L ${right} ${bottom}`,
+        "Z",
+      ].join(" ");
+}
+
+function ArrowBar({ x = 0, y = 0, width = 0, height = 0, fill, payload }: ArrowBarProps) {
+  const w = Math.abs(width);
+  const d = arrowBarPath({
+    x,
+    y,
+    width: w,
+    height,
+    pointsRight: (payload?.deltaPct ?? 0) >= 0,
+  });
+
+  if (d === null) {
+    return <rect x={x} y={y} width={Math.max(w, 1)} height={height} fill={fill} />;
+  }
+  return <path d={d} fill={fill} />;
+}
 
 interface Props {
   explanation: PairExplanation;
@@ -89,7 +181,7 @@ export function ShapWaterfall({ explanation, maxFeatures = 8 }: Props) {
               ];
             }}
           />
-          <Bar dataKey="range" radius={2}>
+          <Bar dataKey="range" shape={<ArrowBar />}>
             {bars.map((d, i) => (
               <Cell
                 key={i}

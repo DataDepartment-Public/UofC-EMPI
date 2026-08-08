@@ -171,7 +171,7 @@ class TestBulkPublishMethods:
     def test_upsert_record_attrs_and_raw_bulk(self, backend):
         backend.begin()
         backend.upsert_record_attrs_bulk([
-            ("P1", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, "r1"),
+            ("P1", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, None, None, None, None, "r1"),
         ])
         backend.upsert_record_raw_bulk([("P1", '{"FirstNM_raw": "JANE"}', "r1")])
         backend.commit()
@@ -280,10 +280,10 @@ def _seed_three_entities(backend):
         ("P4", "M-000003", 1, "pipeline", "t2"),
     ])
     backend.upsert_record_attrs_bulk([
-        ("P1", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, "r1"),
-        ("P2", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, "r1"),
-        ("P3", "Amy", "Lee", "1975-03-03", "1234", None, None, None, None, None, "r1"),
-        ("P4", "John", "Smith", "1985-05-05", "4321", None, None, None, None, None, "r1"),
+        ("P1", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, None, None, None, None, "r1"),
+        ("P2", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, None, None, None, None, "r1"),
+        ("P3", "Amy", "Lee", "1975-03-03", "1234", None, None, None, None, None, None, None, None, None, "r1"),
+        ("P4", "John", "Smith", "1985-05-05", "4321", None, None, None, None, None, None, None, None, None, "r1"),
     ])
     backend.insert_review_candidates([
         ("P3", "P5", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t1", None, None),

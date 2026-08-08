@@ -101,6 +101,12 @@ CREATE TABLE IF NOT EXISTS record_attrs (
     address1     TEXT,
     sex          TEXT,
     phone        TEXT,
+    middle_name  TEXT,
+    suffix       TEXT,
+    city         TEXT,
+    -- JSON array of every cleaned phone (`Phones_set`), not just the primary
+    -- `phone` above — see `publish._attrs_row`.
+    phones       TEXT,
     run_id       TEXT NOT NULL
 );
 
@@ -216,6 +222,16 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "prev_mid": "TEXT",
         "undo_of": "INTEGER",
     },
+    # Display-only fields added for the feature-comparison table. An existing
+    # `empi.db` gets them as all-NULL until the run is re-published
+    # (`python -m src.api.ingest.publish_local --run-id <run_id>`), which
+    # upserts every `record_attrs` row.
+    "record_attrs": {
+        "middle_name": "TEXT",
+        "suffix": "TEXT",
+        "city": "TEXT",
+        "phones": "TEXT",
+    },
 }
 
 
@@ -296,13 +312,16 @@ _MEMBER_UPSERT_SQL = """
 _ATTRS_UPSERT_SQL = """
     INSERT INTO record_attrs
         (patid, first_name, last_name, birth_date, ssn_last4, email,
-         zip_code, address1, sex, phone, run_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         zip_code, address1, sex, phone, middle_name, suffix, city, phones,
+         run_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(patid) DO UPDATE SET
         first_name=excluded.first_name, last_name=excluded.last_name,
         birth_date=excluded.birth_date, ssn_last4=excluded.ssn_last4,
         email=excluded.email, zip_code=excluded.zip_code,
         address1=excluded.address1, sex=excluded.sex, phone=excluded.phone,
+        middle_name=excluded.middle_name, suffix=excluded.suffix,
+        city=excluded.city, phones=excluded.phones,
         run_id=excluded.run_id
 """
 
@@ -374,12 +393,17 @@ def upsert_record_attrs(
     sex: str | None,
     run_id: str,
     phone: str | None = None,
+    middle_name: str | None = None,
+    suffix: str | None = None,
+    city: str | None = None,
+    phones: str | None = None,
 ) -> None:
     conn.execute(
         _ATTRS_UPSERT_SQL,
         (
             patid, first_name, last_name, birth_date, ssn_last4, email,
-            zip_code, address1, sex, phone, run_id,
+            zip_code, address1, sex, phone, middle_name, suffix, city, phones,
+            run_id,
         ),
     )
 
@@ -481,6 +505,21 @@ _DEDUPED_REVIEW_CANDIDATE = """
     ) WHERE rn = 1
 """
 
+#: The `record_attrs` display columns, aliased `a_*`/`b_*` for a pair query.
+#: Shared by the two pair readers below so a column added to `record_attrs`
+#: can't reach one route's payload and silently miss the other's.
+#: `run_id` is deliberately excluded (it describes the row's provenance, not
+#: the patient) — see `parquet_backend._DISPLAY_ATTR_COLUMNS`, its counterpart.
+_PAIR_ATTR_SELECT = ",\n".join(
+    f"               ra_{side}.{col} AS {side}_{col}"
+    for side in ("a", "b")
+    for col in (
+        "first_name", "last_name", "birth_date", "ssn_last4", "email",
+        "zip_code", "address1", "sex", "phone", "middle_name", "suffix",
+        "city", "phones",
+    )
+)
+
 
 def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[dict]:
     """Every review-candidate pair touching `patid`, joined to `record_attrs`
@@ -489,14 +528,7 @@ def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[di
     rows = conn.execute(
         f"""
         SELECT rc.*,
-               ra_a.first_name AS a_first_name, ra_a.last_name AS a_last_name,
-               ra_a.birth_date AS a_birth_date, ra_a.ssn_last4 AS a_ssn_last4,
-               ra_a.email AS a_email, ra_a.zip_code AS a_zip_code,
-               ra_a.address1 AS a_address1, ra_a.sex AS a_sex, ra_a.phone AS a_phone,
-               ra_b.first_name AS b_first_name, ra_b.last_name AS b_last_name,
-               ra_b.birth_date AS b_birth_date, ra_b.ssn_last4 AS b_ssn_last4,
-               ra_b.email AS b_email, ra_b.zip_code AS b_zip_code,
-               ra_b.address1 AS b_address1, ra_b.sex AS b_sex, ra_b.phone AS b_phone
+{_PAIR_ATTR_SELECT}
         FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
@@ -593,14 +625,7 @@ def list_review_candidates(
     rows = conn.execute(
         f"""
         SELECT rc.*, ema.mid AS mid_a, emb.mid AS mid_b,
-               ra_a.first_name AS a_first_name, ra_a.last_name AS a_last_name,
-               ra_a.birth_date AS a_birth_date, ra_a.ssn_last4 AS a_ssn_last4,
-               ra_a.email AS a_email, ra_a.zip_code AS a_zip_code,
-               ra_a.address1 AS a_address1, ra_a.sex AS a_sex, ra_a.phone AS a_phone,
-               ra_b.first_name AS b_first_name, ra_b.last_name AS b_last_name,
-               ra_b.birth_date AS b_birth_date, ra_b.ssn_last4 AS b_ssn_last4,
-               ra_b.email AS b_email, ra_b.zip_code AS b_zip_code,
-               ra_b.address1 AS b_address1, ra_b.sex AS b_sex, ra_b.phone AS b_phone,
+{_PAIR_ATTR_SELECT},
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = ema.mid) AS member_count_a,
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = emb.mid) AS member_count_b,
                {reviewed_expr} AS reviewed
@@ -659,7 +684,8 @@ def get_entity(conn: sqlite3.Connection, mid: str) -> dict | None:
         """
         SELECT em.patid, em.is_primary, em.added_by, em.updated_utc,
                ra.first_name, ra.last_name, ra.birth_date, ra.ssn_last4,
-               ra.email, ra.zip_code, ra.address1, ra.sex, ra.phone
+               ra.email, ra.zip_code, ra.address1, ra.sex, ra.phone,
+               ra.middle_name, ra.suffix, ra.city, ra.phones
         FROM entity_member em
         LEFT JOIN record_attrs ra ON ra.patid = em.patid
         WHERE em.mid = ?

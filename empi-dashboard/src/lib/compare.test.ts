@@ -48,3 +48,64 @@ describe("compareRecords birthdate display", () => {
     expect(rows.find((r) => r.label === "SSN")!.valueA).toBe("***-**-0042");
   });
 });
+
+const phoneRow = (a: ExplainPatient, b: ExplainPatient) =>
+  compareRecords(a, b).find((r) => r.label === "Phones")!;
+
+describe("compareRecords phones", () => {
+  it("lists every phone, not just the primary one", () => {
+    const row = phoneRow(
+      patient({ phone: "3125551234", phones: ["3125551234", "7735559999"] }),
+      patient({ phone: "3125551234", phones: ["3125551234", "7735559999"] }),
+    );
+    expect(row.valueA).toBe("3125551234, 7735559999");
+    expect(row.result).toBe("exact");
+  });
+
+  it("reports overlapping-but-unequal sets as partial, not different", () => {
+    const row = phoneRow(
+      patient({ phones: ["3125551234", "7735559999"] }),
+      patient({ phones: ["7735559999"] }),
+    );
+    expect(row.result).toBe("partial");
+  });
+
+  it("reports disjoint sets as different", () => {
+    const row = phoneRow(
+      patient({ phones: ["3125551234"] }),
+      patient({ phones: ["7735559999"] }),
+    );
+    expect(row.result).toBe("different");
+  });
+
+  it("falls back to the primary phone when the set is absent", () => {
+    const row = phoneRow(
+      patient({ phone: "3125551234" }),
+      patient({ phone: "3125551234" }),
+    );
+    expect(row.valueA).toBe("3125551234");
+    expect(row.result).toBe("exact");
+  });
+
+  it("treats an empty set on either side as missing", () => {
+    const row = phoneRow(
+      patient({ phones: ["3125551234"] }),
+      patient({ phones: [] }),
+    );
+    expect(row.valueB).toBe("(missing)");
+    expect(row.result).toBe("missing");
+  });
+});
+
+describe("compareRecords added identity fields", () => {
+  it("compares middle name, suffix and city", () => {
+    const rows = compareRecords(
+      patient({ middle_name: "Ann", suffix: "JR", city: "Chicago" }),
+      patient({ middle_name: "Anne", suffix: "JR", city: null }),
+    );
+    const byLabel = (label: string) => rows.find((r) => r.label === label)!;
+    expect(byLabel("Middle name").result).toBe("different");
+    expect(byLabel("Suffix").result).toBe("exact");
+    expect(byLabel("City").result).toBe("missing");
+  });
+});

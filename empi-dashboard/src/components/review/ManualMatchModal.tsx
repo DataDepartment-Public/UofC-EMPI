@@ -92,14 +92,18 @@ export function ManualMatchModal({
                       setSelected({
                         patid: primary.patid,
                         first_name: primary.first_name ?? null,
+                        middle_name: primary.middle_name ?? null,
                         last_name: primary.last_name ?? null,
+                        suffix: primary.suffix ?? null,
                         birth_date: primary.birth_date ?? null,
                         ssn_last4: primary.ssn_last4 ?? null,
                         email: primary.email ?? null,
                         zip_code: primary.zip_code ?? null,
+                        city: primary.city ?? null,
                         address1: primary.address1 ?? null,
                         sex: primary.sex ?? null,
                         phone: primary.phone ?? null,
+                        phones: primary.phones ?? null,
                       })
                     }
                     className="flex w-full items-center justify-between rounded-md border border-line px-3 py-2 text-left text-[13px] hover:border-brand-blue hover:bg-bg"

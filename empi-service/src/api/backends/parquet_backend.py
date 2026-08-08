@@ -52,7 +52,8 @@ _SCHEMAS: dict[str, list[str]] = {
     "entity_suggestion": ["patid", "run_id", "suggested_mid", "created_utc"],
     "record_attrs": [
         "patid", "first_name", "last_name", "birth_date", "ssn_last4",
-        "email", "zip_code", "address1", "sex", "phone", "run_id",
+        "email", "zip_code", "address1", "sex", "phone", "middle_name",
+        "suffix", "city", "phones", "run_id",
     ],
     "record_raw": ["patid", "raw_json", "run_id"],
     "audit_log": [
@@ -90,7 +91,8 @@ _REVIEW_CANDIDATE_FS_COLUMNS: list[str] = [
 #: (which also never pulls `record_attrs.run_id` into a member/candidate row).
 _DISPLAY_ATTR_COLUMNS: list[str] = [
     "patid", "first_name", "last_name", "birth_date", "ssn_last4",
-    "email", "zip_code", "address1", "sex", "phone",
+    "email", "zip_code", "address1", "sex", "phone", "middle_name",
+    "suffix", "city", "phones",
 ]
 
 

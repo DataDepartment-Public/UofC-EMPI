@@ -13,6 +13,7 @@ Coverage:
     - Raw fields land in record_raw.
 """
 
+import json
 import sqlite3
 
 import pandas as pd
@@ -70,7 +71,16 @@ def _write_run(settings: Settings, run_id: str):
         "ZipCD_clean_base": ["60601", "60601", None, None, None],
         "AddressLine1_clean": [None, None, None, None, None],
         "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE", "FEMALE", "FEMALE"],
-        "Phones_set": [set(), set(), set(), set(), set()],
+        # Display-only fields (`publish.MIDDLE_NM_CLEAN` & co) — no stage
+        # matches on them; they exist so the dashboard's comparison table can
+        # show them. P1 carries a second phone the primary column can't hold.
+        "MiddleNM_clean": ["Ann", None, None, None, None],
+        "SuffixNM_clean": ["JR", None, None, None, None],
+        "CityNM_clean": ["Chicago", "Chicago", None, None, None],
+        "PrimaryPhoneNBR_clean": ["3125551234", "3125551234", None, None, None],
+        "Phones_set": [
+            ["3125551234", "7735559999"], ["3125551234"], [], [], [],
+        ],
         "FirstNM_raw": ["JANE", "JANE", "JOHN", "AMY", "AMY"],
         "SSN_raw": ["123-45-6789", "123456789", None, None, None],
         "valid_record": [True, True, True, True, True],
@@ -373,6 +383,12 @@ class TestPublishRun:
         assert row["first_name"] == "Jane"
         assert row["ssn_last4"] == "6789"
         assert row["birth_date"] == "1990-01-01"
+        assert row["middle_name"] == "Ann"
+        assert row["suffix"] == "JR"
+        assert row["city"] == "Chicago"
+        # The full phone set, not just `phone`'s single primary number.
+        assert row["phone"] == "3125551234"
+        assert json.loads(row["phones"]) == ["3125551234", "7735559999"]
 
     def test_raw_fields_denormalized(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -496,6 +512,10 @@ class TestPublishAgainstParquetBackend:
         assert row["first_name"] == "Jane"
         assert row["ssn_last4"] == "6789"
         assert row["birth_date"] == "1990-01-01"
+        assert row["middle_name"] == "Ann"
+        assert row["suffix"] == "JR"
+        assert row["city"] == "Chicago"
+        assert json.loads(row["phones"]) == ["3125551234", "7735559999"]
 
     def test_raw_fields_denormalized(self, parquet_backend, fixture_settings):
         _write_run(fixture_settings, "r1")

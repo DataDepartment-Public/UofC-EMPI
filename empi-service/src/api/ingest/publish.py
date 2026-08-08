@@ -114,6 +114,14 @@ RAW_COLUMNS: tuple[str, ...] = (
 #: NAME_DOB_PHONE rule's "key matching feature" display.
 PHONE_CLEAN = "PrimaryPhoneNBR_clean"
 
+#: Cleaned columns no pipeline stage matches on, carried into `record_attrs`
+#: purely so the dashboard's feature-comparison table can show a reviewer the
+#: fields they'd check by eye. Like `PHONE_CLEAN`, not in contracts.py — a
+#: stage boundary doesn't depend on them.
+MIDDLE_NM_CLEAN = "MiddleNM_clean"
+SUFFIX_NM_CLEAN = "SuffixNM_clean"
+CITY_CLEAN = "CityNM_clean"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -215,6 +223,13 @@ def _attrs_row(patid: str, attrs_by_patid: dict[str, dict], run_id: str) -> tupl
         _clean_str(row.get(ADDRESS1)),
         _clean_str(row.get(SEX)),
         _clean_str(row.get(PHONE_CLEAN)),
+        _clean_str(row.get(MIDDLE_NM_CLEAN)),
+        _clean_str(row.get(SUFFIX_NM_CLEAN)),
+        _clean_str(row.get(CITY_CLEAN)),
+        # The full multi-phone set, not just `PHONE_CLEAN`'s primary: a pair
+        # can match on B5 / NAME_DOB_PHONE through a secondary number, and a
+        # reviewer shown only the primary would read that as disagreement.
+        json.dumps(sorted(_parse_phone_set(row.get(PHONES)))),
         run_id,
     )
 

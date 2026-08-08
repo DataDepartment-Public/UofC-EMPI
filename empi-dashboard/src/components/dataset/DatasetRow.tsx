@@ -107,14 +107,18 @@ function toExplainPatient(m: EntityMember): ExplainPatient {
   return {
     patid: m.patid,
     first_name: m.first_name ?? null,
+    middle_name: m.middle_name ?? null,
     last_name: m.last_name ?? null,
+    suffix: m.suffix ?? null,
     birth_date: m.birth_date ?? null,
     ssn_last4: m.ssn_last4 ?? null,
     email: m.email ?? null,
     zip_code: m.zip_code ?? null,
+    city: m.city ?? null,
     address1: m.address1 ?? null,
     sex: m.sex ?? null,
     phone: m.phone ?? null,
+    phones: m.phones ?? null,
   };
 }
 

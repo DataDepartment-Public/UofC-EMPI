@@ -37,6 +37,41 @@ from src.config import Settings
 router = APIRouter(tags=["records"])
 
 
+def _phones(raw: object) -> list[str]:
+    """`record_attrs.phones` (a JSON array, stored as TEXT) -> `list[str]`.
+    NULL for a row written before the column existed, or by a backend that
+    round-trips a missing Parquet value as NaN — both mean "not known", which
+    is the empty list, not an error."""
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [str(p) for p in parsed] if isinstance(parsed, list) else []
+
+
+def _candidate_patient(rc: dict, side: str) -> CandidatePatient:
+    """One side of a review-candidate row, whose `record_attrs` columns the
+    backends alias `a_*`/`b_*` (`sql_backend._PAIR_ATTR_SELECT`)."""
+    return CandidatePatient(
+        patid=rc[f"patid_{side}"],
+        first_name=rc[f"{side}_first_name"],
+        middle_name=rc.get(f"{side}_middle_name"),
+        last_name=rc[f"{side}_last_name"],
+        suffix=rc.get(f"{side}_suffix"),
+        birth_date=rc[f"{side}_birth_date"],
+        ssn_last4=rc[f"{side}_ssn_last4"],
+        email=rc[f"{side}_email"],
+        zip_code=rc[f"{side}_zip_code"],
+        city=rc.get(f"{side}_city"),
+        address1=rc[f"{side}_address1"],
+        sex=rc[f"{side}_sex"],
+        phone=rc[f"{side}_phone"],
+        phones=_phones(rc.get(f"{side}_phones")),
+    )
+
+
 def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict]) -> Entity:
     review_candidates: dict[tuple, ReviewCandidate] = {}
     for m in member_rows:
@@ -50,20 +85,8 @@ def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict])
                 fs_classification_tier=rc.get("fs_classification_tier"),
                 ml_match_probability=rc.get("ml_match_probability"),
                 ml_classification_tier=rc.get("ml_classification_tier"),
-                patient_a=CandidatePatient(
-                    patid=rc["patid_a"], first_name=rc["a_first_name"],
-                    last_name=rc["a_last_name"], birth_date=rc["a_birth_date"],
-                    ssn_last4=rc["a_ssn_last4"], email=rc["a_email"],
-                    zip_code=rc["a_zip_code"], address1=rc["a_address1"],
-                    sex=rc["a_sex"], phone=rc["a_phone"],
-                ),
-                patient_b=CandidatePatient(
-                    patid=rc["patid_b"], first_name=rc["b_first_name"],
-                    last_name=rc["b_last_name"], birth_date=rc["b_birth_date"],
-                    ssn_last4=rc["b_ssn_last4"], email=rc["b_email"],
-                    zip_code=rc["b_zip_code"], address1=rc["b_address1"],
-                    sex=rc["b_sex"], phone=rc["b_phone"],
-                ),
+                patient_a=_candidate_patient(rc, "a"),
+                patient_b=_candidate_patient(rc, "b"),
             )
 
     return Entity(
@@ -82,14 +105,18 @@ def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict])
                 added_by=m["added_by"],
                 updated_utc=m["updated_utc"],
                 first_name=m.get("first_name"),
+                middle_name=m.get("middle_name"),
                 last_name=m.get("last_name"),
+                suffix=m.get("suffix"),
                 birth_date=m.get("birth_date"),
                 ssn_last4=m.get("ssn_last4"),
                 email=m.get("email"),
                 zip_code=m.get("zip_code"),
+                city=m.get("city"),
                 address1=m.get("address1"),
                 sex=m.get("sex"),
                 phone=m.get("phone"),
+                phones=_phones(m.get("phones")),
             )
             for m in member_rows
         ],
@@ -109,20 +136,8 @@ def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
         ml_match_probability=rc.get("ml_match_probability"),
         ml_classification_tier=rc.get("ml_classification_tier"),
         reviewed=bool(rc["reviewed"]),
-        patient_a=CandidatePatient(
-            patid=rc["patid_a"], first_name=rc["a_first_name"],
-            last_name=rc["a_last_name"], birth_date=rc["a_birth_date"],
-            ssn_last4=rc["a_ssn_last4"], email=rc["a_email"],
-            zip_code=rc["a_zip_code"], address1=rc["a_address1"],
-            sex=rc["a_sex"], phone=rc["a_phone"],
-        ),
-        patient_b=CandidatePatient(
-            patid=rc["patid_b"], first_name=rc["b_first_name"],
-            last_name=rc["b_last_name"], birth_date=rc["b_birth_date"],
-            ssn_last4=rc["b_ssn_last4"], email=rc["b_email"],
-            zip_code=rc["b_zip_code"], address1=rc["b_address1"],
-            sex=rc["b_sex"], phone=rc["b_phone"],
-        ),
+        patient_a=_candidate_patient(rc, "a"),
+        patient_b=_candidate_patient(rc, "b"),
     )
 
 

@@ -76,14 +76,23 @@ class ModelStatusResponse(BaseModel):
 
 class RecordAttrs(BaseModel):
     first_name: str | None = None
+    middle_name: str | None = None
     last_name: str | None = None
+    suffix: str | None = None
     birth_date: str | None = None
     ssn_last4: str | None = None
     email: str | None = None
     zip_code: str | None = None
+    city: str | None = None
     address1: str | None = None
     sex: str | None = None
+    #: The primary cleaned phone (`PrimaryPhoneNBR_clean`) — one number.
     phone: str | None = None
+    #: Every cleaned phone on the record (`Phones_set`), the set B5 blocking
+    #: and the NAME_DOB_PHONE rule actually intersect on. Empty when the
+    #: record has no phone, or when `record_attrs` predates the column and the
+    #: run hasn't been re-published (see `sql_backend._COLUMN_MIGRATIONS`).
+    phones: list[str] = Field(default_factory=list)
 
 
 class EntityMember(RecordAttrs):

@@ -152,12 +152,14 @@ class TestListEntities:
         postgres_backend.upsert_entity(conn, "M-1", "r1", "deterministic", True, 0.9, "t0")
         postgres_backend.upsert_entity_member(conn, "P1", "M-1", True, "pipeline", "t0")
         postgres_backend.upsert_record_attrs_bulk(conn, [(
-            "P1", "Jane", "Doe", "1990-01-01", "1234", None, None, None, None, None, "r1",
+            "P1", "Jane", "Doe", "1990-01-01", "1234", None, None, None, None, None,
+            None, None, None, None, "r1",
         )])
         postgres_backend.upsert_entity(conn, "M-2", "r1", "none", False, None, "t0")
         postgres_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
         postgres_backend.upsert_record_attrs_bulk(conn, [(
-            "P2", "John", "Smith", None, None, None, None, None, None, None, "r1",
+            "P2", "John", "Smith", None, None, None, None, None, None, None,
+            None, None, None, None, "r1",
         )])
         conn.commit()
 

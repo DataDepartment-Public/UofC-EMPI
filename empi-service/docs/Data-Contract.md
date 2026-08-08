@@ -750,6 +750,8 @@ does a per-request read of the full cleaned Parquet.
 |---|---|---|---|
 | `patid` | string | no (key) | |
 | `first_name`, `last_name`, `birth_date`, `ssn_last4`, `email`, `zip_code`, `address1`, `sex`, `phone` | string | yes | `birth_date` pre-formatted `YYYY-MM-DD`; `phone` is `PrimaryPhoneNBR_clean`. |
+| `middle_name`, `suffix`, `city` | string | yes | `MiddleNM_clean` / `SuffixNM_clean` / `CityNM_clean`. Display-only — no stage matches on them; they exist so the dashboard's feature-comparison table can show the fields a reviewer checks by eye. |
+| `phones` | string | yes | `json.dumps(sorted(Phones_set))` — **every** cleaned phone, not just `phone`'s primary. This is the set B5 blocking and `NAME_DOB_PHONE` intersect on, so a pair can agree here while disagreeing on `phone`; showing only the primary would render that agreement as a disagreement. |
 | `run_id` | string | no | |
 
 Backends: SQLite — IMPLEMENTED (`store.upsert_record_attrs_bulk`). Parquet —
@@ -757,6 +759,13 @@ IMPLEMENTED (`ParquetIndexBackend.upsert_record_attrs_bulk`). Upsert
 semantics by `patid` on both (a batch publish replaces existing rows for the
 patids it touches — values can legitimately change run to run for the same
 patid — via a batched filter-then-concat, not a per-row loop).
+
+`middle_name`/`suffix`/`city`/`phones` were added after the table's original
+release, so an index published before them carries the columns as NULL
+(`sql_backend._COLUMN_MIGRATIONS` adds them in place rather than requiring a
+wipe). Re-publishing the run — `python -m src.api.ingest.publish_local
+--run-id <run_id>` — backfills every row; until then the API returns `null` /
+`[]` for them and the dashboard falls back to `phone` for the Phones row.
 
 `record_raw` — the "View Raw Data" drawer's un-scrubbed source fields, one
 JSON blob per PATID.

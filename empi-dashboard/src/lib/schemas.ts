@@ -41,14 +41,26 @@ export type RunDetail = z.infer<typeof RunDetailSchema>;
 
 const recordAttrsFields = {
   first_name: z.string().nullable().optional(),
+  middle_name: z.string().nullable().optional(),
   last_name: z.string().nullable().optional(),
+  suffix: z.string().nullable().optional(),
   birth_date: z.string().nullable().optional(),
   ssn_last4: z.string().nullable().optional(),
   email: z.string().nullable().optional(),
   zip_code: z.string().nullable().optional(),
+  city: z.string().nullable().optional(),
   address1: z.string().nullable().optional(),
   sex: z.string().nullable().optional(),
+  /** The single primary cleaned phone. `phones` is the full set. */
   phone: z.string().nullable().optional(),
+  /**
+   * Every cleaned phone on the record — the set B5 blocking and the
+   * NAME_DOB_PHONE rule intersect on, so a pair can agree here while
+   * disagreeing on `phone`. Optional rather than defaulted so a payload
+   * predating the field (an index published before the column existed)
+   * still parses; `compareRecords` falls back to `phone`.
+   */
+  phones: z.array(z.string()).nullable().optional(),
 };
 
 export const RecordAttrsSchema = z.object(recordAttrsFields);

@@ -3,6 +3,9 @@ import { SsnReveal } from "./SsnReveal";
 
 const RESULT_STYLE: Record<ComparisonRow["result"], { label: string; className: string }> = {
   exact: { label: "Exact match", className: "text-status-auto font-bold" },
+  // Only a multi-valued field (Phones) can land here: the two sets overlap
+  // without being equal, which supports a duplicate without confirming one.
+  partial: { label: "Some shared", className: "text-status-review font-bold" },
   different: { label: "Different", className: "text-status-nomatch font-bold" },
   missing: { label: "One or both missing", className: "text-gray font-semibold" },
 };
@@ -40,26 +43,41 @@ export function FeatureComparisonTable({
           const isSsnRow = row.label.startsWith("SSN") && patidA && patidB;
           return (
             <tr key={row.label} className="border-b border-line last:border-none">
-              <td className="py-2.5 font-bold text-ink-2">{row.label}</td>
-              <td className="py-2.5 text-gray-2">
+              <td className="py-2.5 align-top font-bold text-ink-2">{row.label}</td>
+              <td className="py-2.5 align-top text-gray-2">
                 {isSsnRow ? (
                   <SsnReveal patid={patidA} masked={row.valueA} />
                 ) : (
-                  row.valueA
+                  <Value text={row.valueA} values={row.valuesA} />
                 )}
               </td>
-              <td className="py-2.5 text-gray-2">
+              <td className="py-2.5 align-top text-gray-2">
                 {isSsnRow ? (
                   <SsnReveal patid={patidB} masked={row.valueB} />
                 ) : (
-                  row.valueB
+                  <Value text={row.valueB} values={row.valuesB} />
                 )}
               </td>
-              <td className={`py-2.5 ${style.className}`}>{style.label}</td>
+              <td className={`py-2.5 align-top ${style.className}`}>{style.label}</td>
             </tr>
           );
         })}
       </tbody>
     </table>
+  );
+}
+
+/** A multi-valued field (`values`) is stacked one entry per line — a record
+ * can carry four phone numbers, and comma-joining them onto one line makes
+ * the two sides impossible to scan against each other. Anything else renders
+ * as the plain string it already was. */
+function Value({ text, values }: { text: string; values?: string[] }) {
+  if (!values || values.length === 0) return <>{text}</>;
+  return (
+    <div className="flex flex-col gap-0.5">
+      {values.map((v) => (
+        <span key={v}>{v}</span>
+      ))}
+    </div>
   );
 }

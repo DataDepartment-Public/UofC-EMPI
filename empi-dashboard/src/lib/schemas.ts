@@ -285,6 +285,72 @@ export const PairExplanationSchema = z.object({
 });
 export type PairExplanation = z.infer<typeof PairExplanationSchema>;
 
+// ── Cluster pair trace (GET /clusters/{mid}/pairs) ───────────────────────────
+/** Every verdict the backend can assign a pair, most decisive stage first —
+ * mirrors `CLUSTER_PAIR_VERDICTS` in `src/api/schemas.py`, and the order the
+ * comparisons list sorts by. Kept as a `z.enum` rather than a bare string so
+ * a backend that adds a rung fails the parse loudly instead of falling
+ * through the UI's badge map to an unstyled label. */
+export const ClusterPairVerdictSchema = z.enum([
+  "auto_merge_rule",
+  "reject",
+  "ml_auto_merge",
+  "ml_human_review",
+  "gate_dropped",
+  "blocked_undecided",
+  "not_compared",
+]);
+export type ClusterPairVerdict = z.infer<typeof ClusterPairVerdictSchema>;
+
+export const ClusterPairSchema = z.object({
+  patid_a: z.string(),
+  patid_b: z.string(),
+  verdict: ClusterPairVerdictSchema,
+  blocked: z.boolean(),
+  source_blocks: z.string().nullable().optional(),
+  n_blocks: z.number().nullable().optional(),
+  match_rule: z.string().nullable().optional(),
+  rules_fired: z.string().nullable().optional(),
+  confidence: z.number().nullable().optional(),
+  reject_rule: z.string().nullable().optional(),
+  n_contradictions: z.number().nullable().optional(),
+  gate_score: z.number().nullable().optional(),
+  gate_tier: z.string().nullable().optional(),
+  ml_score: z.number().nullable().optional(),
+  ml_tier: z.string().nullable().optional(),
+  joined_by: z.enum(["pipeline", "reviewer"]).default("pipeline"),
+  reviewer_id: z.string().nullable().optional(),
+  reviewer_ts_utc: z.string().nullable().optional(),
+});
+export type ClusterPair = z.infer<typeof ClusterPairSchema>;
+
+/** A comparison between a cluster member and a record that ended up
+ * elsewhere. Same stage fields as `ClusterPair`, plus which side is ours and
+ * who the counterpart is. Never carries a `not_compared` verdict — the
+ * backend builds this list from artifact rows, so a pair only appears if some
+ * stage actually looked at it. */
+export const ClusterExternalPairSchema = ClusterPairSchema.extend({
+  member_patid: z.string(),
+  other_patid: z.string(),
+  other_mid: z.string().nullable().optional(),
+  other_first_name: z.string().nullable().optional(),
+  other_last_name: z.string().nullable().optional(),
+  other_birth_date: z.string().nullable().optional(),
+  other_ssn_last4: z.string().nullable().optional(),
+});
+export type ClusterExternalPair = z.infer<typeof ClusterExternalPairSchema>;
+
+export const ClusterPairsResponseSchema = z.object({
+  mid: z.string(),
+  run_id: z.string().nullable().optional(),
+  artifacts_available: z.boolean(),
+  members: z.array(z.string()).default([]),
+  thresholds: z.record(z.string(), z.number()).default({}),
+  pairs: z.array(ClusterPairSchema).default([]),
+  external_pairs: z.array(ClusterExternalPairSchema).default([]),
+});
+export type ClusterPairsResponse = z.infer<typeof ClusterPairsResponseSchema>;
+
 // ── Admin (GET/PUT /admin/thresholds) ────────────────────────────────────────
 export const ThresholdSettingsSchema = z.object({
   gate_threshold: z.number().min(0).max(1),

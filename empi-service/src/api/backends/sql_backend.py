@@ -185,6 +185,13 @@ CREATE TABLE IF NOT EXISTS cleaned_attrs (
 """
 
 
+#: How long a blocked writer waits for the lock before giving up. Generous on
+#: purpose: the alternative to waiting is a 500 the user sees, and every write
+#: in this schema is a small single-row statement, so a queue this deep only
+#: forms under a burst of concurrent requests — exactly the case to absorb.
+_BUSY_TIMEOUT_MS = 5000
+
+
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Open one SQLite connection. Callers own its lifecycle (one per request
     or per script run) — this module never pools connections.
@@ -198,12 +205,53 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     intermittently raises `sqlite3.ProgrammingError: SQLite objects created
     in a thread can only be used in that same thread.` when it lands on a
     different thread than the one that opened the connection.
+
+    `busy_timeout`: SQLite allows one writer at a time and, by default, fails
+    a blocked writer *immediately* with `OperationalError: database is locked`
+    rather than waiting. Several of our read routes are secretly writers —
+    `GET /records/{patid}/raw` and `/ssn-clean` each append an audit row — so
+    a page that opens N records at once fires N concurrent writes and loses
+    all but one to a 500. (The Patient Registry's raw comparison panel does
+    exactly that for every member of a cluster; the Review Queue's two-record
+    version mostly got away with it.) The timeout makes a blocked writer wait
+    and retry instead, which is the intended behavior: every write here is a
+    single-row statement measured in microseconds, so they queue rather than
+    collide.
+
+    `journal_mode = WAL`: lets readers proceed while a writer holds the lock,
+    so one request's audit insert can't stall an unrelated `GET /records` on
+    another. Persistent — it is a property of the database file, not the
+    connection — so re-setting it per connection is a cheap no-op.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
+
+
+def begin(conn: sqlite3.Connection) -> None:
+    """Open a write transaction, taking the write lock up front.
+
+    `BEGIN IMMEDIATE`, not the default `BEGIN DEFERRED`, and the difference is
+    the whole point. Every caller of this is a read-modify-write: `/audit/merge`
+    reads the entity then updates it, `GET /records/{patid}/raw` looks up the
+    patid's mid then inserts an audit row. Under a deferred transaction that
+    sequence takes a SHARED lock on the read and only then tries to upgrade to
+    RESERVED for the write — and when another connection already holds
+    RESERVED, SQLite returns `SQLITE_BUSY` *immediately* on the upgrade instead
+    of waiting, because two readers both waiting to upgrade would deadlock.
+    `busy_timeout` cannot rescue that case; it only applies to a lock that can
+    be acquired by waiting.
+
+    Taking the write lock at `BEGIN` removes the upgrade step, so concurrent
+    writers queue on `busy_timeout` (see `get_connection`) and succeed in turn.
+    The cost is that write transactions serialize — which they already did;
+    they just used to serialize by failing.
+    """
+    conn.execute("BEGIN IMMEDIATE")
 
 
 #: Columns added to a table after its original release — `CREATE TABLE IF NOT
@@ -708,6 +756,7 @@ def list_entities(
     updated_before: str | None = None,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    min_members: int | None = None,
     sort: str | None = None,
     page: int = 1,
     page_size: int = 50,
@@ -726,6 +775,12 @@ def list_entities(
       * `is_merged` — merge status, independent of origin (a reviewer-merge is
         `origin='merge'` AND `is_merged=1`; this lets a caller ask for "any
         merged entity" without caring how it got there).
+      * `min_members` — entities with at least this many members. **Not a
+        synonym for `is_merged`**: `publish.py` sets `is_merged` from the
+        count of *unlocked* patids, so a cluster whose members a reviewer has
+        touched can hold three records and still be `is_merged=0` (168 of 762
+        multi-record clusters in run `uidev3`). A caller that means "clusters
+        with something to compare" wants this filter, not that flag.
       * `birth_date` — exact `YYYY-MM-DD` match against any member.
       * `ssn_last4` — exact 4-digit match against any member.
       * `updated_after` / `updated_before` — ISO-8601 bounds on `updated_utc`.
@@ -761,6 +816,14 @@ def list_entities(
     if confidence_max is not None:
         where.append("e.confidence <= ?")
         params.append(confidence_max)
+    if min_members is not None:
+        # A correlated subquery rather than a HAVING on the page query's
+        # GROUP BY: the same predicate has to narrow the COUNT(*) below, and
+        # that query has no GROUP BY to hang a HAVING on.
+        where.append(
+            "(SELECT COUNT(*) FROM entity_member em5 WHERE em5.mid = e.mid) >= ?"
+        )
+        params.append(min_members)
     tokens = search_tokens(search)
     if tokens:
         # Every token must match the *same* member, each token free to match a

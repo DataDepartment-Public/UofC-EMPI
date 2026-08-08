@@ -11,7 +11,7 @@ import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTab
 /** "Find a match manually" — search for and propose a match between two
  * records blocking never paired, not just merge auto-suggested candidates.
  * Reuses `compareRecords`/`FeatureComparisonTable` for the preview and hands
- * off to the caller's existing `onMerge` (the same callback `DatasetRow`
+ * off to the caller's existing `onMerge` (the same callback the review page
  * already wires to `MergeModal`'s confirmation) rather than building a
  * second confirm step. */
 export function ManualMatchModal({

@@ -367,6 +367,7 @@ class ParquetIndexBackend:
         updated_before: str | None = None,
         confidence_min: float | None = None,
         confidence_max: float | None = None,
+        min_members: int | None = None,
         sort: str | None = None,
         page: int = 1,
         page_size: int = 50,
@@ -430,10 +431,18 @@ class ParquetIndexBackend:
             ssn_mids = set(joined_members.loc[joined_members["ssn_last4"] == ssn_last4, "mid"])
             mask &= entities["mid"].isin(ssn_mids)
 
+        member_counts = members.groupby("mid").size().rename("member_count")
+
+        if min_members is not None:
+            # Applied to `mask`, before `total` is taken — the SQL stores put
+            # this in their WHERE clause, so it has to narrow the count as
+            # well as the page, not just the rows that get returned.
+            big_enough = set(member_counts[member_counts >= min_members].index)
+            mask &= entities["mid"].isin(big_enough)
+
         filtered = entities[mask]
         total = len(filtered)
 
-        member_counts = members.groupby("mid").size().rename("member_count")
         filtered = filtered.merge(member_counts, on="mid", how="left")
         filtered["member_count"] = filtered["member_count"].fillna(0).astype(int)
 

@@ -9,11 +9,10 @@ import { RESULT_STYLE } from "./FeatureComparisonTable";
  * in a candidate pair, side by side under the cleaned-value feature
  * comparison, with the same Result column.
  *
- * This replaces the single-record `RawDataDrawer` on the review panel. A
- * reviewer deciding a pair is always asking "do these two agree?", and a
- * drawer showing one side's raw fields alone can't answer that — they had to
- * hold one record's values in their head. `RawDataDrawer` still serves the
- * Patient Registry, where the question really is about one record.
+ * A reviewer deciding a pair is always asking "do these two agree?", and the
+ * single-record raw drawer this replaced couldn't answer that — they had to
+ * hold one record's values in their head. The Patient Registry does the same
+ * thing across N records in `dataset/ClusterRawPanel`.
  *
  * SSN is shown in full, exactly as the drawer does: `GET /records/{patid}/raw`
  * returns the un-scrubbed source payload and audit-logs the view, which is

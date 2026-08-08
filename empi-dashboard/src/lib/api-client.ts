@@ -9,6 +9,8 @@ import {
   AuditLogRowSchema,
   CleanSsn,
   CleanSsnSchema,
+  ClusterPairsResponse,
+  ClusterPairsResponseSchema,
   DashboardSummary,
   DashboardSummarySchema,
   DismissResponseSchema,
@@ -104,6 +106,11 @@ export interface RecordsFilters {
   ssn_last4?: string;
   confidence_min?: number;
   confidence_max?: number;
+  /** Clusters with at least this many members. The Patient Registry's
+   * "something to compare" filter — deliberately not `is_merged`, which the
+   * backend derives from the *unlocked* member count at publish time and so
+   * misses any multi-record cluster a reviewer has already touched. */
+  min_members?: number;
   sort?: "confidence" | "name" | "updated";
   page?: number;
   page_size?: number;
@@ -144,6 +151,17 @@ export const api = {
 
   getCluster: (mid: string) =>
     call<Entity>(EntitySchema, `/api/clusters/${encodeURIComponent(mid)}`),
+
+  /** Every pair of a cluster's members and what the pipeline decided about
+   * it. `runId` pins the trace to the run the reviewer is looking at; omitted,
+   * the backend uses the run that published the entity. */
+  getClusterPairs: (mid: string, runId?: string) =>
+    call<ClusterPairsResponse>(
+      ClusterPairsResponseSchema,
+      `/api/clusters/${encodeURIComponent(mid)}/pairs${
+        runId ? `?run_id=${encodeURIComponent(runId)}` : ""
+      }`,
+    ),
 
   getRaw: (patid: string) =>
     call<RawRecord>(

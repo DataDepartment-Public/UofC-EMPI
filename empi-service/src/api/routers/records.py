@@ -177,6 +177,7 @@ def list_records(
     updated_before: str | None = None,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    min_members: int | None = None,
     sort: str | None = None,
     page: int = 1,
     page_size: int | None = None,
@@ -184,14 +185,20 @@ def list_records(
     settings: Settings = Depends(get_settings),
 ) -> RecordsPage:
     """`sort` — `'confidence'`, `'name'`, or unset/anything else for the
-    default most-recently-updated-first (see `IndexBackend.list_entities`)."""
+    default most-recently-updated-first (see `IndexBackend.list_entities`).
+
+    `min_members=2` is the Patient Registry's "clusters with something to
+    compare" filter. Use it rather than `is_merged=true`, which is derived
+    from the *unlocked* member count at publish time and so misses any
+    multi-record cluster a reviewer has already touched.
+    """
     page_size = page_size or settings.records_page_size
     rows, total = backend.list_entities(
         search=search, origin=origin, is_merged=is_merged,
         birth_date=birth_date, ssn_last4=ssn_last4,
         updated_after=updated_after, updated_before=updated_before,
         confidence_min=confidence_min, confidence_max=confidence_max,
-        sort=sort, page=page, page_size=page_size,
+        min_members=min_members, sort=sort, page=page, page_size=page_size,
     )
     items = []
     for row in rows:

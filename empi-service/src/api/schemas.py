@@ -416,6 +416,127 @@ class PairExplanation(BaseModel):
     features: list[ExplanationFeature]
 
 
+# ── Cluster pair trace (GET /clusters/{mid}/pairs) ───────────────────────────
+#: Every value `ClusterPair.verdict` can take, most decisive stage first —
+#: which is also the order the route resolves them in, and the order the
+#: dashboard sorts by. Exported so the UI's badge map and the tests can be
+#: checked against one list rather than three copies of the same strings.
+CLUSTER_PAIR_VERDICTS = (
+    "auto_merge_rule",     # a deterministic auto-merge rule confirmed it
+    "reject",              # the rules rejected it (>=3 strong contradictions)
+    "ml_auto_merge",       # Stage 4.5 scored it a confident match
+    "ml_human_review",     # Stage 4.5 scored it ambiguous
+    "gate_dropped",        # Stage 4.25 dropped it as a confident non-match
+    "blocked_undecided",   # blocked together, but no stage recorded a decision
+    "not_compared",        # never blocked together — same cluster transitively
+)
+
+
+class ClusterPair(BaseModel):
+    """What the pipeline did with one pair of a cluster's current members.
+
+    Assembled from the run's Parquet artifacts, not the index: publishing
+    collapses a cluster's deterministic pairs into one best-pair evidence
+    string and deletes the gate's drops, so this is the only place the full
+    picture survives. Every stage field is nullable — a run that skipped a
+    stage, or a pair that never reached it, reports nothing rather than a
+    fabricated zero.
+    """
+
+    patid_a: str
+    patid_b: str
+    verdict: str
+
+    #: Stage 2 — did blocking ever put these two in the same candidate set?
+    #: `False` with a non-`not_compared` verdict is impossible; `False` alone
+    #: is what makes a pair transitive rather than directly compared.
+    blocked: bool
+    source_blocks: str | None = None
+    n_blocks: int | None = None
+
+    #: Stage 3 — deterministic rules, both directions.
+    match_rule: str | None = None
+    rules_fired: str | None = None
+    confidence: float | None = None
+    reject_rule: str | None = None
+    n_contradictions: int | None = None
+
+    #: Stage 4.25 / 4.5. A gate score is present for every pair the gate saw,
+    #: including the ones it dropped; ML fields only for gate survivors.
+    gate_score: float | None = None
+    gate_tier: str | None = None
+    ml_score: float | None = None
+    ml_tier: str | None = None
+
+    #: Reviewer provenance, from `entity_member.added_by` rather than a scan
+    #: of `audit_log`: a member the pipeline placed reads `"pipeline"`, and
+    #: anything else is the reviewer id that merged it in. A pair is
+    #: reviewer-joined when either side was.
+    joined_by: Literal["pipeline", "reviewer"] = "pipeline"
+    reviewer_id: str | None = None
+    reviewer_ts_utc: str | None = None
+
+
+class ClusterExternalPair(ClusterPair):
+    """A comparison between one of this cluster's members and a record that
+    ended up somewhere else.
+
+    Why this is a separate list from `pairs`: those explain how the cluster
+    was *built*, these explain where it *stopped* — the near-misses the
+    pipeline considered and declined. For a singleton it is the only thing
+    there is to show, and "nothing was ever compared to this record" and
+    "six records were compared and all six were rejected" are very different
+    answers to "why is this patient alone?".
+
+    Unlike `pairs`, this list never contains a `not_compared` verdict. It is
+    built by reading the artifacts and keeping rows that touch a member, so a
+    pair only appears if some stage actually looked at it — enumerating the
+    other ~7,000 records the pipeline never considered would be noise, not
+    evidence.
+    """
+
+    #: Which side of the pair belongs to this cluster; the other is outside.
+    #: `patid_a`/`patid_b` stay canonically ordered, so the UI needs this to
+    #: know which record to describe rather than re-deriving it.
+    member_patid: str
+    other_patid: str
+    #: The counterpart's current cluster and display fields, resolved from the
+    #: index at request time — the artifacts carry PATIDs only, and a reviewer
+    #: needs a name to judge whether a rejection looks right.
+    other_mid: str | None = None
+    other_first_name: str | None = None
+    other_last_name: str | None = None
+    other_birth_date: str | None = None
+    other_ssn_last4: str | None = None
+
+
+class ClusterPairsResponse(BaseModel):
+    """Every unordered pair of a cluster's current members, with its trace.
+
+    Membership is read from the index (`entity_member`), not from the run's
+    `cluster_assignments` — sticky-unmerge and reviewer merges make the two
+    diverge, and a reviewer is looking at the cluster as it stands now.
+    A pair whose two records were never in the same run therefore lands on
+    `not_compared`, which is the honest answer.
+    """
+
+    mid: str
+    run_id: str | None = None
+    #: False when the run is unresolvable or its artifacts are gone from disk.
+    #: The pairs are still enumerated (so the UI can list the cluster's
+    #: members) but every stage field is null — distinguishable from "the
+    #: pipeline genuinely decided nothing about this pair".
+    artifacts_available: bool
+    members: list[str] = Field(default_factory=list)
+    #: `gate_threshold` / `ml_auto_merge_threshold`, so the UI can draw the
+    #: decision boundary beside a score without a second call to /admin.
+    thresholds: dict[str, float] = Field(default_factory=dict)
+    #: Every unordered pair of members — how the cluster was assembled.
+    pairs: list[ClusterPair] = Field(default_factory=list)
+    #: Comparisons against records outside the cluster — the near-misses.
+    external_pairs: list[ClusterExternalPair] = Field(default_factory=list)
+
+
 # ── Admin (GET/PUT /admin/thresholds) ────────────────────────────────────────
 class ThresholdSettings(BaseModel):
     """The live-tunable ML decision thresholds — see
@@ -480,5 +601,9 @@ __all__ = [
     "ExplanationDecision",
     "ExplanationAxis",
     "PairExplanation",
+    "CLUSTER_PAIR_VERDICTS",
+    "ClusterPair",
+    "ClusterExternalPair",
+    "ClusterPairsResponse",
     "ThresholdSettings",
 ]

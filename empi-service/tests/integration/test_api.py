@@ -1130,6 +1130,50 @@ class TestAuditAgainstParquetBackend:
         assert {m["patid"] for m in body["entity"]["members"]} == {"P1", "P2"}
 
 
+class TestSqliteWriteConcurrency:
+    """SQLite allows one writer at a time and, without `busy_timeout`, fails a
+    blocked writer immediately rather than waiting (`sql_backend.get_connection`).
+
+    That bites hardest on the routes that *look* like reads: `GET
+    /records/{patid}/raw` appends a `view_raw` audit row on every call, so a UI
+    that opens several records at once — the Patient Registry's raw comparison
+    panel does exactly this, one request per cluster member — fired N
+    concurrent writes and got `OperationalError: database is locked` back on
+    all but one. The failures rendered as blank columns, which a data steward
+    reads as "the source system had nothing" rather than "the request failed".
+    """
+
+    def test_concurrent_raw_views_all_succeed(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        patids = ["P1", "P2", "P3", "P4", "P5"]
+
+        def _view(patid: str) -> int:
+            return client.get(
+                f"/records/{patid}/raw",
+                headers={"X-Reviewer-Id": "reviewer.klkendall"},
+            ).status_code
+
+        with ThreadPoolExecutor(max_workers=len(patids)) as pool:
+            statuses = list(pool.map(_view, patids * 3))
+
+        assert all(s == 200 for s in statuses), (
+            f"expected every concurrent raw view to succeed, got {statuses}"
+        )
+        # Every one of them is PHI access that has to be on the record — a
+        # write silently lost to lock contention would be an audit gap, not
+        # just a UI glitch.
+        actions = [row["action"] for row in _audit_rows(test_settings)]
+        assert actions.count("view_raw") == len(patids) * 3
+
+
+def _audit_rows(settings) -> list[dict]:
+    conn = sql_backend.get_connection(settings.db_path)
+    try:
+        return [dict(r) for r in conn.execute("SELECT * FROM audit_log").fetchall()]
+    finally:
+        conn.close()
+
+
 class TestParquetBackendConcurrency:
     """Real overlapping requests against the Parquet backend, dispatched from
     multiple threads through the actual ASGI app (not just a direct call to

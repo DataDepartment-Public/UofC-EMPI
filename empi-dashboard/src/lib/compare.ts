@@ -16,6 +16,10 @@ export interface ComparisonRow {
   result: "exact" | "partial" | "different" | "missing";
 }
 
+/** The display order shared by the pair table and the N-record cluster
+ * table: identity fields, then contact fields. `Phones` is spliced in before
+ * `Email` by the builders rather than listed here, because it is the one
+ * multi-valued field and so isn't a plain `keyof ExplainPatient` lookup. */
 const FIELDS: { key: keyof ExplainPatient; label: string }[] = [
   { key: "ssn_last4", label: "SSN" },
   { key: "birth_date", label: "Birthdate" },
@@ -110,6 +114,81 @@ export function compareRecords(
   const emailAt = rows.findIndex((r) => r.label === "Email");
   rows.splice(emailAt, 0, comparePhones(a, b));
   return rows;
+}
+
+// ── N-record comparison (Patient Registry cluster view) ──────────────────────
+
+/** One field across every record of a cluster, index-aligned to the records
+ * array the builder was given.
+ *
+ * There is deliberately no `result` here, unlike `ComparisonRow`. A verdict
+ * is a statement about a *pair*; with three or more records "Exact match" has
+ * no single meaning (A and B agree, C differs — is the row an agreement?), so
+ * the cluster table presents the values and leaves the judgement to the
+ * reader.
+ */
+export interface MultiComparisonRow {
+  label: string;
+  values: string[];
+  /** Set on multi-valued fields (only `Phones` today) so the table can stack
+   * one value per line. Index-aligned with `values`, which stays populated as
+   * the flat equivalent. */
+  valueLists?: string[][];
+}
+
+/** `compareRecords` widened from two records to N — same fields, same
+ * ordering, same normalization (birthdates stripped of their meaningless
+ * midnight, SSN masked, phones treated as a set). The two-record version is
+ * left alone rather than reimplemented on top of this one: it carries the
+ * per-pair `result` verdict the Review Queue's table renders, which has no
+ * N-record counterpart. */
+export function compareRecordsMulti(
+  records: ExplainPatient[],
+): MultiComparisonRow[] {
+  const rows: MultiComparisonRow[] = FIELDS.map(({ key, label }) => {
+    const normalized = records.map((r) => {
+      const v = r[key];
+      if (v == null || v === "") return null;
+      return key === "birth_date" ? formatRawDate(v) : String(v);
+    });
+    return {
+      label,
+      values: normalized.map((v) =>
+        v === null ? "(missing)" : key === "ssn_last4" ? maskSsn(v) : v,
+      ),
+    };
+  });
+
+  const lists = records.map(phoneList);
+  const phoneRow: MultiComparisonRow = {
+    label: "Phones",
+    values: lists.map((l) => (l.length ? l.join(", ") : "(missing)")),
+    valueLists: lists,
+  };
+
+  rows.splice(
+    rows.findIndex((r) => r.label === "Email"),
+    0,
+    phoneRow,
+  );
+  return rows;
+}
+
+/** `compareRawFields` widened to N records. Key order is the first record's
+ * (the publisher writes them name -> address -> contact, which JSON
+ * round-trips preserve), then any key only a later record carries — a payload
+ * published before a column existed shouldn't silently drop its extra fields
+ * off the table. A record whose payload is absent (never published, or 404)
+ * is passed as `undefined` and reads as missing on every row. */
+export function compareRawFieldsMulti(
+  fields: (Record<string, unknown> | undefined)[],
+): MultiComparisonRow[] {
+  const keys = [...new Set(fields.flatMap((f) => Object.keys(f ?? {})))];
+
+  return keys.map((key) => ({
+    label: key,
+    values: fields.map((f) => normalizeRaw(key, f?.[key]) ?? "(missing)"),
+  }));
 }
 
 /** One raw source value, normalized only as far as display requires: an

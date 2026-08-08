@@ -108,6 +108,7 @@ class IndexBackend(Protocol):
         updated_before: str | None = None,
         confidence_min: float | None = None,
         confidence_max: float | None = None,
+        min_members: int | None = None,
         sort: str | None = None,
         page: int = 1,
         page_size: int = 50,
@@ -170,7 +171,16 @@ class SqlIndexBackend:
         self._store = store_module
 
     def begin(self) -> None:
-        self.conn.execute("BEGIN")
+        # Delegated rather than a hardcoded `BEGIN`, because the right
+        # statement is dialect-specific: SQLite needs `BEGIN IMMEDIATE` here
+        # (see `sql_backend.begin` for why a deferred one deadlocks), and
+        # Postgres has no such modifier. Falls back to plain `BEGIN` for a
+        # store module that predates the function.
+        begin = getattr(self._store, "begin", None)
+        if begin is None:
+            self.conn.execute("BEGIN")
+        else:
+            begin(self.conn)
 
     def commit(self) -> None:
         self.conn.commit()
@@ -263,14 +273,15 @@ class SqlIndexBackend:
         *,
         search=None, origin=None, is_merged=None, birth_date=None,
         ssn_last4=None, updated_after=None, updated_before=None,
-        confidence_min=None, confidence_max=None, sort=None,
-        page=1, page_size=50,
+        confidence_min=None, confidence_max=None, min_members=None,
+        sort=None, page=1, page_size=50,
     ) -> tuple[list[dict], int]:
         return self._store.list_entities(
             self.conn, search=search, origin=origin, is_merged=is_merged,
             birth_date=birth_date, ssn_last4=ssn_last4,
             updated_after=updated_after, updated_before=updated_before,
             confidence_min=confidence_min, confidence_max=confidence_max,
+            min_members=min_members,
             sort=sort, page=page, page_size=page_size,
         )
 

@@ -13,6 +13,10 @@ const REFRESH_KEYS = [
   ["records"],
   ["review-queue"],
   ["audit"],
+  // An unmerge changes which members a cluster has, so its pair trace is
+  // stale the moment the mutation lands — the Patient Registry renders both
+  // from the same selection.
+  ["cluster-pairs"],
 ] as const;
 
 export function useDashboardSummary() {
@@ -45,6 +49,17 @@ export function useCluster(mid: string | null) {
   });
 }
 
+/** The pairwise decision trace behind one cluster. `null` while nothing is
+ * selected — same `enabled`-gating idiom as `useRawRecord` below, so callers
+ * never have to conditionally call a hook. */
+export function useClusterPairs(mid: string | null, runId?: string) {
+  return useQuery({
+    queryKey: ["cluster-pairs", mid, runId ?? null],
+    queryFn: () => api.getClusterPairs(mid as string, runId),
+    enabled: mid !== null,
+  });
+}
+
 export function useRawRecord(patid: string | null) {
   return useQuery({
     queryKey: ["raw", patid],
@@ -65,14 +80,27 @@ export function useCleanSsn(patid: string | null) {
  * drop has no `ml_matcher` explanation — try it first and fall back to the
  * gate's own explanation (the only record of *why* it was dropped). `null`
  * (neither model scored this pair — e.g. a purely deterministic-rule match)
- * is a normal, successful result, not a query error. */
-export function usePairExplanation(patidA: string | null, patidB: string | null) {
+ * is a normal, successful result, not a query error.
+ *
+ * `runId` pins the explanation to a specific run. Pass it wherever the score
+ * beside the waterfall came from a known run (the Patient Registry's cluster
+ * trace does); omitted, the backend falls back to the newest run that
+ * explained that model, which can disagree with what's on screen. */
+export function usePairExplanation(
+  patidA: string | null,
+  patidB: string | null,
+  runId?: string,
+) {
   return useQuery({
-    queryKey: ["explanation", patidA, patidB],
+    queryKey: ["explanation", patidA, patidB, runId ?? null],
     queryFn: async () => {
-      const ml = await api.getExplanation("ml_matcher", patidA as string, patidB as string);
+      const ml = await api.getExplanation(
+        "ml_matcher", patidA as string, patidB as string, runId,
+      );
       if (ml) return ml;
-      return api.getExplanation("nonmatch_gate", patidA as string, patidB as string);
+      return api.getExplanation(
+        "nonmatch_gate", patidA as string, patidB as string, runId,
+      );
     },
     enabled: patidA !== null && patidB !== null,
   });

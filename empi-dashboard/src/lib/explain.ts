@@ -13,6 +13,30 @@ export interface ExplainPatient extends RecordAttrs {
   patid: string;
 }
 
+/** `EntityMember` -> `ExplainPatient`: the same attribute fields, with the
+ * membership metadata (`is_primary`, `added_by`, `updated_utc`) dropped and
+ * every `undefined` normalized to `null`. The comparison builders in
+ * `lib/compare.ts` distinguish "absent" from "empty string" and nothing
+ * else, so the two spellings of absent have to collapse to one here. */
+export function memberToExplainPatient(m: RecordAttrs & { patid: string }): ExplainPatient {
+  return {
+    patid: m.patid,
+    first_name: m.first_name ?? null,
+    middle_name: m.middle_name ?? null,
+    last_name: m.last_name ?? null,
+    suffix: m.suffix ?? null,
+    birth_date: m.birth_date ?? null,
+    ssn_last4: m.ssn_last4 ?? null,
+    email: m.email ?? null,
+    zip_code: m.zip_code ?? null,
+    city: m.city ?? null,
+    address1: m.address1 ?? null,
+    sex: m.sex ?? null,
+    phone: m.phone ?? null,
+    phones: m.phones ?? null,
+  };
+}
+
 export interface ExplainPayload {
   mid: string;
   patientA: ExplainPatient;

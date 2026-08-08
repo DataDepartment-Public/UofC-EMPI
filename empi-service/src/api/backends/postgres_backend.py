@@ -609,13 +609,22 @@ def list_entities(
     updated_before: str | None = None,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    min_members: int | None = None,
+    sort: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
     """Paginated master rows (one per entity) + their member count — see
     `sql_backend.list_entities` for full filter semantics. `search` is
     `ILIKE` here (case-insensitive), matching SQLite's default `LIKE`
-    behavior rather than Postgres's case-sensitive default."""
+    behavior rather than Postgres's case-sensitive default.
+
+    `sort` accepts the same three orderings as the SQLite store. It was
+    previously missing from this signature while `SqlIndexBackend` passed it
+    unconditionally, so every `GET /records` against Postgres raised
+    `TypeError`; adding `min_members` here would have widened that same crash
+    by one more argument, so both are implemented rather than only the new one.
+    """
     where = []
     params: list = []
     if origin is not None:
@@ -637,6 +646,11 @@ def list_entities(
     if confidence_max is not None:
         where.append("e.confidence <= %s")
         params.append(confidence_max)
+    if min_members is not None:
+        where.append(
+            "(SELECT COUNT(*) FROM entity_member em5 WHERE em5.mid = e.mid) >= %s"
+        )
+        params.append(min_members)
     tokens = search_tokens(search)
     if tokens:
         # Mirrors sql_backend.list_entities — every token on the same member,
@@ -676,15 +690,31 @@ def list_entities(
     assert total_row is not None
     total = total_row["n"]
 
+    if sort == "confidence":
+        sort_join_sql = ""
+        order_sql = "e.confidence DESC NULLS LAST, e.mid"
+    elif sort == "name":
+        sort_join_sql = (
+            "LEFT JOIN entity_member pm ON pm.mid = e.mid AND pm.is_primary "
+            "LEFT JOIN record_attrs pa ON pa.patid = pm.patid"
+        )
+        order_sql = (
+            "LOWER(pa.last_name) NULLS LAST, LOWER(pa.first_name), e.mid"
+        )
+    else:
+        sort_join_sql = ""
+        order_sql = "e.updated_utc DESC, e.mid"
+
     offset = max(page - 1, 0) * page_size
     rows = conn.execute(
         f"""
         SELECT e.*, COUNT(em.patid) AS member_count
         FROM entity e
         LEFT JOIN entity_member em ON em.mid = e.mid
+        {sort_join_sql}
         {where_sql}
-        GROUP BY e.mid
-        ORDER BY e.updated_utc DESC, e.mid
+        GROUP BY e.mid{", pa.last_name, pa.first_name" if sort == "name" else ""}
+        ORDER BY {order_sql}
         LIMIT %s OFFSET %s
         """,
         [*params, page_size, offset],

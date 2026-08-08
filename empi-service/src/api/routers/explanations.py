@@ -8,7 +8,8 @@ Every other read route goes through `IndexBackend`, because it serves the
 opposite: they are immutable evidence about a decision a specific model made
 during a specific run. So this router resolves the run's `RunManifest` and
 reads the pipeline's Parquet artifact directly — the same artifact whose
-sha256 the manifest records.
+sha256 the manifest records. The manifest/artifact resolution itself lives in
+`src/api/run_artifacts.py`, shared with `routers/cluster_pairs.py`.
 
 That choice is the whole point. No model is loaded in the request path,
 nothing is recomputed, and promoting a new model tomorrow cannot silently
@@ -22,17 +23,14 @@ than a full scan.
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 
-import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.api.deps import get_settings
+from src.api.run_artifacts import latest_run_with, load_manifest, read_pair
 from src.api.schemas import PairExplanation
 from src.config import Settings
-from src.contracts import RunManifest
 from src.models.explanations import build_payload, explanation_feature_names
 
 logger = logging.getLogger(__name__)
@@ -46,55 +44,6 @@ _MODELS: dict[str, tuple[str, str | None]] = {
     "nonmatch_gate": ("gate_explanations", "gate_threshold"),
     "ml_matcher": ("ml_explanations", "ml_auto_merge_threshold"),
 }
-
-
-def _load_manifest(run_id: str, settings: Settings) -> RunManifest | None:
-    path = settings.runs_dir / f"run_{run_id}.json"
-    if not path.exists():
-        return None
-    try:
-        return RunManifest.model_validate_json(path.read_text())
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("Malformed run manifest: %s", path)
-        return None
-
-
-def _latest_run_with(field: str, settings: Settings) -> RunManifest | None:
-    """Newest run whose manifest carries `field`.
-
-    Run ids are UTC timestamps, so a reverse filename sort is chronological.
-    Used when the caller does not pin a `run_id` — the reviewer UI knows the
-    run behind an entity and should pass it, but a bare pair lookup still
-    resolves to the most recent run that explained that model.
-    """
-    if not settings.runs_dir.is_dir():
-        return None
-    for path in sorted(settings.runs_dir.glob("run_*.json"), reverse=True):
-        manifest = _load_manifest(path.stem.removeprefix("run_"), settings)
-        if manifest is not None and getattr(manifest, field, None) is not None:
-            return manifest
-    return None
-
-
-def _read_pair(artifact: Path, patid_a: str, patid_b: str) -> pd.Series | None:
-    """The one explanation row for a pair, or None.
-
-    Pairs are canonicalized (`PATID_A < PATID_B`) everywhere upstream, so the
-    caller's argument order is normalized here rather than making the UI care.
-    """
-    a, b = (patid_a, patid_b) if patid_a < patid_b else (patid_b, patid_a)
-    try:
-        frame = pd.read_parquet(
-            artifact, filters=[("PATID_A", "==", a), ("PATID_B", "==", b)],
-        )
-    except (OSError, ValueError) as exc:
-        logger.warning("Unreadable explanation artifact %s: %s", artifact, exc)
-        raise HTTPException(
-            status_code=503, detail="Explanation artifact could not be read."
-        ) from exc
-    if frame.empty:
-        return None
-    return frame.iloc[0]
 
 
 @router.get(
@@ -132,8 +81,8 @@ def get_pair_explanation(
     field, threshold_attr = _MODELS[model_name]
 
     manifest = (
-        _load_manifest(run_id, settings) if run_id is not None
-        else _latest_run_with(field, settings)
+        load_manifest(run_id, settings) if run_id is not None
+        else latest_run_with(field, settings)
     )
     if manifest is None:
         raise HTTPException(
@@ -157,7 +106,7 @@ def get_pair_explanation(
             detail=f"Explanation artifact missing on disk: {ref.path}",
         )
 
-    row = _read_pair(artifact, patid_a, patid_b)
+    row = read_pair(artifact, patid_a, patid_b)
     if row is None:
         raise HTTPException(
             status_code=404,

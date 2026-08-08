@@ -3,7 +3,7 @@
 import clsx from "clsx";
 import { useRawRecord, usePairExplanation } from "@/lib/hooks";
 import type { ReviewQueueItem } from "@/lib/schemas";
-import { fullName } from "@/lib/format";
+import { formatRawDate, fullName } from "@/lib/format";
 
 /** Value lineage for a candidate pair: Raw -> Cleaned -> Deterministic rule
  * -> ML model. Stages 1-3 show real data (raw via the same
@@ -28,6 +28,10 @@ export function PipelineTrail({ item }: { item: ReviewQueueItem }) {
     return v == null || v === "" ? "—" : String(v);
   };
 
+  /** Raw birthdate, minus the midnight time real source exports carry. */
+  const rawBirthDate = (data: { fields: Record<string, unknown> } | undefined) =>
+    formatRawDate(data?.fields?.["BirthDT_raw"]);
+
   return (
     <div className="overflow-x-auto pb-1">
       <div className="flex min-w-[760px]">
@@ -42,7 +46,7 @@ export function PipelineTrail({ item }: { item: ReviewQueueItem }) {
                 {rawField(rawB.data, "FirstNM_raw")} {rawField(rawB.data, "LastNM_raw")}
               </Row>
               <Row>
-                {rawField(rawA.data, "BirthDT_raw")} vs {rawField(rawB.data, "BirthDT_raw")}
+                {rawBirthDate(rawA.data)} vs {rawBirthDate(rawB.data)}
               </Row>
             </>
           )}

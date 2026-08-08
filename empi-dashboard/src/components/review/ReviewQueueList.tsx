@@ -3,7 +3,7 @@
 import clsx from "clsx";
 import type { ReviewQueueFilters } from "@/lib/api-client";
 import type { ReviewQueueItem } from "@/lib/schemas";
-import { fullName, maskSsn } from "@/lib/format";
+import { formatRawDate, fullName, maskSsn } from "@/lib/format";
 
 /** Left panel of the Review Queue's two-panel layout: the candidate-grain
  * list itself (one row per pending pair, not per cluster), plus its own
@@ -195,7 +195,7 @@ function CandidateRow({
           {fullName(item.patient_b.first_name, item.patient_b.last_name)}
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-2">
-          <span>{item.patient_a.birth_date ?? "—"}</span>
+          <span>{formatRawDate(item.patient_a.birth_date)}</span>
           <span>·</span>
           <span>{maskSsn(item.patient_a.ssn_last4)}</span>
           {inCluster && (

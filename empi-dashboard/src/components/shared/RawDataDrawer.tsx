@@ -1,6 +1,11 @@
 "use client";
 
 import { useRawRecord } from "@/lib/hooks";
+import { formatRawDate } from "@/lib/format";
+
+/** Raw source fields that are date-only in meaning (`BirthDT_raw`), even
+ * when the source export serializes them with a midnight time. */
+const DATE_FIELD = /(?:DT|Date)(?:_raw)?$/i;
 
 /** FR-24: "View Raw Data" side drawer — the un-scrubbed source-system
  * fields (src/api/store.py `record_raw`), for data-steward audits. */
@@ -52,7 +57,11 @@ export function RawDataDrawer({
               <div key={key} className="flex justify-between gap-3 py-2 text-[13px]">
                 <dt className="font-semibold text-gray">{key}</dt>
                 <dd className="text-right font-mono text-ink-2">
-                  {value === null || value === "" ? "—" : String(value)}
+                  {value === null || value === ""
+                    ? "—"
+                    : DATE_FIELD.test(key)
+                      ? formatRawDate(value)
+                      : String(value)}
                 </dd>
               </div>
             ))}

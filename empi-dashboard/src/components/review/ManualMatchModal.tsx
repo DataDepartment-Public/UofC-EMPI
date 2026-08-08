@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { compareRecords } from "@/lib/compare";
 import type { ExplainPatient } from "@/lib/explain";
-import { fullName, maskSsn, formatDate } from "@/lib/format";
+import { fullName, maskSsn, formatDate, formatRawDate } from "@/lib/format";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
 
 /** "Find a match manually" — search for and propose a match between two
@@ -108,7 +108,7 @@ export function ManualMatchModal({
                       {fullName(primary.first_name, primary.last_name)}
                     </span>
                     <span className="flex gap-3 text-xs text-gray-2">
-                      <span>{primary.birth_date ?? "—"}</span>
+                      <span>{formatRawDate(primary.birth_date)}</span>
                       <span>{maskSsn(primary.ssn_last4)}</span>
                       <span className="font-mono text-gray">{e.mid}</span>
                       <span>{formatDate(e.updated_utc)}</span>

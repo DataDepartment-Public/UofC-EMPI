@@ -55,11 +55,11 @@ export function PipelineTrail({ item }: { item: ReviewQueueItem }) {
         <Stage num={2} label="Normalized" title="Cleaned">
           <Row>
             {fullName(item.patient_a.first_name, item.patient_a.last_name)},{" "}
-            {item.patient_a.birth_date ?? "—"}
+            {formatRawDate(item.patient_a.birth_date)}
           </Row>
           <Row>
             {fullName(item.patient_b.first_name, item.patient_b.last_name)},{" "}
-            {item.patient_b.birth_date ?? "—"}
+            {formatRawDate(item.patient_b.birth_date)}
           </Row>
         </Stage>
 

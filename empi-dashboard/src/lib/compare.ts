@@ -1,5 +1,5 @@
 import type { ExplainPatient } from "./explain";
-import { maskSsn } from "./format";
+import { formatRawDate, maskSsn } from "./format";
 
 export interface ComparisonRow {
   label: string;
@@ -33,8 +33,14 @@ export function compareRecords(
   return FIELDS.map(({ key, label }) => {
     const va = a[key];
     const vb = b[key];
-    const va_ = va == null || va === "" ? null : String(va);
-    const vb_ = vb == null || vb === "" ? null : String(vb);
+    // A birthdate carries a meaningless midnight time in some source exports;
+    // never show an hour on it. `formatRawDate` is string-level, so it can't
+    // shift the date across a timezone offset. Stripped *before* the equality
+    // check so two spellings of the same midnight don't read as "Different".
+    const norm = (v: unknown) =>
+      v == null || v === "" ? null : key === "birth_date" ? formatRawDate(v) : String(v);
+    const va_ = norm(va);
+    const vb_ = norm(vb);
     let result: ComparisonRow["result"];
     if (va_ === null || vb_ === null) {
       result = "missing";

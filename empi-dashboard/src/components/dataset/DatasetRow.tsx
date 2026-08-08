@@ -5,7 +5,7 @@ import Link from "next/link";
 import clsx from "clsx";
 import type { Entity, EntityMember } from "@/lib/schemas";
 import { encodeExplainPayload, ExplainPatient } from "@/lib/explain";
-import { formatDate, fullName, maskSsn } from "@/lib/format";
+import { formatDate, formatRawDate, fullName, maskSsn } from "@/lib/format";
 import { SsnReveal } from "@/components/shared/SsnReveal";
 import { StatusBadge } from "@/components/dataset/StatusBadge";
 
@@ -57,7 +57,7 @@ export function DatasetRow({
           <StatusBadge origin={entity.origin} />
         </span>
         <span className="text-gray-2">{maskSsn(primary?.ssn_last4)}</span>
-        <span className="text-gray-2">{primary?.birth_date ?? "—"}</span>
+        <span className="text-gray-2">{formatRawDate(primary?.birth_date)}</span>
         <span className="text-gray-2">{entity.members.length}</span>
         <span className="text-xs text-gray">{formatDate(entity.updated_utc)}</span>
       </button>
@@ -185,7 +185,7 @@ function RecordLine({
         <span className="text-xs text-gray-2">
           <SsnReveal patid={patid} masked={ssn} />
         </span>
-        <span className="text-xs text-gray-2">{dob ?? "—"}</span>
+        <span className="text-xs text-gray-2">{formatRawDate(dob)}</span>
         {tag && (
           <span className="rounded-full bg-bg px-2 py-0.5 text-[10px] font-bold text-gray">
             {tag}

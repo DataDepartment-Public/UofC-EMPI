@@ -972,7 +972,10 @@ def with_attributes(pairs: pd.DataFrame, cleaned: pd.DataFrame, *,
     cols = [c for c in columns if c in cleaned.columns]
     missing = [c for c in columns if c not in cleaned.columns]
     if missing:
-        logger.info("Cleaned frame has no %s — skipped.", ", ".join(missing))
+        logger.info(
+            "Cleaned frame is missing %d requested attribute column(s); skipped.",
+            len(missing),
+        )
 
     out = pairs.copy()
     a = cleaned.reindex(out[PATID_A].astype(str))[cols]

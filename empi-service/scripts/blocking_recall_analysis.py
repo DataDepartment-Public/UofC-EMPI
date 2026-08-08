@@ -279,8 +279,7 @@ def _print(res: dict) -> None:
         r = res["real"]
         print(f"  valid_records={r['valid_records']}  R={r['rule_confirmed_R']}  "
               f"caught={r['caught']}  missed={r['missed_R_minus_B']}")
-        print(f"  missed pairs with SSN missing on a side: "
-              f"{r['missed_with_ssn_missing_either_side']}/{r['missed_R_minus_B']}")
+        print("  SSN-related missingness metrics are redacted from console output.")
         print("\n  Recovery-block variants (real):")
         line()
         print(f"  {'variant':<40}{'recov':>7}{'gross':>9}{'net-new':>9}")

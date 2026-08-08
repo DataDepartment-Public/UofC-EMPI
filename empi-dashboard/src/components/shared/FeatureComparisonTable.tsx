@@ -1,7 +1,11 @@
 import type { ComparisonRow } from "@/lib/compare";
 import { SsnReveal } from "./SsnReveal";
 
-const RESULT_STYLE: Record<ComparisonRow["result"], { label: string; className: string }> = {
+/** Shared with `RawComparisonPanel` so the cleaned-value table and the raw
+ * one render an identical Result column — a reviewer reads them stacked, and
+ * two vocabularies for the same verdict would imply a distinction that
+ * doesn't exist. */
+export const RESULT_STYLE: Record<ComparisonRow["result"], { label: string; className: string }> = {
   exact: { label: "Exact match", className: "text-status-auto font-bold" },
   // Only a multi-valued field (Phones) can land here: the two sets overlap
   // without being equal, which supports a duplicate without confirming one.

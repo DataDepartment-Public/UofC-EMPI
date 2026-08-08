@@ -8,7 +8,6 @@ import {
   useReviewQueue,
 } from "@/lib/hooks";
 import { MergeModal } from "@/components/review/MergeModal";
-import { RawDataDrawer } from "@/components/shared/RawDataDrawer";
 import { ReviewCandidateDetail } from "@/components/review/ReviewCandidateDetail";
 import { ReviewQueueList } from "@/components/review/ReviewQueueList";
 import { Toast } from "@/components/shared/Toast";
@@ -26,7 +25,6 @@ export default function ReviewQueuePage() {
     page_size: PAGE_SIZE,
   });
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [rawPatid, setRawPatid] = useState<string | null>(null);
   const [pendingMerge, setPendingMerge] = useState<{
     mid: string;
     patids: string[];
@@ -94,7 +92,6 @@ export default function ReviewQueuePage() {
             item={selected}
             onMerge={(mid, patids) => setPendingMerge({ mid, patids })}
             onDismiss={handleDismiss}
-            onViewRaw={setRawPatid}
             dismissPending={dismissMutation.isPending}
           />
         ) : (
@@ -105,8 +102,6 @@ export default function ReviewQueuePage() {
           </div>
         )}
       </div>
-
-      <RawDataDrawer patid={rawPatid} onClose={() => setRawPatid(null)} />
 
       {pendingMerge && (
         <MergeModal

@@ -1,14 +1,15 @@
 "use client";
 
 import { useRawRecord } from "@/lib/hooks";
-import { formatRawDate } from "@/lib/format";
-
-/** Raw source fields that are date-only in meaning (`BirthDT_raw`), even
- * when the source export serializes them with a midnight time. */
-const DATE_FIELD = /(?:DT|Date)(?:_raw)?$/i;
+import { formatRawField } from "@/lib/format";
 
 /** FR-24: "View Raw Data" side drawer — the un-scrubbed source-system
- * fields (src/api/store.py `record_raw`), for data-steward audits. */
+ * fields (src/api/store.py `record_raw`), for data-steward audits.
+ *
+ * Single-record only, which is why the Review Queue uses
+ * `RawComparisonPanel` instead: deciding a *pair* means reading both sides'
+ * raw fields against each other. This drawer still backs the Patient
+ * Registry, where one record at a time is the actual question. */
 export function RawDataDrawer({
   patid,
   onClose,
@@ -57,11 +58,7 @@ export function RawDataDrawer({
               <div key={key} className="flex justify-between gap-3 py-2 text-[13px]">
                 <dt className="font-semibold text-gray">{key}</dt>
                 <dd className="text-right font-mono text-ink-2">
-                  {value === null || value === ""
-                    ? "—"
-                    : DATE_FIELD.test(key)
-                      ? formatRawDate(value)
-                      : String(value)}
+                  {formatRawField(key, value)}
                 </dd>
               </div>
             ))}

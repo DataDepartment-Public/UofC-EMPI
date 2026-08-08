@@ -5,6 +5,7 @@ import { compareRecords } from "@/lib/compare";
 import { fullName } from "@/lib/format";
 import type { ReviewQueueItem } from "@/lib/schemas";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
+import { RawComparisonPanel } from "@/components/shared/RawComparisonPanel";
 import { ShapWaterfall } from "@/components/shared/ShapWaterfall";
 import { usePairExplanation } from "@/lib/hooks";
 import { ManualMatchModal } from "./ManualMatchModal";
@@ -17,13 +18,11 @@ export function ReviewCandidateDetail({
   item,
   onMerge,
   onDismiss,
-  onViewRaw,
   dismissPending,
 }: {
   item: ReviewQueueItem;
   onMerge: (mid: string, patids: string[]) => void;
   onDismiss: (patidA: string, patidB: string) => void;
-  onViewRaw: (patid: string) => void;
   dismissPending: boolean;
 }) {
   const [manualMatchOpen, setManualMatchOpen] = useState(false);
@@ -65,12 +64,6 @@ export function ReviewCandidateDetail({
           >
             Not a match
           </button>
-          <button
-            onClick={() => onViewRaw(item.patid_a)}
-            className="rounded-md border border-line px-3.5 py-1.5 text-xs font-bold text-gray-2 hover:bg-bg"
-          >
-            View raw data
-          </button>
         </div>
       </div>
 
@@ -99,6 +92,7 @@ export function ReviewCandidateDetail({
       <div className="mb-5">
         <h4 className="mb-1 text-[13px] font-bold text-ink-2">Feature comparison</h4>
         <FeatureComparisonTable rows={rows} patidA={item.patid_a} patidB={item.patid_b} />
+        <RawComparisonPanel patidA={item.patid_a} patidB={item.patid_b} />
       </div>
 
       {explanation && (

@@ -31,6 +31,18 @@ export function formatRawDate(value: unknown): string {
   return s.replace(/[\sT]\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?\s*([AP]\.?M\.?)?\s*(Z|[+-]\d{2}:?\d{2})?$/i, "");
 }
 
+/** Raw source fields that are date-only in meaning (`BirthDT_raw`), even
+ * when the source export serializes them with a midnight time. */
+export const RAW_DATE_FIELD = /(?:DT|Date)(?:_raw)?$/i;
+
+/** Display form of one un-scrubbed source field: date-only fields lose their
+ * meaningless midnight time, everything else is shown verbatim — a raw view
+ * exists to show what the source system actually holds. */
+export function formatRawField(key: string, value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  return RAW_DATE_FIELD.test(key) ? formatRawDate(value) : String(value);
+}
+
 export function formatPct(v: number): string {
   return `${v.toFixed(1)}%`;
 }

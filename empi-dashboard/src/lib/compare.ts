@@ -1,5 +1,5 @@
 import type { ExplainPatient } from "./explain";
-import { formatRawDate, maskSsn } from "./format";
+import { formatRawDate, maskSsn, RAW_DATE_FIELD } from "./format";
 
 export interface ComparisonRow {
   label: string;
@@ -110,4 +110,61 @@ export function compareRecords(
   const emailAt = rows.findIndex((r) => r.label === "Email");
   rows.splice(emailAt, 0, comparePhones(a, b));
   return rows;
+}
+
+/** One raw source value, normalized only as far as display requires: an
+ * empty-ish value becomes `null` ("missing"), a date-only field loses its
+ * meaningless midnight time, and everything else is left verbatim. No
+ * cleaning beyond that — the whole point of a raw view is to show the
+ * source text the pipeline started from. */
+function normalizeRaw(key: string, value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const s = RAW_DATE_FIELD.test(key) ? formatRawDate(value) : String(value);
+  return s.trim() === "" || s === "—" ? null : s;
+}
+
+/** The un-scrubbed source fields of two records, aligned key-by-key into the
+ * same agree/disagree rows `compareRecords` produces for cleaned values, so
+ * both tables read identically.
+ *
+ * Agreement is a trimmed, case-insensitive string comparison, the same test
+ * `compareRecords` uses — but applied to *source* text, so two spellings the
+ * cleaner would have reconciled (`"312-555-1234"` vs `"3125551234"`) honestly
+ * show up as Different here. That divergence between the two tables is the
+ * information a data steward opens the raw view for.
+ *
+ * Never returns `partial`: raw fields are single-valued (the multi-phone set
+ * is a cleaned-side artifact, arriving here as separate `Phone0nNBR_raw`
+ * columns). A side whose payload is absent — never published, or 404 — is
+ * passed as `undefined` and renders as missing on every row. */
+export function compareRawFields(
+  fieldsA: Record<string, unknown> | undefined,
+  fieldsB: Record<string, unknown> | undefined,
+): ComparisonRow[] {
+  // A's key order first (the publisher writes them in a deliberate
+  // name → address → contact order, which JSON round-trips preserve), then
+  // any key only B carries — an older payload published before a column
+  // existed shouldn't silently drop its extra fields off the table.
+  const keys = [
+    ...new Set([...Object.keys(fieldsA ?? {}), ...Object.keys(fieldsB ?? {})]),
+  ];
+
+  return keys.map((key) => {
+    const va = normalizeRaw(key, fieldsA?.[key]);
+    const vb = normalizeRaw(key, fieldsB?.[key]);
+    let result: ComparisonRow["result"];
+    if (va === null || vb === null) {
+      result = "missing";
+    } else if (va.trim().toLowerCase() === vb.trim().toLowerCase()) {
+      result = "exact";
+    } else {
+      result = "different";
+    }
+    return {
+      label: key,
+      valueA: va ?? "(missing)",
+      valueB: vb ?? "(missing)",
+      result,
+    };
+  });
 }

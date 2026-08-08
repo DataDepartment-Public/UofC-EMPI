@@ -75,7 +75,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     prev_state     TEXT NOT NULL,
     next_state     TEXT NOT NULL,
     run_id         TEXT,
-    related_patids TEXT
+    related_patids TEXT,
+    prev_mid       TEXT,
+    undo_of        INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS record_attrs (
@@ -110,6 +112,8 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     created_utc  TEXT NOT NULL,
     fs_match_probability   REAL,
     fs_classification_tier TEXT,
+    ml_match_probability   REAL,
+    ml_classification_tier TEXT,
     UNIQUE(patid_a, patid_b, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_review_candidate_a ON review_candidate(patid_a);
@@ -191,6 +195,13 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
     "review_candidate": {
         "fs_match_probability": "REAL",
         "fs_classification_tier": "TEXT",
+        "ml_match_probability": "REAL",
+        "ml_classification_tier": "TEXT",
+    },
+    "audit_log": {
+        "related_patids": "TEXT",
+        "prev_mid": "TEXT",
+        "undo_of": "INTEGER",
     },
 }
 
@@ -387,12 +398,14 @@ def insert_review_candidates(conn: PgConnection, rows: list[tuple]) -> None:
 _REVIEW_CANDIDATE_INSERT_SQL = """
     INSERT INTO review_candidate
         (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
-         run_id, created_utc)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+         run_id, created_utc, ml_match_probability, ml_classification_tier)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
         match_rule=excluded.match_rule, confidence=excluded.confidence,
         evidence=excluded.evidence, source_blocks=excluded.source_blocks,
-        created_utc=excluded.created_utc
+        created_utc=excluded.created_utc,
+        ml_match_probability=excluded.ml_match_probability,
+        ml_classification_tier=excluded.ml_classification_tier
 """
 
 
@@ -401,7 +414,9 @@ def replace_review_candidates_for_run(
 ) -> None:
     """Replace this run's review-candidate rows wholesale (delete + bulk
     insert) — a review pair no longer in the latest run's output should
-    disappear rather than linger as a stale suggestion."""
+    disappear rather than linger as a stale suggestion. `rows` are
+    `(patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
+    run_id, created_utc, ml_match_probability, ml_classification_tier)`."""
     conn.execute("DELETE FROM review_candidate WHERE run_id = %s", (run_id,))
     _executemany(conn, _REVIEW_CANDIDATE_INSERT_SQL, rows)
 
@@ -425,7 +440,7 @@ def review_candidates_for_patid(conn: PgConnection, patid: str) -> list[dict]:
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
         WHERE rc.patid_a = %s OR rc.patid_b = %s
-        ORDER BY rc.confidence DESC NULLS LAST, rc.id
+        ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
         """,
         (patid, patid),
     ).fetchall()
@@ -449,10 +464,10 @@ def list_review_candidates(
     where = []
     params: list = []
     if confidence_min is not None:
-        where.append("rc.confidence >= %s")
+        where.append("COALESCE(rc.confidence, rc.ml_match_probability) >= %s")
         params.append(confidence_min)
     if confidence_max is not None:
-        where.append("rc.confidence <= %s")
+        where.append("COALESCE(rc.confidence, rc.ml_match_probability) <= %s")
         params.append(confidence_max)
     if search:
         where.append(
@@ -505,7 +520,7 @@ def list_review_candidates(
                {reviewed_expr} AS reviewed
         {base_from}
         {where_sql}
-        ORDER BY rc.confidence DESC NULLS LAST, rc.id
+        ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
         LIMIT %s OFFSET %s
         """,
         [*params, page_size, offset],
@@ -733,20 +748,30 @@ def insert_audit_log(
     next_state: str,
     run_id: str | None,
     related_patids: str | None = None,
+    prev_mid: str | None = None,
+    undo_of: int | None = None,
 ) -> int:
     """`RETURNING id` + `fetchone()` stands in for sqlite3's `cur.lastrowid`
     — psycopg/Postgres has no equivalent cursor attribute."""
     row = conn.execute(
         """
         INSERT INTO audit_log
-            (ts_utc, "user", action, patids, mid, prev_state, next_state, run_id, related_patids)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (ts_utc, "user", action, patids, mid, prev_state, next_state, run_id,
+             related_patids, prev_mid, undo_of)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
-        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id, related_patids),
+        (ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
+         related_patids, prev_mid, undo_of),
     ).fetchone()
     assert row is not None
     return int(row["id"])
+
+
+#: Shared with `list_audit_log` and `get_audit_log_row` — `undone` is never
+#: stored, it's derived: a row is undone iff some other row's `undo_of`
+#: points back at its id (see sql_backend.py's identical pattern).
+_UNDONE_EXPR = "EXISTS(SELECT 1 FROM audit_log u WHERE u.undo_of = al.id)"
 
 
 def list_audit_log(
@@ -754,14 +779,31 @@ def list_audit_log(
 ) -> list[dict]:
     if since:
         rows = conn.execute(
-            "SELECT * FROM audit_log WHERE ts_utc > %s ORDER BY id DESC LIMIT %s",
+            f"""
+            SELECT al.*, {_UNDONE_EXPR} AS undone FROM audit_log al
+            WHERE al.ts_utc > %s ORDER BY al.id DESC LIMIT %s
+            """,
             (since, limit),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM audit_log ORDER BY id DESC LIMIT %s", (limit,)
+            f"""
+            SELECT al.*, {_UNDONE_EXPR} AS undone FROM audit_log al
+            ORDER BY al.id DESC LIMIT %s
+            """,
+            (limit,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_audit_log_row(conn: PgConnection, audit_id: int) -> dict | None:
+    """One audit_log row plus its derived `undone` flag — the reversal target
+    of `POST /audit/{audit_id}/undo` (`src/api/routers/audit.py`)."""
+    row = conn.execute(
+        f"SELECT al.*, {_UNDONE_EXPR} AS undone FROM audit_log al WHERE al.id = %s",
+        (audit_id,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 # ── Persisted blocking index (`block_key`) ──────────────────────────────────
@@ -916,6 +958,7 @@ __all__ = [
     "list_entities",
     "insert_audit_log",
     "list_audit_log",
+    "get_audit_log_row",
     "dashboard_summary",
     "hash_block_key",
     "HASHED_BLOCKS",

@@ -22,10 +22,37 @@ resource "azurerm_user_assigned_identity" "cmk" {
   tags = local.tags
 }
 
+# The current `terraform apply` caller's own public IP -- see the
+# network_acls comment below for why this is needed at all. Any plain-text
+# "what's my IP" service works; ipify is a long-standing, widely-used one
+# for exactly this Terraform pattern. `chomp` strips the trailing newline
+# the endpoint returns.
+data "http" "apply_caller_ip" {
+  url = "https://api.ipify.org?format=text"
+}
+
 # purge_protection_enabled is required by Azure for a vault used as a CMK
 # source for Storage/Postgres, and is permanent once set -- tearing down
 # this environment leaves the vault soft-deleted for its retention window
 # rather than immediately gone.
+#
+# public_network_access_enabled = true + a Deny-by-default network ACL that
+# allows only the current apply caller's IP -- NOT the `false` a first
+# instinct reaches for. Reason: azurerm_key_vault_key.storage/.postgres
+# below are managed through the Key Vault DATA plane (creating/reading
+# actual key material), which network ACLs govern regardless of the
+# caller's RBAC role -- "AzureServices" bypass only covers first-party
+# Azure services (Azure Backup, Azure ML, etc.), never GitHub Actions or a
+# human's laptop, even authenticated via OIDC/az login. With
+# public_network_access_enabled = false outright, ip_rules are ignored
+# entirely and there is no way for Terraform itself (CI or a human running
+# the first bootstrap apply) to ever create these two key resources -- every
+# `terraform apply` that touches them would fail. Everything that reaches
+# this vault over the VNet (the app's own managed identities, Azure ML) goes
+# through the Private Endpoint below, which bypasses network_acls
+# entirely and is unaffected either way; this only changes how EXTERNAL
+# callers (whoever is running Terraform) are gated -- from "always blocked,
+# no matter what" to "blocked unless it's the IP running this exact apply."
 resource "azurerm_key_vault" "main" {
   name                = "kv-${local.name_prefix}-${local.suffix}"
   resource_group_name = azurerm_resource_group.main.name
@@ -36,11 +63,12 @@ resource "azurerm_key_vault" "main" {
   rbac_authorization_enabled = true
   purge_protection_enabled   = true
 
-  public_network_access_enabled = false
+  public_network_access_enabled = true
 
   network_acls {
     default_action = "Deny"
     bypass         = "AzureServices"
+    ip_rules       = ["${chomp(data.http.apply_caller_ip.response_body)}/32"]
   }
 
   tags = local.tags

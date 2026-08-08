@@ -48,6 +48,8 @@ def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict])
                 evidence=rc["evidence"], source_blocks=rc["source_blocks"],
                 fs_match_probability=rc.get("fs_match_probability"),
                 fs_classification_tier=rc.get("fs_classification_tier"),
+                ml_match_probability=rc.get("ml_match_probability"),
+                ml_classification_tier=rc.get("ml_classification_tier"),
                 patient_a=CandidatePatient(
                     patid=rc["patid_a"], first_name=rc["a_first_name"],
                     last_name=rc["a_last_name"], birth_date=rc["a_birth_date"],
@@ -104,6 +106,8 @@ def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
         evidence=rc["evidence"], source_blocks=rc["source_blocks"],
         fs_match_probability=rc.get("fs_match_probability"),
         fs_classification_tier=rc.get("fs_classification_tier"),
+        ml_match_probability=rc.get("ml_match_probability"),
+        ml_classification_tier=rc.get("ml_classification_tier"),
         reviewed=bool(rc["reviewed"]),
         patient_a=CandidatePatient(
             patid=rc["patid_a"], first_name=rc["a_first_name"],
@@ -195,12 +199,14 @@ def get_raw_record(
     backend: IndexBackend = Depends(get_backend),
     reviewer_id: str = Depends(get_reviewer_id_optional),
 ) -> RawRecord:
-    """Unmasked source record — includes the full SSN (`SSN_raw`), the
-    dashboard's SSN-reveal toggle and "View raw data" drawer are both just
-    this same fetch. Every successful call is written to `audit_log` (action
-    `view_raw`) so there's a record of who accessed a patient's unmasked PHI
-    and when, matching the accountability every other reviewer action
-    already gets — a 404 (nothing to view) is not logged."""
+    """Unmasked source record — includes the full SSN (`SSN_raw`), backing
+    the "View raw data" drawer. The SSN-reveal toggle uses the separate
+    `GET /records/{patid}/ssn-clean` below instead (the pipeline-normalized
+    value, not this raw one) — see that route's docstring for why. Every
+    successful call here is written to `audit_log` (action `view_raw`) so
+    there's a record of who accessed a patient's unmasked PHI and when,
+    matching the accountability every other reviewer action already gets —
+    a 404 (nothing to view) is not logged."""
     raw_json = backend.get_record_raw(patid)
     if raw_json is None:
         raise HTTPException(

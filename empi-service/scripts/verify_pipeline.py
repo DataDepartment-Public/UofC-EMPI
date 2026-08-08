@@ -110,8 +110,7 @@ def main() -> None:
                              "rules_fired", "is_suspicious", "cluster_id"}
         <= set(matches.columns),
         "every rule type fired": set(matches["match_rule"].unique()).issubset({
-            "SSN_DOB", "NAME_DOB_PHONE", "NAME_DOB_EMAIL",
-            "NAME_DOB_ADDRESS", "NAME_DOB_SEX"}),
+            "SSN_DOB", "NAME_DOB_PHONE", "NAME_DOB_EMAIL"}),
         "confidence in range": matches["confidence"].between(0.9, 1.0).all(),
     }
     ok = True

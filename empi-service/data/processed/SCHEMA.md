@@ -32,8 +32,8 @@ For every cleaned source field the producer keeps the original in
 | `last_4_SSN` | string (4 digits) | yes | blocking (B9) |
 | `Email_clean` | string | yes | blocking (B6), rules |
 | `ZipCD_clean_base` | string (5 digits) | yes | blocking (B7) |
-| `AddressLine1_clean` | string | yes | rules (NAME_DOB_ADDRESS) |
-| `SexAtBirthDSC_clean` | string ∈ {MALE,FEMALE,OTHER} | yes | rules (NAME_DOB_SEX) |
+| `AddressLine1_clean` | string | yes | rules (no live rule today; see removed NAME_DOB_ADDRESS) |
+| `SexAtBirthDSC_clean` | string ∈ {MALE,FEMALE,OTHER} | yes | rules (no live rule today; see removed NAME_DOB_SEX) |
 | `Phones_set` | list&lt;string&gt; | yes | blocking (B5), rules (phone agreement) |
 
 `Phones_set` (and `full_name_tokens`) serialize as a native Parquet

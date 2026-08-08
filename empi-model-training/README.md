@@ -1,20 +1,20 @@
 # empi-model-training
 
-Azure ML training pipeline for the eMPI record-matching system's two matcher
-models — the Splink-based Fellegi-Sunter (FS) matcher and the LightGBM v3
-pair classifier. Lives inside `UofC-EMPI/` and is tracked/pushed as part of
-that same repo, but is a **logically independent** codebase — see
-"Independent by design" below.
+Azure ML training pipeline for the eMPI record-matching system's three
+classifier models — the Splink-based Fellegi-Sunter (FS) matcher, the
+LightGBM v5 confident-match classifier, and the non-match gate. Lives inside
+`UofC-EMPI/` and is tracked/pushed as part of that same repo, but is a
+**logically independent** codebase — see "Independent by design" below.
 
 **Scope:** training + experiment tracking + model registry only. Serving is
 unchanged — the `empi-service` backend still loads a model artifact from its
-`models/fs` / `models/ml` directories (or the `empi-models` Azure Files
-share in Azure) and scores in-process. There are no Azure ML managed online
-endpoints here.
+`models/fs` / `models/ml` / `models/nonmatch_gate` directories (or the
+`empi-models` Azure Files share in Azure) and scores in-process. There are
+no Azure ML managed online endpoints here.
 
 ## Runs fully locally — Azure ML is optional
 
-Both training scripts are plain Python CLIs with no Azure dependency in
+All three training scripts are plain Python CLIs with no Azure dependency in
 their core logic:
 
 ```bash
@@ -29,6 +29,11 @@ uv run python -m empi_model_training.training.lightgbm_train \
     --cleaned-index path/to/cleaned.parquet \
     --gold-labels path/to/gold_labels.csv \
     --promote
+
+uv run python -m empi_model_training.training.nonmatch_gate_train \
+    --cleaned-index path/to/cleaned.parquet \
+    --gold-labels path/to/gold_labels.csv \
+    --promote
 ```
 
 MLflow tracking works locally too (writes to `./mlruns/`, no server needed)
@@ -36,9 +41,9 @@ MLflow tracking works locally too (writes to `./mlruns/`, no server needed)
 actually running under Azure ML (detected via the tracking URI scheme), since
 a plain local run has no database-backed registry to register into.
 
-`uv run pytest` runs both scripts end-to-end against small synthetic
-fixtures (`tests/conftest.py`) — a real Splink fit and a real LightGBM fit,
-not mocked, so an API-usage mistake in either training path fails a test
+`uv run pytest` runs all three scripts end-to-end against small synthetic
+fixtures (`tests/conftest.py`) — a real Splink fit and two real LightGBM
+fits, not mocked, so an API-usage mistake in any training path fails a test
 locally before it ever reaches Azure ML.
 
 The `submit.py` / `components/` / `utils/` modules (below) are strictly
@@ -60,14 +65,33 @@ deliberate project decision (see `CLAUDE.md`), not an oversight. Concretely:
   separately in each repo.
 - `training/lightgbm_train.py` is an **independent reimplementation** of
   both the feature engineering (`empi-service/src/models/ml_matcher/
-  lightgbm_v3.py`'s `V3FeatureBuilder`) and the training loop (previously
-  only a notebook, `empi-service/notebooks/ml_model/
-  pair_classifier_lightgbm_ambiguous_v3.ipynb`).
+  lightgbm_v5.py`'s `FeatureBuilderV5`) and the training loop (previously
+  only a notebook, `empi-service/notebooks/ml_model/confident_match/
+  pair_classifier_lightgbm_confident_match_v5.ipynb`). Trains on the whole
+  gold-labeled pool (no population filter) with class 1 = confident match,
+  matching `DirectMatchAdapter`'s pass-through serving semantics — the v5
+  generation of this model; see `empi-service/docs/ML-Model-LightGBM-v5.md`
+  for what changed from the earlier v3/v4 generation and why.
+- `training/nonmatch_gate_train.py` is an **independent reimplementation**
+  of the pipeline's Stage-4.25 non-match gate, documented in
+  `empi-service/docs/Nonmatch-Gate-Guide.md` and previously only a notebook
+  (`empi-service/notebooks/ml_model/confident_nonmatch/
+  pair_classifier_lightgbm_nonmatch_gate_v1.ipynb`). Shares
+  `lightgbm_train.py`'s feature engineering (duplicated, not imported across
+  the two training scripts — same reasoning as the service's own choice to
+  duplicate `FeatureBuilderV5` usage rather than share code across model
+  packages) but trains a **separate model** on a different target: class 1
+  = plausible (match ∪ ambiguous), serialized as a raw fitted classifier
+  with no adapter wrapper. Has its own model store (`models/nonmatch_gate/`)
+  and is never confused with the ML matcher in `registry_utils.py`'s
+  deploy-gate (`gate_pr` reads a different metric shape than
+  `auto_merge_pr` — see that module's docstring).
 - `training/registry_utils.py` is an independent, smaller copy of the
   active-model/deploy-gate pattern in `empi-service/src/models/
-  {fs_matcher,ml_matcher}/registry.py` — same file-naming convention
-  (`*_model_<ts>.json|.pkl`, `.meta.json`, `active.json`) so a promoted
-  artifact drops into the serving share unchanged, but not a shared import.
+  {fs_matcher,ml_matcher,nonmatch_gate}/registry.py` — same file-naming
+  convention (`*_model_<ts>.json|.pkl` / `nonmatch_gate_<ts>.pkl`,
+  `.meta.json`, `active.json`) so a promoted artifact drops into the serving
+  share unchanged, but not a shared import.
 
 If something in `empi-service` changes in a way that should be reflected
 here (a new field in the cleaned-records contract, a threshold default),
@@ -106,7 +130,7 @@ crossing a trust boundary should be auditable, not silent.
    ```bash
    uv run python -m empi_model_training.utils.register_environment
    ```
-4. Submit:
+4. Submit (`--job` is one of `fs`, `lightgbm`, `gate`):
    ```bash
    uv run python -m empi_model_training.submit --job fs \
        --cleaned-index azureml:empi-cleaned-records:2026.07.25 \
@@ -145,8 +169,9 @@ uv run python -m empi_model_training.training.fs_train \
 `--labels` reference, so `--reviewer-labels` currently only works for local
 or direct-CLI training runs, not ones submitted through `submit.py` to
 Azure ML. Extending `submit.py` and the AML component definitions
-(`components/fs_train_component.py`, `components/lightgbm_train_component.py`)
-to accept a second labels input is a natural follow-up, not done here.
+(`components/fs_train_component.py`, `components/lightgbm_train_component.py`,
+`components/nonmatch_gate_train_component.py`) to accept a second labels
+input is a natural follow-up, not done here.
 
 ## Commands
 
@@ -164,10 +189,12 @@ src/empi_model_training/
   training/                # the actual training logic -- runs with zero Azure dependency
     fs_train.py
     lightgbm_train.py
+    nonmatch_gate_train.py
     registry_utils.py
   components/               # Azure ML component definitions (wrap training/ CLIs unchanged)
     fs_train_component.py
     lightgbm_train_component.py
+    nonmatch_gate_train_component.py
   utils/                     # Azure ML plumbing: connecting, registering, preflight checks
     azure_client.py
     preflight.py
@@ -178,4 +205,5 @@ tests/
   conftest.py                 # synthetic (non-PHI) fixtures for real end-to-end smoke tests
   test_fs_train.py
   test_lightgbm_train.py
+  test_nonmatch_gate_train.py
 ```

@@ -26,13 +26,13 @@ tables, so everything below applies identically to `empi.db`'s tables.
 |---|---|---|
 | `entity.parquet` | one row per resolved entity (singleton or cluster) | `mid`, `origin`, `is_merged`, `confidence`, `match_rule` |
 | `entity_member.parquet` | one row per PATID | resolves each PATID to exactly one `mid` |
-| `review_candidate.parquet` | one row per unresolved pair awaiting review | includes `fs_match_probability`/`fs_classification_tier` when scored |
+| `review_candidate.parquet` | one row per unresolved pair awaiting review | includes `fs_match_probability`/`fs_classification_tier` (incremental scoring only) and `ml_match_probability`/`ml_classification_tier` (batch publish, Stage 4.5) when scored |
 | `entity_suggestion.parquet` | a reviewer-locked PATID's would-be new grouping | recorded, never auto-applied ("sticky unmerge") |
 | `block_key.parquet` | on-disk mirror of the blocking posting lists | supports incremental-scoring point lookups |
 | `cleaned_attrs.parquet` | query-by-patid mirror of Stage 1's cleaned output | avoids re-reading the full Stage 1 Parquet per request |
 | `record_attrs.parquet` | display fields for the dashboard's `GET /records` | denormalized at publish time |
 | `record_raw.parquet` | the "View Raw Data" drawer's un-scrubbed source fields | one JSON blob per PATID |
-| `audit_log.parquet` | append-only merge/unmerge/split/dismiss history | also the source of truth for reviewer-locked PATIDs |
+| `audit_log.parquet` | append-only merge/unmerge/split/dismiss/undo history | also the source of truth for reviewer-locked PATIDs; `prev_mid`/`undo_of`/`undone` carry undo provenance |
 
 Full column-level schema for every table: `Data-Contract.md`'s Stage 6
 section (§6a–6e).

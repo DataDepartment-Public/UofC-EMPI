@@ -10,8 +10,8 @@ pipeline into one place:
 ```
 empi-service/          Python backend — pipeline + FastAPI service
 empi-dashboard/         Next.js frontend — reviewer dashboard
-empi-model-training/     Azure ML training pipeline for both matcher models
-                        (a logically independent codebase — see below)
+empi-model-training/     Azure ML training pipeline for all three classifier
+                        models (a logically independent codebase — see below)
 terraform/               Azure infrastructure as code
 docs/                    Cross-cutting architecture docs + the client deck
 .github/workflows/       CI/CD — deploy, terraform plan/apply, model promotion
@@ -24,7 +24,7 @@ docs/                    Cross-cutting architecture docs + the client deck
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │  Browser                                                            │
-│    React UI (Dashboard tab · Dataset tab · Model Explanation)       │
+│    React UI (Dashboard · Review Queue · Patient Registry · Admin)   │
 └───────────────▲──────────────────────────────────────────────────────┘
                 │ HTTPS (JSON)
 ┌───────────────┴──────────────────────────────────────────────────────┐
@@ -45,8 +45,9 @@ docs/                    Cross-cutting architecture docs + the client deck
 └──────────────────────────────────────────────────────────────────────┘
                 │
                 ▼
-  empi-service/src — clean → block → rules → cluster (the entity-resolution
-  pipeline itself, orchestrated by src/pipeline.py, unchanged by the API layer)
+  empi-service/src — clean → block → rules → FS(audit) → gate → ML → cluster
+  (the entity-resolution pipeline itself, orchestrated by src/pipeline.py,
+  unchanged by the API layer)
 ```
 
 ## What's in each folder
@@ -56,13 +57,15 @@ docs/                    Cross-cutting architecture docs + the client deck
 The Python backend: the entity-resolution pipeline and the FastAPI service that
 wraps it.
 
-- `src/pipeline.py` — orchestrates the full `clean → block → rules → cluster` run.
+- `src/pipeline.py` — orchestrates the full `clean → block → rules →
+  FS matcher (audit-only) → non-match gate → ML matcher → cluster` run.
 - `src/preprocessing/` — data cleaning and blocking (q-gram, stacked, meta-blocking).
-- `src/models/` — deterministic matching rules and clustering.
+- `src/models/` — deterministic matching rules, the FS matcher, the
+  non-match gate, the ML matcher, and clustering.
 - `src/evaluation/` — blocking/rule evaluation harnesses.
 - `src/api/` — FastAPI app (`main.py`), routers (`health`, `runs`, `records`,
-  `audit`, `dashboard`, `admin`), the pluggable resolved-output store
-  (`backends/` — SQLite, Postgres, or local Parquet behind one
+  `audit`, `dashboard`, `admin`, `explanations`), the pluggable resolved-output
+  store (`backends/` — SQLite, Postgres, or local Parquet behind one
   `IndexBackend` interface), and job orchestration/retry (`jobs.py`). This
   is what the dashboard talks to.
 - `data/`, `models/`, `logs/` — pipeline inputs/outputs and run artifacts
@@ -73,7 +76,9 @@ wraps it.
   `Data-Cleaning-Guide.md`, `Blocking-Guide.md` (+ the frozen
   `Blocking-Research-Embedding-Graph.md` research writeup behind it),
   `Deterministic-Rules-Guide.md`, `FS-Matcher-Production-Guide.md`,
-  `API-Design.md`, `Application-Architecture.md`.
+  `Nonmatch-Gate-Guide.md`, `ML-Model-LightGBM-v5.md`,
+  `ML-Matcher-Integration-Guide.md`, `Explanations-Guide.md`,
+  `End-to-End-Evaluation-Guide.md`, `API-Design.md`, `Application-Architecture.md`.
 - `tests/` — unit/integration/regression tests.
 
 Run locally: see [`empi-service/README.md`](empi-service/README.md).
@@ -111,19 +116,19 @@ below, not a manual `terraform apply`.
 
 ### `empi-model-training/`
 
-Azure ML training pipeline for the two matcher models (the Splink-based
-Fellegi-Sunter matcher and the LightGBM pair classifier) — experiment
-tracking, reproducible training jobs, and a model registry. It's pushed as
-part of this repo but is a **logically independent codebase**: no shared
-imports with `empi-service`, by design. Where the two need to agree on
-something (a Splink comparison structure, a feature's exact definition), the
-logic is faithfully reimplemented here rather than shared — if
-`empi-service`'s version changes, this copy needs a deliberate, matching
-update; nothing keeps them in sync automatically.
+Azure ML training pipeline for the three classifier models (the Splink-based
+Fellegi-Sunter matcher, the LightGBM v5 confident-match classifier, and the
+LightGBM non-match gate) — experiment tracking, reproducible training jobs,
+and a model registry. It's pushed as part of this repo but is a **logically
+independent codebase**: no shared imports with `empi-service`, by design.
+Where the two need to agree on something (a Splink comparison structure, a
+feature's exact definition), the logic is faithfully reimplemented here
+rather than shared — if `empi-service`'s version changes, this copy needs a
+deliberate, matching update; nothing keeps them in sync automatically.
 
 Scope is training + experiment tracking + model registry only — serving is
 unchanged, `empi-service` still loads a model artifact from disk and scores
-in-process. Both training scripts are plain Python CLIs with no Azure
+in-process. All three training scripts are plain Python CLIs with no Azure
 dependency, so this runs and tests fully locally; Azure ML (workspace,
 compute cluster, registry) is an additive layer for real training runs, not
 a hard requirement. See [`empi-model-training/README.md`](empi-model-training/README.md).

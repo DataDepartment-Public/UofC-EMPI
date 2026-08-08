@@ -13,6 +13,12 @@ cache is keyed on the model file's mtime, so a promoted model gets picked
 up the first time anything asks for it regardless. This endpoint just makes
 that moment immediate and observable instead of implicit and whenever.
 
+`GET/PUT /admin/thresholds` are the live-tunable ML decision thresholds —
+see `src/api/threshold_store.py` for what changing these actually does
+(applies immediately to the running process, persists to a JSON file so it
+survives a restart, and only affects future scoring — never rewrites an
+already-published run's tiers).
+
 Protected the same way every other route in this service is: there is no
 per-route auth here, matching health/records/audit/dashboard/runs — the
 backend has no public ingress at all (VNet-only, see terraform/README.md),
@@ -23,8 +29,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
+from src.api import threshold_store
 from src.api.deps import get_settings
-from src.api.schemas import ActiveModelInfo, CachedModelInfo, ModelReloadResponse, ModelStatusResponse
+from src.api.schemas import (
+    ActiveModelInfo,
+    CachedModelInfo,
+    ModelReloadResponse,
+    ModelStatusResponse,
+    ThresholdSettings,
+)
 from src.config import Settings
 from src.models import model_cache
 from src.models.fs_matcher.registry import active_model_meta as fs_active_model_meta
@@ -59,3 +72,19 @@ def model_status(settings: Settings = Depends(get_settings)) -> ModelStatusRespo
         fs_active_model=fs_active,
         ml_active_model=ml_active,
     )
+
+
+@router.get("/thresholds", response_model=ThresholdSettings)
+def get_thresholds(settings: Settings = Depends(get_settings)) -> ThresholdSettings:
+    return ThresholdSettings(**threshold_store.current_thresholds(settings))
+
+
+@router.put("/thresholds", response_model=ThresholdSettings)
+def update_thresholds(
+    body: ThresholdSettings, settings: Settings = Depends(get_settings),
+) -> ThresholdSettings:
+    saved = threshold_store.save_thresholds(settings, body.model_dump())
+    return ThresholdSettings(**saved)
+
+
+__all__ = ["router"]

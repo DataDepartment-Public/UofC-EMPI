@@ -253,7 +253,10 @@ class TestReviewCandidate:
     def test_replace_review_candidates_for_run(self, conn):
         postgres_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0")],
+            [(
+                "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
+                None, None,
+            )],
         )
         conn.commit()
         rows = postgres_backend.review_candidates_for_patid(conn, "P1")
@@ -261,9 +264,19 @@ class TestReviewCandidate:
         assert rows[0]["patid_b"] == "P2"
         assert postgres_backend.review_candidates_for_patid(conn, "P2")[0]["patid_a"] == "P1"
 
+    def test_replace_review_candidates_for_run_carries_ml_score(self, conn):
+        postgres_backend.replace_review_candidates_for_run(
+            conn, "r1",
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", 0.24, "human_review")],
+        )
+        conn.commit()
+        rows = postgres_backend.review_candidates_for_patid(conn, "P1")
+        assert rows[0]["ml_match_probability"] == 0.24
+        assert rows[0]["ml_classification_tier"] == "human_review"
+
     def test_replace_clears_stale_rows_for_same_run(self, conn):
         postgres_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0")]
+            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None)]
         )
         conn.commit()
         postgres_backend.replace_review_candidates_for_run(conn, "r1", [])
@@ -276,7 +289,7 @@ class TestReviewCandidate:
         postgres_backend.upsert_entity(conn, "M-2", "r1", "none", False, None, "t0")
         postgres_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
         postgres_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, 0.7, None, "B3", "r1", "t0")]
+            conn, "r1", [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None)]
         )
         conn.commit()
 

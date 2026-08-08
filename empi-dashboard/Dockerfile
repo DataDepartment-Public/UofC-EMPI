@@ -34,12 +34,13 @@ ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0
 
 # `output: "standalone"` (next.config.ts) traces only the node_modules the
-# server actually needs — .next/static isn't included by standalone and must
-# be copied in separately. No public/ directory exists in this project today
-# (nothing to copy); add `COPY --from=builder /app/public ./public` if one is
-# added later.
+# server actually needs — .next/static and public/ aren't included by
+# standalone and must be copied in separately (public/alliance-logo.png is
+# served by src/components/shared/TopNav.tsx via next/image, which 400s
+# without this).
 COPY --from=builder --chown=empi:empi /app/.next/standalone ./
 COPY --from=builder --chown=empi:empi /app/.next/static ./.next/static
+COPY --from=builder --chown=empi:empi /app/public ./public
 
 USER empi
 

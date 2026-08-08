@@ -45,6 +45,7 @@ _SCHEMAS: dict[str, list[str]] = {
         "patid_a", "patid_b", "match_rule", "confidence", "evidence",
         "source_blocks", "run_id", "created_utc",
         "fs_match_probability", "fs_classification_tier",
+        "ml_match_probability", "ml_classification_tier",
     ],
     "entity_suggestion": ["patid", "run_id", "suggested_mid", "created_utc"],
     "record_attrs": [
@@ -55,18 +56,31 @@ _SCHEMAS: dict[str, list[str]] = {
     "audit_log": [
         "id", "ts_utc", "user", "action", "patids", "mid",
         "prev_state", "next_state", "run_id", "related_patids",
+        "prev_mid", "undo_of",
     ],
 }
 
-#: The 8 columns `publish.py`'s batch replace passes to
+#: The 10 columns `publish.py`'s batch replace passes to
 #: `replace_review_candidates_for_run` — no `fs_match_probability` /
-#: `fs_classification_tier`, unlike `insert_review_candidates`'ish 10-column
-#: incremental-append rows (batch publish never FS-scores a run; only
-#: incremental scoring does). Matches `sql_backend._REVIEW_CANDIDATE_INSERT_SQL`'s
-#: column list (as opposed to the ``_FULL_SQL`` variant).
+#: `fs_classification_tier` (batch publish never FS-scores a run; only
+#: incremental scoring does, via `insert_review_candidates`'s 10-column FS
+#: rows), but it does carry the Stage 4.5 ML matcher's score. Matches
+#: `sql_backend._REVIEW_CANDIDATE_INSERT_SQL`'s column list (as opposed to
+#: the ``_FULL_SQL`` variant).
 _REVIEW_CANDIDATE_BATCH_COLUMNS: list[str] = [
     "patid_a", "patid_b", "match_rule", "confidence", "evidence",
     "source_blocks", "run_id", "created_utc",
+    "ml_match_probability", "ml_classification_tier",
+]
+
+#: The 10 columns `incremental.py`'s `_persist_review_candidates` passes to
+#: `insert_review_candidates` — FS score columns, no ML ones (incremental
+#: scoring doesn't run the ML matcher, only batch publish does). Matches
+#: `sql_backend._REVIEW_CANDIDATE_INSERT_FULL_SQL`'s column list.
+_REVIEW_CANDIDATE_FS_COLUMNS: list[str] = [
+    "patid_a", "patid_b", "match_rule", "confidence", "evidence",
+    "source_blocks", "run_id", "created_utc",
+    "fs_match_probability", "fs_classification_tier",
 ]
 
 #: `record_attrs` columns the dashboard read routes join in for display —
@@ -268,7 +282,10 @@ class ParquetIndexBackend:
     def insert_review_candidates(self, rows: list[tuple]) -> None:
         if not rows:
             return
-        new = pd.DataFrame(rows, columns=_SCHEMAS["review_candidate"])
+        new = pd.DataFrame(rows, columns=_REVIEW_CANDIDATE_FS_COLUMNS)
+        new["ml_match_probability"] = None
+        new["ml_classification_tier"] = None
+        new = new[_SCHEMAS["review_candidate"]]
         combined = pd.concat([self._tables["review_candidate"], new], ignore_index=True)
         self._tables["review_candidate"] = combined.drop_duplicates(
             subset=["patid_a", "patid_b", "run_id"], keep="last"
@@ -307,11 +324,11 @@ class ParquetIndexBackend:
     def replace_review_candidates_for_run(self, run_id: str, rows: list[tuple]) -> None:
         """Full per-run replace, mirroring `sql_backend.replace_review_candidates_for_run`
         — a pair no longer in the latest run's `non_matches` disappears rather
-        than lingering. `rows` are the 8-column batch-publish tuples (no FS
+        than lingering. `rows` are the 10-column batch-publish tuples (no FS
         score columns — batch publish never FS-scores a run, only incremental
-        scoring does via `insert_review_candidates`'s 10-column rows); the two
-        FS columns are set to `None` here, matching the `NULL` SQLite leaves
-        for the columns its own 8-column INSERT omits."""
+        scoring does via `insert_review_candidates`'s 10-column FS rows); the
+        two FS columns are set to `None` here, matching the `NULL` SQLite
+        leaves for the columns its own batch INSERT omits."""
         df = self._tables["review_candidate"]
         df = df[df["run_id"] != run_id]
         if rows:
@@ -493,10 +510,14 @@ class ParquetIndexBackend:
     def review_candidates_for_patid(self, patid: str) -> list[dict]:
         """Pandas equivalent of `sql_backend.review_candidates_for_patid` — joins
         `record_attrs` on both sides of the pair so the UI has the other
-        PATID's display fields, not just its id. Ordered by confidence DESC
-        (nulls last, pandas' default); `review_candidate` has no surrogate
-        `id` column in Parquet mode (see its schema note), so `patid_a`/
-        `patid_b` substitute as the deterministic tiebreak SQL gets from `id`."""
+        PATID's display fields, not just its id. Ordered by
+        `COALESCE(confidence, ml_match_probability)` DESC (nulls last,
+        pandas' default) — most pairs only have an ML score, no rule
+        confidence, so sorting on `confidence` alone would leave the
+        ML-scored majority in insertion order; `review_candidate` has no
+        surrogate `id` column in Parquet mode (see its schema note), so
+        `patid_a`/`patid_b` substitute as the deterministic tiebreak SQL
+        gets from `id`."""
         rc = self._deduped_review_candidates()
         hits = rc[(rc["patid_a"] == patid) | (rc["patid_b"] == patid)]
         attrs = self._tables["record_attrs"][_DISPLAY_ATTR_COLUMNS]
@@ -505,7 +526,14 @@ class ParquetIndexBackend:
         joined = (
             hits.merge(a_attrs, on="patid_a", how="left")
             .merge(b_attrs, on="patid_b", how="left")
-            .sort_values(["confidence", "patid_a", "patid_b"], ascending=[False, True, True])
+        )
+        sort_conf = joined["confidence"].fillna(joined["ml_match_probability"])
+        joined = (
+            joined.assign(_sort_conf=sort_conf)
+            .sort_values(
+                ["_sort_conf", "patid_a", "patid_b"], ascending=[False, True, True]
+            )
+            .drop(columns="_sort_conf")
         )
         return [_row_to_dict(row) for _, row in joined.iterrows()]
 
@@ -551,11 +579,12 @@ class ParquetIndexBackend:
             joined["patid_a"] + "," + joined["patid_b"]
         ).isin(dismissed_pairs)
 
+        sort_conf = joined["confidence"].fillna(joined["ml_match_probability"])
         mask = pd.Series(True, index=joined.index)
         if confidence_min is not None:
-            mask &= joined["confidence"] >= confidence_min
+            mask &= sort_conf >= confidence_min
         if confidence_max is not None:
-            mask &= joined["confidence"] <= confidence_max
+            mask &= sort_conf <= confidence_max
         if search:
             like = search.lower()
             mask &= (
@@ -571,8 +600,13 @@ class ParquetIndexBackend:
         elif reviewed is False:
             mask &= ~joined["reviewed"]
 
-        filtered = joined[mask].sort_values(
-            ["confidence", "patid_a", "patid_b"], ascending=[False, True, True]
+        filtered = (
+            joined[mask]
+            .assign(_sort_conf=sort_conf[mask])
+            .sort_values(
+                ["_sort_conf", "patid_a", "patid_b"], ascending=[False, True, True]
+            )
+            .drop(columns="_sort_conf")
         )
         total = len(filtered)
         start = max(page - 1, 0) * page_size
@@ -592,6 +626,8 @@ class ParquetIndexBackend:
         next_state: str,
         run_id: str | None,
         related_patids: str | None = None,
+        prev_mid: str | None = None,
+        undo_of: int | None = None,
     ) -> int:
         """Append-only insert. `id` is a synthetic auto-increment (scan
         existing max + 1) — same convention as `next_mid()` — since Parquet
@@ -603,6 +639,7 @@ class ParquetIndexBackend:
             "patids": patids, "mid": mid, "prev_state": prev_state,
             "next_state": next_state, "run_id": run_id,
             "related_patids": related_patids,
+            "prev_mid": prev_mid, "undo_of": undo_of,
         }], columns=_SCHEMAS["audit_log"])
         self._tables["audit_log"] = pd.concat([df, new], ignore_index=True)
         return next_id

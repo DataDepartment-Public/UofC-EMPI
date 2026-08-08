@@ -257,8 +257,22 @@ plus the `public_network_access_enabled` flags in `postgres.tf`/
   (`azurerm_user_assigned_identity.cmk`) rather than each resource's own
   system-assigned identity — deliberately, to avoid a chicken-and-egg
   dependency between granting Key Vault access and the resource existing
-  yet. The vault itself is also private-only, RBAC-authorized, with purge
-  protection on (required for CMK use, and permanent once set).
+  yet. The vault itself is RBAC-authorized with purge protection on
+  (required for CMK use, and permanent once set), and reachable over the
+  VNet via its own Private Endpoint — but is **not** `public_network_access_
+  enabled = false` like Storage/Postgres/the backend. Reason: `azurerm_
+  key_vault_key.storage`/`.postgres` are managed through the Key Vault
+  *data plane*, which network ACLs enforce regardless of RBAC role or
+  OIDC auth — `bypass = "AzureServices"` only covers first-party Azure
+  services, never GitHub Actions or a human's laptop. Fully disabling
+  public access would make it impossible for `terraform apply` itself
+  (CI or the first bootstrap run) to ever create or update those two key
+  resources. Instead, `keyvault.tf` uses a `data "http"` lookup
+  (`api.ipify.org`) to allow only the current apply caller's own public IP
+  through the vault's `network_acls`, every time — this needs no change on
+  the human/CI side, and everything that reaches the vault over the VNet
+  (the app's own managed identities, Azure ML) is unaffected either way,
+  since Private Endpoint traffic never touches `network_acls` at all.
 
 **Real operational consequences of the backend having no public ingress,**
 not just a config flip:
@@ -336,3 +350,13 @@ registration live in `empi-model-training/` — see that repo's own
   requirement in A4 (`to-do.md`), not a measured production requirement —
   watch the CPU/memory alerts from `monitoring.tf` after a real run and bump
   to `P1v3`/`P2v3` if you see memory pressure or slow cold starts.
+- **The Key Vault's `network_acls.ip_rules` always reflects whoever ran
+  `terraform apply` most recently** (see "Network isolation & encryption"
+  above) — every apply from a new IP shows a one-line diff on that field,
+  which is expected, not drift to chase. This also adds a real external
+  dependency: if `api.ipify.org` is ever unreachable, `terraform plan`/
+  `apply` fails outright on that lookup, for every change, not just ones
+  touching the vault. If that becomes a real problem, swap it for a
+  different "what's my IP" endpoint, or replace the whole mechanism with an
+  explicit `az keyvault network-rule add`/`remove` pair wrapping just the
+  `terraform apply` step in `terraform-apply.yml` instead.

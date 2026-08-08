@@ -97,32 +97,40 @@ flowchart TD
     rules -->|"review / uncertain"| nonmatches["non_matches"]
     rules -->|"contradictions"| rejects["rejects (audit-only)"]
 
-    nonmatches --> fsgate{"FS model\nactive?"}
-    fsgate -->|no| mlgate
-    fsgate -->|yes| fs["FS matcher (Fellegi-Sunter)"]
-    fs --> mlgate{"ML model\nactive?"}
+    nonmatches --> fs["FS matcher (Fellegi-Sunter)\naudit-only: emits\nfeatures/score, routes nothing"]
+    fs --> gategate{"Gate model\nactive?"}
+    gategate -->|no, falls back to legacy FS gate| mlgate
+    gategate -->|yes, default| gate["Non-match gate\ndrops confident non-matches\n(only stage that records drops)"]
+    gate --> mlgate{"ML model\nactive?"}
 
     mlgate -->|no| cluster
-    mlgate -->|yes| ml["ML matcher (LightGBM v3)"]
+    mlgate -->|yes| ml["ML matcher (LightGBM v5)\nauto_merge vs human_review"]
     ml --> cluster["Cluster"]
 
     matches -->|always| cluster
-    fs -.->|"OFF by default"| cluster
-    ml -.->|"OFF by default"| cluster
+    fs -.->|"fs_feeds_clustering\nOFF by default"| cluster
+    ml ==>|"ml_feeds_clustering\nON by default"| cluster
 
     cluster --> publish["Publish -> Postgres"]
     publish --> reviewers(["Reviewer dashboard"])
 
     style fs fill:#fff3e0,stroke:#c9822a
-    style ml fill:#fff3e0,stroke:#c9822a
+    style gate fill:#fde8e8,stroke:#c94a4a
+    style ml fill:#e8f4ff,stroke:#4a90d9
     style rejects fill:#fde8e8,stroke:#c94a4a
 ```
 
-FS and ML score and gate candidates as audit/decision-support; only
-deterministic rules feed the automatic merge decision today (both
-`*_feeds_clustering` flags default off). Both matcher models are now
-trained via the Azure ML pipeline in Section 3 — see that section for how a
-trained artifact gets from Azure ML back into what this diagram serves.
+**FS is audit-only** — it scores and emits features but never gates or
+merges. **The ML matcher is not audit-only**: `ml_feeds_clustering` defaults
+**on** (`src/config.py`), so its `auto_merge`-tier verdicts union directly
+into Stage 5's clustering edges alongside the deterministic rules' matches
+— it is a real decision stage today, not decision-support. Tune
+`ml_auto_merge_threshold` against a held-out precision target accordingly,
+not the training notebook's operating point. Set
+`EMPI_ML_FEEDS_CLUSTERING=false` to restore deterministic-edges-only
+clustering. Both the ML matcher and the non-match gate are trained via the
+Azure ML pipeline in Section 3 — see that section for how a trained
+artifact gets from Azure ML back into what this diagram serves.
 
 ---
 
@@ -254,7 +262,8 @@ flowchart LR
     subgraph AMLWS["Azure ML Workspace (own managed network)"]
         compute["Compute cluster\n(scale-to-zero)"]
         fscomp["FS matcher training\n(Splink)"]
-        mlcomp["LightGBM v3 training"]
+        mlcomp["ML matcher training\n(LightGBM v5,\nconfident-match)"]
+        gatecomp["Non-match gate training\n(LightGBM, plausible\nvs confident non-match)"]
         mlflow_["MLflow tracking"]
         registry["Model Registry\n(versioned, tagged)"]
     end
@@ -269,8 +278,10 @@ flowchart LR
     submit --> compute
     compute --> fscomp
     compute --> mlcomp
+    compute --> gatecomp
     fscomp --> mlflow_
     mlcomp --> mlflow_
+    gatecomp --> mlflow_
     mlflow_ --> registry
     registry -->|"metrics surfaced\nfor review"| human
     human -->|approves| champion
@@ -284,9 +295,10 @@ flowchart LR
 
 **Why this is a genuine step up from where the models stood before:**
 
-- Both matchers now have a **real, reproducible training entry point** —
-  previously the LightGBM classifier's training procedure existed only as
-  a notebook, run by hand.
+- All three classifier models (FS matcher, ML matcher, non-match gate) now
+  have a **real, reproducible training entry point** — previously the
+  LightGBM-based models' training procedures existed only as notebooks, run
+  by hand.
 - **Experiment tracking** (MLflow) and a **model registry** exist for the
   first time — every training run's parameters, metrics, and artifact are
   captured, not just the final pickle file.
@@ -297,12 +309,13 @@ flowchart LR
   (`empi-service`) — no shared imports, faithful reimplementations kept
   deliberately in sync, tested end-to-end locally with real (not mocked)
   fits before ever reaching Azure ML.
-- **Getting a promoted model live needs no restart.** Neither matcher was
-  ever cached in memory before this pass — both re-read their model file
-  from disk on every single pipeline run and every incremental score call,
-  so a promoted model already took effect on the very next call with zero
-  code changes. `src/models/model_cache.py` now caches both in memory
-  (avoiding that repeated disk I/O once there's real traffic) keyed on the
+- **Getting a promoted model live needs no restart.** None of the three
+  models was ever cached in memory before this pass — each re-read its
+  model file from disk on every single pipeline run and every incremental
+  score call, so a promoted model already took effect on the very next call
+  with zero code changes. `src/models/model_cache.py` now caches all three
+  in memory (avoiding that repeated disk I/O once there's real traffic)
+  keyed on the
   file's own path + mtime, so it self-invalidates the moment a promoted
   model's file changes — no staleness reintroduced. `POST
   /admin/models/reload` (§1's routes table) makes that cutover immediate
@@ -462,9 +475,10 @@ take effect, not that it silently did.
   record to every other record, an 8-block scheme plus a q-gram similarity
   pass narrows the field first, pruned further by meta-blocking before
   anything gets scored (`src/preprocessing/stacked_blocking.py`).
-- **Models load once, not on every request** — both matchers used to
-  re-read their model file from disk on every single call; they're now
-  cached in memory (Section 3) — real savings once there's live traffic.
+- **Models load once, not on every request** — all three classifier models
+  (FS matcher, ML matcher, non-match gate) used to re-read their model file
+  from disk on every single call; they're now cached in memory (Section 3)
+  — real savings once there's live traffic.
 - **Training scales to zero when idle** — the Azure ML compute cluster
   (`terraform/ml_workspace.tf`, `Standard_DS3_v2`, 0-2 nodes) spins up only
   while a model is actually training, then back to zero — no idle compute

@@ -343,10 +343,17 @@ def build_diagnostics(
     out["blocked"] = flags(candidates)
     out["source_blocks"] = lookup(src_blocks)
 
-    out["rules_decision"] = np.where(
-        ~out["blocked"], None,
-        np.where(flags(matches), TIER_AUTO_MERGE,
-                 np.where(flags(rejects), TIER_NO_MATCH, TIER_HUMAN_REVIEW)),
+    # dtype=object is required here -- assigning a None-containing array to a
+    # DataFrame column without it lets pandas infer a "string" column, which
+    # silently turns every None into NaN (a different sentinel than the one
+    # every downstream `is None` / `.get()` check on this column expects).
+    out["rules_decision"] = pd.Series(
+        np.where(
+            ~out["blocked"], None,
+            np.where(flags(matches), TIER_AUTO_MERGE,
+                     np.where(flags(rejects), TIER_NO_MATCH, TIER_HUMAN_REVIEW)),
+        ),
+        index=out.index, dtype=object,
     )
     out["rules_rule"] = [
         m or rv or rj for m, rv, rj in

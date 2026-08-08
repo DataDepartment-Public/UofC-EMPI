@@ -56,9 +56,11 @@ THREE-WAY DECISION:
     `apply_rules` returns every pair any rule confirmed (both tiers, with the
     winning `match_rule`); the caller routes them by tier via `AUTO_MERGE_RULES` /
     `REVIEW_RULES`. `classify_non_matches` assigns no_match/human_review to the
-    pairs no rule confirmed. NAME_DOB_SEX and NAME_DOB_ADDRESS are REVIEW-tier
-    (~65% / ~67% silver precision) — they fire and keep provenance but never
-    auto-merge on their own. See docs/Deterministic-Rules-Guide.md.
+    pairs no rule confirmed. No REVIEW-tier rule is defined today — the two
+    that once were (NAME_DOB_SEX, NAME_DOB_ADDRESS, ~65% / ~67% silver
+    precision) were removed; pairs they used to confirm now fall through to
+    the downstream gate/ML matcher pipeline instead. See git history and
+    docs/Deterministic-Rules-Guide.md.
 
 OUTPUT SCHEMA (matches DataFrame):
     PATID_A        str   — canonical first PATID (carried from blocking)

@@ -218,9 +218,9 @@ def main(
 
     confirmed = apply_rules(candidate_pairs, df_clean)
 
-    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; the
-    # review-tier rules (NAME_DOB_SEX / NAME_DOB_ADDRESS) are confirmed but routed
-    # to review rather than auto-merged.
+    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; any
+    # review-tier rule (none defined today — see REVIEW_RULES) would be
+    # confirmed but routed to review instead.
     is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
     matches = confirmed[is_auto].reset_index(drop=True)
     review_confirmed = confirmed[~is_auto].reset_index(drop=True)

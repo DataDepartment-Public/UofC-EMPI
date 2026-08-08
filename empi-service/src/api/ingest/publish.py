@@ -237,6 +237,7 @@ def _review_candidate_rows(
     non_matches: pd.DataFrame,
     review_evidence: pd.DataFrame | None,
     gate_results: pd.DataFrame | None,
+    ml_features: pd.DataFrame | None,
     run_id: str,
     now: str,
 ) -> tuple[list[tuple], set[str]]:
@@ -249,8 +250,13 @@ def _review_candidate_rows(
     available — Stage 4.25 in `src/pipeline.py`); every `non_matches` pair
     stays review-eligible in that case. `review_evidence` (may be `None`
     for pre-existing manifests without it) carries `match_rule`/
-    `rules_fired` for the rule-confirmed subset. Returns (rows, {every
-    PATID in the queue})."""
+    `rules_fired` for the rule-confirmed subset. `ml_features` (may be
+    `None` when no ML model scored this run) carries the Stage 4.5 ML
+    matcher's `match_probability`/`classification_tier` — most queue pairs
+    have no rule confidence at all, so without this the list/sort/filter
+    have nothing but insertion order to fall back on for the ML-scored
+    majority (see `sql_backend.list_review_candidates`'s `COALESCE`).
+    Returns (rows, {every PATID in the queue})."""
     if non_matches.empty:
         return [], set()
 
@@ -277,6 +283,14 @@ def _review_candidate_rows(
         ):
             evidence_by_pair[frozenset((a, b))] = (rule, float(conf), fired)
 
+    ml_by_pair: dict[frozenset, tuple[float, str]] = {}
+    if ml_features is not None and not ml_features.empty:
+        for a, b, proba, tier in zip(
+            ml_features[PATID_A], ml_features[PATID_B],
+            ml_features["match_probability"], ml_features["classification_tier"],
+        ):
+            ml_by_pair[frozenset((a, b))] = (float(proba), tier)
+
     rows: list[tuple] = []
     patids: set[str] = set()
     for a, b, blocks in zip(
@@ -285,7 +299,8 @@ def _review_candidate_rows(
         patids.add(a)
         patids.add(b)
         rule, conf, fired = evidence_by_pair.get(frozenset((a, b)), (None, None, None))
-        rows.append((a, b, rule, conf, fired, blocks, run_id, now))
+        ml_proba, ml_tier = ml_by_pair.get(frozenset((a, b)), (None, None))
+        rows.append((a, b, rule, conf, fired, blocks, run_id, now, ml_proba, ml_tier))
     return rows, patids
 
 
@@ -360,6 +375,11 @@ def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
         if manifest.gate_results is not None
         else None
     )
+    ml_features = (
+        pd.read_parquet(_resolve(manifest.ml_features.path, settings))
+        if manifest.ml_features is not None
+        else None
+    )
 
     attrs_by_patid = _attrs_index(cleaned)
     raw_by_patid = _raw_index(cleaned)
@@ -371,7 +391,7 @@ def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
     now = _now()
 
     review_candidate_rows, review_patids = _review_candidate_rows(
-        non_matches, review_evidence, gate_results, run_id, now
+        non_matches, review_evidence, gate_results, ml_features, run_id, now
     )
 
     # Incremental-scoring index rebuild — pure Python/pandas, no DB round-trips

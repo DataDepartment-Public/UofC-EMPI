@@ -66,6 +66,11 @@ def _do_merge(
 
     now = _now()
     prev_state = "Merged" if target["entity"]["is_merged"] else "Needs review"
+    evidence = (
+        f"Manually merged by {reviewer_id}"
+        if undo_of is None
+        else f"Restored by undoing audit entry #{undo_of}"
+    )
     # Snapshot taken BEFORE the mutation loop below -- this entity's
     # membership at the moment of the merge, for audit_log.related_patids
     # (see sql_backend.py's audit_log DDL comment). Combined with body.patids
@@ -94,6 +99,7 @@ def _do_merge(
             prev_state=prev_state, next_state="Merged",
             run_id=target["entity"]["run_id"],
             related_patids=",".join(prior_members) if prior_members else None,
+            undo_of=undo_of,
         )
         backend.commit()
     except Exception:
@@ -161,6 +167,7 @@ def _do_unmerge(
             # reconstructed later from entity_member's current-state-only
             # table -- see audit_log.related_patids' DDL comment.
             related_patids=",".join(remaining_patids) if remaining_patids else None,
+            prev_mid=mid, undo_of=undo_of,
         )
         backend.commit()
     except Exception:

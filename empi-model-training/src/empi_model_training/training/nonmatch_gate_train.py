@@ -1,31 +1,36 @@
-"""LightGBM v5 pair-classifier training — Azure ML job entry point.
+"""Non-match gate training — Azure ML job entry point.
 
-    uv run python -m empi_model_training.training.lightgbm_train \
+    uv run python -m empi_model_training.training.nonmatch_gate_train \
         --cleaned-index PATH --gold-labels PATH [--promote]
 
 **Independent implementation.** This repo does not import or call into
 `empi-service` (a deliberate project decision — see `CLAUDE.md`). Both the
-feature engineering (ported from `empi-service/src/models/ml_matcher/
-lightgbm_v5.py`'s `FeatureBuilderV5`) and the training loop (previously only
-a notebook, `empi-service/notebooks/ml_model/confident_match/
-pair_classifier_lightgbm_confident_match_v5.ipynb`) are reproduced here as
+feature engineering and the training loop (previously only a notebook,
+`empi-service/notebooks/ml_model/confident_nonmatch/
+pair_classifier_lightgbm_nonmatch_gate_v1.ipynb`) are reproduced here as
 independent code, faithful to the documented behavior in
-`empi-service/docs/ML-Model-LightGBM-v5.md` — not shared or imported.
+`empi-service/docs/Nonmatch-Gate-Guide.md` — not shared or imported.
 
-Population: the WHOLE gold-labeled pool, no filtering — matches, ambiguous
-pairs, and confident non-matches alike (the latter two folded into class 0).
-This is the v4/v5 change from the earlier v3 generation, which dropped
-confident non-matches and therefore could never learn to recognize one; the
-Stage-4.25 non-match gate (`nonmatch_gate_train.py`) now owns that job
-upstream at serve time, so this model's training population is a superset of
-what it actually scores in production (see the doc's §2 for why that's safe).
+This is the pipeline's Stage-4.25 non-match gate — NOT the Stage-4.5
+`ml_matcher` (`lightgbm_train.py`). It has its own model store
+(`models/nonmatch_gate/`), its own registry, and its own target: `1` =
+plausible (`final_gold_label | ambiguous_pair`, i.e. match ∪ ambiguous), `0`
+= confident non-match. Trained on the WHOLE candidate pool, exactly the
+complement of the matcher's population split. Feature engineering
+(`build_features`/`FEATURE_COLS`) is identical to `lightgbm_train.py`'s --
+the gate and the matcher are meant to see identical inputs, per
+`src.models.ml_matcher.lightgbm_v5.FeatureBuilderV5` on the service side --
+duplicated here rather than imported across these two training scripts,
+consistent with this repo's "independent reimplementation" rule and the
+service's own choice to duplicate rather than share across model packages.
 
-Target: class 1 = confident match (`final_gold_label & ~ambiguous_pair`),
-class 0 = everything else (ambiguous ∪ confident non-match) — the *served*
-direction, so `predict_proba(X)[:, 1]` needs no inversion at serve time
-(`DirectMatchAdapter`, replacing the earlier `MatchProbabilityAdapter` that
-swapped probability columns for a class-1-is-ambiguous model). The decision
-boundary is unchanged from earlier versions: `auto_merge` at score >= 0.70.
+Served as a plain `joblib.dump` of the raw fitted classifier -- no adapter
+wrapper. `predict_proba(X)[:, 1]` is already `P(plausible)`, the served
+score, with no inversion to guard.
+
+The dropped pairs are the costly error here (unrecoverable downstream), so
+the operating point favors recall on the positive (plausible) class. Default
+threshold: 0.30 -- same as `EMPI_GATE_THRESHOLD`'s default in empi-service.
 """
 
 from __future__ import annotations
@@ -47,12 +52,12 @@ import pandas as pd
 
 from empi_model_training.training import registry_utils
 
-logger = logging.getLogger("empi_model_training.lightgbm_train")
+logger = logging.getLogger("empi_model_training.nonmatch_gate_train")
 
-MODEL_NAME = "ml_matcher"
+MODEL_NAME = "nonmatch_gate"
 RANDOM_STATE = 42
 
-# ── Feature roster (must match FEATURE_COLS order the model is fit on) ──────
+# ── Feature roster (identical to lightgbm_train.py's -- see module docstring) ─
 MISSING, SAME, DIFFERENT = "missing", "same", "different"
 COMPARE_LEVELS = [MISSING, SAME, DIFFERENT]
 CATEGORICAL_FEATURES = ["sound_first", "sound_last", "cmp_street_num"]
@@ -84,7 +89,7 @@ _num_re = re.compile(r"\d+")
 _NA_TOKENS = {"nan", "none", "<na>", "nat", "null"}
 
 
-# ── Scalar helpers ────────────────────────────────────────────────────────────
+# ── Scalar helpers (identical to lightgbm_train.py's) ────────────────────────
 def _norm(x: Any) -> str | None:
     if isinstance(x, str):
         s = x.strip().lower()
@@ -187,7 +192,7 @@ def _cmp_categorical(a_norm: pd.Series, b_norm: pd.Series) -> pd.Categorical:
     return pd.Categorical(out, categories=COMPARE_LEVELS)
 
 
-# ── Feature builder (ported from V3FeatureBuilder) ──────────────────────────
+# ── Feature builder (identical to lightgbm_train.py's) ──────────────────────
 def _side(pairs: pd.DataFrame, col: str, side: str) -> pd.Series:
     name = f"{col}_{side}"
     if name in pairs.columns:
@@ -285,33 +290,7 @@ def build_features(pairs: pd.DataFrame, df_clean: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-# ── Serve-time adapter (independent copy of DirectMatchAdapter) ─────────────
-class DirectMatchAdapter:
-    """Wraps a fitted classifier whose class 1 is already the confident
-    match, so `predict_proba(X)[:, 1]` is served as-is -- a pure pass-through.
-
-    Unlike the retired `MatchProbabilityAdapter` (which swapped probability
-    columns for a class-1-is-ambiguous model), there is nothing to invert
-    here. Must stay importable from wherever the pickle is loaded; empi-service
-    has its OWN copy of this exact class in `ml_matcher/lightgbm_v5.py` for
-    that reason (this repo's artifacts are meant to be loaded there, not here)."""
-
-    def __init__(self, model: Any):
-        self.model = model
-
-    def _align(self, x: Any) -> Any:
-        names = getattr(self.model, "feature_name_", None)
-        if names is not None and isinstance(x, pd.DataFrame) and set(names).issubset(x.columns):
-            return x[list(names)]
-        return x
-
-    def predict_proba(self, x: Any) -> np.ndarray:
-        """`[P(not confident match), P(confident match)]` — pass-through, no
-        column swap: the inner model's class 1 is the served positive class."""
-        return np.asarray(self.model.predict_proba(self._align(x)))
-
-
-# ── Data ingestion + population filter ──────────────────────────────────────
+# ── Data ingestion + target ───────────────────────────────────────────────────
 def _to_bool(s: pd.Series) -> pd.Series:
     if s.dtype == bool:
         return s
@@ -325,23 +304,20 @@ def _to_bool(s: pd.Series) -> pd.Series:
 
 
 def load_gold_pairs(gold_labels_path: Path) -> pd.DataFrame:
-    """Gold labels over the WHOLE candidate pool -- no population filter (the
-    v4/v5 change from the earlier v3 generation, which dropped confident
-    non-matches and therefore could never learn to recognize one). Target:
-    class 1 = confident match (`final_gold_label & ~ambiguous_pair`); class 0
-    = everything else (ambiguous ∪ confident non-match)."""
+    """Gold labels over the WHOLE candidate pool -- no population filter.
+    Target: class 1 = plausible (`final_gold_label | ambiguous_pair`, i.e.
+    match ∪ ambiguous); class 0 = confident non-match. The exact complement
+    of `lightgbm_train.py`'s `target_confident_match` split."""
     gold = pd.read_csv(gold_labels_path, dtype={"PATID_A": str, "PATID_B": str})
     gold["final_gold_label"] = _to_bool(gold["final_gold_label"])
     gold["ambiguous_pair"] = _to_bool(gold["ambiguous_pair"])
-    gold["target_confident_match"] = (gold["final_gold_label"] & ~gold["ambiguous_pair"]).astype(
-        int
-    )
+    gold["target_plausible"] = (gold["final_gold_label"] | gold["ambiguous_pair"]).astype(int)
     logger.info(
-        "gold=%d, confident-match rate=%.3f (ambiguous=%d, confident non-match=%d)",
+        "gold=%d, plausible rate=%.3f (confident match=%d, ambiguous=%d)",
         len(gold),
-        gold["target_confident_match"].mean(),
+        gold["target_plausible"].mean(),
+        int((gold["final_gold_label"] & ~gold["ambiguous_pair"]).sum()),
         int(gold["ambiguous_pair"].sum()),
-        int((~gold["final_gold_label"] & ~gold["ambiguous_pair"]).sum()),
     )
     return gold
 
@@ -360,25 +336,22 @@ def merge_reviewer_labels(pairs: pd.DataFrame, reviewer_labels_path: Path | None
     scripts/export_reviewer_labels.py output -- PATID_A, PATID_B,
     reviewer_label) into the whole pool built by `load_gold_pairs`.
 
-    `reviewer_label` maps directly to `final_gold_label`, and a reviewer's
-    decision is always definitive -- never `ambiguous_pair` -- so a
-    reviewer-derived row's `target_confident_match` is exactly
-    `reviewer_label`: a confirmed match becomes a positive training example,
-    a confirmed non-match a negative one. (This differs from the earlier v3
-    generation, whose plausible-only population made every reviewer row
-    ambiguous by construction; v5's whole-pool target has no such need.)
-    Reviewer rows win over gold labels for any pair present in both -- a
-    live human decision outranks a separate hand-adjudication pass. No-op if
-    not given.
+    A reviewer decision is always definitive -- never ambiguous_pair -- and
+    is always `target_plausible=1` regardless of which way `reviewer_label`
+    went: a reviewer only ever acts on a pair that reached the review queue,
+    meaning something upstream already judged it plausible enough to show a
+    human (never a pair the gate would have dropped as a confident
+    non-match). Reviewer rows win over gold labels for any pair present in
+    both. No-op if not given.
     """
     if reviewer_labels_path is None:
         return pairs
     reviewer = pd.read_csv(reviewer_labels_path, dtype={"PATID_A": str, "PATID_B": str})
     reviewer["final_gold_label"] = reviewer["reviewer_label"].astype(bool)
     reviewer["ambiguous_pair"] = False
-    reviewer["target_confident_match"] = reviewer["final_gold_label"].astype(int)
+    reviewer["target_plausible"] = 1
     reviewer = reviewer[
-        ["PATID_A", "PATID_B", "final_gold_label", "ambiguous_pair", "target_confident_match"]
+        ["PATID_A", "PATID_B", "final_gold_label", "ambiguous_pair", "target_plausible"]
     ]
 
     combined = pd.concat(
@@ -389,7 +362,7 @@ def merge_reviewer_labels(pairs: pd.DataFrame, reviewer_labels_path: Path | None
     )
 
 
-# ── Split + training (notebook §6-7, exact hyperparameters) ─────────────────
+# ── Split + training (same hyperparameters as lightgbm_train.py) ────────────
 LGBM_PARAMS: dict[str, Any] = dict(
     objective="binary",
     n_estimators=1000,
@@ -480,12 +453,12 @@ def run(args: argparse.Namespace) -> TrainResult:
         )
     df_clean = pd.read_parquet(args.cleaned_index)
     feat = build_features(pairs[["PATID_A", "PATID_B"]], df_clean)
-    y = pairs["target_confident_match"].astype(int).reset_index(drop=True)
+    y = pairs["target_plausible"].astype(int).reset_index(drop=True)
 
     split = split_60_20_20(feat, y, args.split_seed)
     for name, yy in [("train", split.y_train), ("val", split.y_val), ("test", split.y_test)]:
         logger.info(
-            "%s: n=%d confident_match=%d rate=%.3f", name, len(yy), int(yy.sum()), float(yy.mean())
+            "%s: n=%d plausible=%d rate=%.3f", name, len(yy), int(yy.sum()), float(yy.mean())
         )
 
     model = train_lightgbm(split)
@@ -495,43 +468,46 @@ def run(args: argparse.Namespace) -> TrainResult:
         model.best_score_["valid_0"]["auc"],
     )
 
-    # P(confident match) -- served score, no inversion.
-    proba_test = model.predict_proba(split.x_test)[:, 1]
+    proba_test = model.predict_proba(split.x_test)[:, 1]  # P(plausible) -- served score, no adapter
     roc_auc = float(roc_auc_score(split.y_test, proba_test))
     pr_auc = float(average_precision_score(split.y_test, proba_test))
 
-    y_match = split.y_test.to_numpy()
-    pred_auto = (proba_test >= args.auto_merge_threshold).astype(int)
-    tp = int(((pred_auto == 1) & (y_match == 1)).sum())
-    fp = int(((pred_auto == 1) & (y_match == 0)).sum())
-    fn = int(((pred_auto == 0) & (y_match == 1)).sum())
-    tn = int(((pred_auto == 0) & (y_match == 0)).sum())
+    y_pos = split.y_test.to_numpy()
+    keep_pred = (proba_test >= args.gate_threshold).astype(int)
+    tp = int(((keep_pred == 1) & (y_pos == 1)).sum())
+    fp = int(((keep_pred == 1) & (y_pos == 0)).sum())
+    fn = int(((keep_pred == 0) & (y_pos == 1)).sum())
+    tn = int(((keep_pred == 0) & (y_pos == 0)).sum())
     precision = tp / (tp + fp) if (tp + fp) else 0.0
-    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0  # plausible recall == 1 - miss rate
 
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    model_path = model_dir / f"ml_model_confident_match_v5_{ts}.pkl"
+    model_path = model_dir / f"nonmatch_gate_{ts}.pkl"
     import joblib
 
-    joblib.dump(DirectMatchAdapter(model), model_path)
+    joblib.dump(model, model_path)  # raw fitted model -- no adapter wrapper needed
     logger.info("Wrote trained model -> %s", model_path)
 
     meta = {
         "model_name": MODEL_NAME,
         "model_file": model_path.name,
-        "model_version": "lightgbm_v5",
         "created_utc": datetime.now(UTC).isoformat(),
-        "notes": "LightGBM v5 confident-match classifier. score = predict_proba[:, 1] "
-        "(no inversion).",
+        "notes": (
+            "LightGBM non-match gate -- the pipeline Stage-4.25 gate, NOT the "
+            "Stage-4.5 ml_matcher. score = predict_proba[:, 1] = P(plausible) "
+            "= P(match or ambiguous). High score -> keep pair; low score -> "
+            "confident not-match (discard)."
+        ),
         "feature_cols": list(FEATURE_COLS),
-        "thresholds": {"auto_merge": args.auto_merge_threshold},
-        "roc_auc": round(roc_auc, 4),
-        "pr_auc": round(pr_auc, 4),
+        "gate_threshold": args.gate_threshold,
         "test_metrics": {
             "n_test": int(len(split.y_test)),
-            "metrics_auto_merge": {
-                "precision": round(precision, 4),
-                "recall": round(recall, 4),
+            "roc_auc": round(roc_auc, 4),
+            "pr_auc": round(pr_auc, 4),
+            "gate_at_threshold": {
+                "threshold": args.gate_threshold,
+                "plausible_precision": round(precision, 4),
+                "plausible_recall": round(recall, 4),
                 "tp": tp,
                 "fp": fp,
                 "fn": fn,
@@ -541,8 +517,8 @@ def run(args: argparse.Namespace) -> TrainResult:
     }
     registry_utils.meta_path_for(model_path).write_text(json.dumps(meta, indent=2))
     logger.info(
-        "auto_merge tier @score>=%.2f: P=%.3f R=%.3f (tp=%d fp=%d fn=%d)",
-        args.auto_merge_threshold,
+        "gate @P(plausible)>=%.2f: P=%.3f R=%.3f (tp=%d fp=%d fn=%d)",
+        args.gate_threshold,
         precision,
         recall,
         tp,
@@ -553,7 +529,11 @@ def run(args: argparse.Namespace) -> TrainResult:
     if args.promote or args.force_promote:
         try:
             reason = registry_utils.promote(
-                model_path, model_dir, args.deploy_gate_margin, force=args.force_promote
+                model_path,
+                model_dir,
+                args.deploy_gate_margin,
+                force=args.force_promote,
+                metric_fn=registry_utils.gate_pr,
             )
             logger.info("PROMOTED: %s", reason)
         except registry_utils.DeployGateError as exc:
@@ -583,9 +563,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "pair present in both.",
     )
     p.add_argument("--split-seed", type=int, default=RANDOM_STATE)
-    p.add_argument("--auto-merge-threshold", type=float, default=0.70)
+    p.add_argument("--gate-threshold", type=float, default=0.30)
     p.add_argument("--deploy-gate-margin", type=float, default=0.02)
-    p.add_argument("--model-dir", type=Path, default=Path("models/ml"))
+    p.add_argument("--model-dir", type=Path, default=Path("models/nonmatch_gate"))
     p.add_argument("--promote", action="store_true")
     p.add_argument("--force-promote", action="store_true")
     return p.parse_args(argv)
@@ -597,24 +577,24 @@ def main() -> None:
     )
     args = parse_args()
 
-    mlflow.set_experiment("empi-ml-matcher")
-    with mlflow.start_run(run_name="lightgbm-v5-train") as run_ctx:
+    mlflow.set_experiment("empi-nonmatch-gate")
+    with mlflow.start_run(run_name="nonmatch-gate-train") as run_ctx:
         mlflow.log_params(
             {
                 **LGBM_PARAMS,
                 "split_seed": args.split_seed,
-                "auto_merge_threshold": args.auto_merge_threshold,
+                "gate_threshold": args.gate_threshold,
             }
         )
         result = run(args)
-        auto_merge = result.meta["test_metrics"]["metrics_auto_merge"]
+        gate_at_threshold = result.meta["test_metrics"]["gate_at_threshold"]
         mlflow.log_metrics(
             {
                 "roc_auc": result.roc_auc,
                 "pr_auc": result.pr_auc,
                 **{
-                    f"auto_merge_{k}": v
-                    for k, v in auto_merge.items()
+                    f"gate_{k}": v
+                    for k, v in gate_at_threshold.items()
                     if isinstance(v, int | float)
                 },
             }
@@ -625,7 +605,7 @@ def main() -> None:
         )
 
         if mlflow.get_tracking_uri().startswith("azureml"):
-            mlflow.register_model(f"runs:/{run_ctx.info.run_id}/model", "empi-ml-matcher")
+            mlflow.register_model(f"runs:/{run_ctx.info.run_id}/model", "empi-nonmatch-gate")
         else:
             logger.info(
                 "Not running under Azure ML tracking -- skipping model registry registration."

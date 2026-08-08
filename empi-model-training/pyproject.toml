@@ -1,7 +1,7 @@
 [project]
 name = "empi-model-training"
 version = "0.1.0"
-description = "Azure ML training pipeline for the eMPI record-matching models (Fellegi-Sunter + LightGBM pair classifier)."
+description = "Azure ML training pipeline for the eMPI record-matching models (Fellegi-Sunter matcher, LightGBM v5 confident-match classifier, LightGBM non-match gate)."
 readme = "README.md"
 authors = [
     { name = "jason12102", email = "jason12102@uchicago.edu" }

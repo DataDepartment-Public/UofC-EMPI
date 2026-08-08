@@ -14,6 +14,10 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.6"
     }
+    http = {
+      source  = "hashicorp/http"
+      version = "~> 3.4"
+    }
   }
 
   # resource_group_name / storage_account_name / container_name / key are

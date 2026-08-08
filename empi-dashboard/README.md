@@ -57,4 +57,5 @@ src/
 npx tsc --noEmit
 npm run lint
 npm run build
+npm run test          # Vitest + React Testing Library — src/lib/*.test.ts(x), src/components/**/*.test.tsx
 ```

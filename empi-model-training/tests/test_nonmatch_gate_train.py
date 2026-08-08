@@ -7,7 +7,7 @@ from __future__ import annotations
 import joblib
 import pandas as pd
 
-from empi_model_training.training import lightgbm_train
+from empi_model_training.training import nonmatch_gate_train
 
 
 def test_merge_reviewer_labels_none_is_a_no_op():
@@ -17,24 +17,24 @@ def test_merge_reviewer_labels_none_is_a_no_op():
             "PATID_B": ["P2"],
             "final_gold_label": [True],
             "ambiguous_pair": [False],
-            "target_confident_match": [1],
+            "target_plausible": [1],
         }
     )
-    out = lightgbm_train.merge_reviewer_labels(pairs, None)
+    out = nonmatch_gate_train.merge_reviewer_labels(pairs, None)
     pd.testing.assert_frame_equal(out, pairs)
 
 
-def test_merge_reviewer_labels_maps_reviewer_label_directly(tmp_path):
-    """A reviewer's decision is always definitive -- never ambiguous_pair --
-    so target_confident_match equals reviewer_label directly, regardless of
-    which way the label went."""
+def test_merge_reviewer_labels_always_plausible(tmp_path):
+    """A reviewer only ever acts on a pair the gate already let through, so
+    every reviewer-derived row is target_plausible=1 regardless of which way
+    reviewer_label went."""
     pairs = pd.DataFrame(
         {
             "PATID_A": [],
             "PATID_B": [],
             "final_gold_label": [],
             "ambiguous_pair": [],
-            "target_confident_match": [],
+            "target_plausible": [],
         }
     )
     reviewer_path = tmp_path / "reviewer.csv"
@@ -46,17 +46,17 @@ def test_merge_reviewer_labels_maps_reviewer_label_directly(tmp_path):
         }
     ).to_csv(reviewer_path, index=False)
 
-    out = lightgbm_train.merge_reviewer_labels(pairs, reviewer_path)
+    out = nonmatch_gate_train.merge_reviewer_labels(pairs, reviewer_path)
 
     row_match = out[(out["PATID_A"] == "P1") & (out["PATID_B"] == "P2")].iloc[0]
     assert row_match["final_gold_label"]
     assert not row_match["ambiguous_pair"]
-    assert row_match["target_confident_match"] == 1
+    assert row_match["target_plausible"] == 1
 
     row_no_match = out[(out["PATID_A"] == "P4") & (out["PATID_B"] == "P5")].iloc[0]
     assert not row_no_match["final_gold_label"]
     assert not row_no_match["ambiguous_pair"]
-    assert row_no_match["target_confident_match"] == 0
+    assert row_no_match["target_plausible"] == 1
 
 
 def test_merge_reviewer_labels_wins_on_conflict(tmp_path):
@@ -66,7 +66,7 @@ def test_merge_reviewer_labels_wins_on_conflict(tmp_path):
             "PATID_B": ["P2"],
             "final_gold_label": [False],
             "ambiguous_pair": [False],
-            "target_confident_match": [0],
+            "target_plausible": [0],
         }
     )
     reviewer_path = tmp_path / "reviewer.csv"
@@ -74,7 +74,7 @@ def test_merge_reviewer_labels_wins_on_conflict(tmp_path):
         reviewer_path, index=False
     )
 
-    out = lightgbm_train.merge_reviewer_labels(pairs, reviewer_path)
+    out = nonmatch_gate_train.merge_reviewer_labels(pairs, reviewer_path)
 
     assert len(out) == 1
     assert bool(out.iloc[0]["final_gold_label"]) is True
@@ -82,32 +82,35 @@ def test_merge_reviewer_labels_wins_on_conflict(tmp_path):
 
 
 def test_load_gold_pairs_keeps_whole_pool(synthetic_gold_labels_csv):
-    """v5 trains on the whole pool, unlike the earlier v3 generation which
-    dropped confident non-matches -- so nothing should be filtered out."""
+    """v5-generation gate training uses the whole pool, no filter. Three
+    mutually-exclusive classes partition it: confident match and ambiguous
+    are both target_plausible=1 (a real match or a genuine hard case worth a
+    human's time); only a confident non-match is target_plausible=0."""
     raw = pd.read_csv(synthetic_gold_labels_csv)
-    out = lightgbm_train.load_gold_pairs(synthetic_gold_labels_csv)
+    out = nonmatch_gate_train.load_gold_pairs(synthetic_gold_labels_csv)
     assert len(out) == len(raw)
-    assert set(out["target_confident_match"].unique()) <= {0, 1}
-    confident_match = out["final_gold_label"] & ~out["ambiguous_pair"]
-    assert (out["target_confident_match"] == confident_match.astype(int)).all()
+    plausible = out["final_gold_label"] | out["ambiguous_pair"]
+    assert (out["target_plausible"] == plausible.astype(int)).all()
+    confident_non_match = ~out["final_gold_label"] & ~out["ambiguous_pair"]
+    assert (out.loc[confident_non_match, "target_plausible"] == 0).all()
 
 
 def test_build_features_shape(synthetic_cleaned_parquet, synthetic_gold_labels_csv):
     _, cleaned = synthetic_cleaned_parquet
     gold = pd.read_csv(synthetic_gold_labels_csv, dtype={"PATID_A": str, "PATID_B": str})
-    feat = lightgbm_train.build_features(gold[["PATID_A", "PATID_B"]], cleaned)
+    feat = nonmatch_gate_train.build_features(gold[["PATID_A", "PATID_B"]], cleaned)
 
     assert list(feat.columns[:2]) == ["PATID_A", "PATID_B"]
-    for col in lightgbm_train.FEATURE_COLS:
+    for col in nonmatch_gate_train.FEATURE_COLS:
         assert col in feat.columns
     assert len(feat) == len(gold)
 
 
 def test_full_training_run(tmp_path, synthetic_cleaned_parquet, synthetic_gold_labels_csv):
     cleaned_path, _ = synthetic_cleaned_parquet
-    model_dir = tmp_path / "models" / "ml"
+    model_dir = tmp_path / "models" / "nonmatch_gate"
 
-    args = lightgbm_train.parse_args(
+    args = nonmatch_gate_train.parse_args(
         [
             "--cleaned-index",
             str(cleaned_path),
@@ -118,22 +121,21 @@ def test_full_training_run(tmp_path, synthetic_cleaned_parquet, synthetic_gold_l
             "--promote",
         ]
     )
-    result = lightgbm_train.run(args)
+    result = nonmatch_gate_train.run(args)
 
     assert result.model_path.exists()
     assert (model_dir / "active.json").exists()
     meta = result.meta
-    assert meta["model_name"] == "ml_matcher"
-    assert meta["model_version"] == "lightgbm_v5"
-    assert "metrics_auto_merge" in meta["test_metrics"]
-    assert 0.0 <= meta["test_metrics"]["metrics_auto_merge"]["precision"] <= 1.0
+    assert meta["model_name"] == "nonmatch_gate"
+    assert "gate_at_threshold" in meta["test_metrics"]
+    assert 0.0 <= meta["test_metrics"]["gate_at_threshold"]["plausible_precision"] <= 1.0
+    assert 0.0 <= meta["test_metrics"]["gate_at_threshold"]["plausible_recall"] <= 1.0
 
-    # The persisted artifact round-trips through joblib and still scores,
-    # with no probability-column inversion (DirectMatchAdapter is a
-    # pass-through, unlike the retired MatchProbabilityAdapter).
+    # The persisted artifact is the RAW fitted model (no adapter wrapper,
+    # unlike the ML matcher) and round-trips through joblib.
     loaded = joblib.load(result.model_path)
     gold = pd.read_csv(synthetic_gold_labels_csv, dtype={"PATID_A": str, "PATID_B": str})
     cleaned = pd.read_parquet(cleaned_path)
-    feat = lightgbm_train.build_features(gold[["PATID_A", "PATID_B"]].head(5), cleaned)
-    proba = loaded.predict_proba(feat[lightgbm_train.FEATURE_COLS])
+    feat = nonmatch_gate_train.build_features(gold[["PATID_A", "PATID_B"]].head(5), cleaned)
+    proba = loaded.predict_proba(feat[nonmatch_gate_train.FEATURE_COLS])
     assert proba.shape[1] == 2

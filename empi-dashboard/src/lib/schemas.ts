@@ -76,6 +76,8 @@ export const ReviewCandidateSchema = z.object({
   confidence: z.number().nullable(),
   evidence: z.string().nullable(),
   source_blocks: z.string().nullable(),
+  ml_match_probability: z.number().nullable().optional(),
+  ml_classification_tier: z.string().nullable().optional(),
   patient_a: CandidatePatientSchema,
   patient_b: CandidatePatientSchema,
 });
@@ -122,6 +124,8 @@ export const ReviewQueueItemSchema = z.object({
   confidence: z.number().nullable(),
   evidence: z.string().nullable(),
   source_blocks: z.string().nullable(),
+  ml_match_probability: z.number().nullable().optional(),
+  ml_classification_tier: z.string().nullable().optional(),
   reviewed: z.boolean(),
   patient_a: CandidatePatientSchema,
   patient_b: CandidatePatientSchema,

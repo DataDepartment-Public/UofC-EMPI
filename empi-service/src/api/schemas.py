@@ -119,6 +119,12 @@ class ReviewCandidate(BaseModel):
     #: for candidates from a full batch publish, which doesn't run FS yet.
     fs_match_probability: float | None = None
     fs_classification_tier: str | None = None
+    #: Stage 4.5 ML matcher's score (`docs/ML-Model-LightGBM-v5.md`) — the
+    #: actual scored decision for pairs that reached this queue with no rule
+    #: firing (`confidence` null). Null only when the ML matcher didn't score
+    #: this pair (no active model, or dropped earlier by the non-match gate).
+    ml_match_probability: float | None = None
+    ml_classification_tier: str | None = None
 
 
 class Entity(BaseModel):
@@ -157,6 +163,8 @@ class ReviewQueueItem(BaseModel):
     source_blocks: str | None
     fs_match_probability: float | None = None
     fs_classification_tier: str | None = None
+    ml_match_probability: float | None = None
+    ml_classification_tier: str | None = None
     reviewed: bool
     patient_a: CandidatePatient
     patient_b: CandidatePatient

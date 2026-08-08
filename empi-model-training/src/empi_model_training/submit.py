@@ -1,4 +1,4 @@
-"""Unified Azure ML job submission entry point for both training jobs.
+"""Unified Azure ML job submission entry point for all three training jobs.
 
     uv run python -m empi_model_training.submit --job fs \\
         --cleaned-index azureml:empi-cleaned-records:2026.07.25 \\
@@ -6,6 +6,11 @@
         --compute cpu-cluster [--promote]
 
     uv run python -m empi_model_training.submit --job lightgbm \\
+        --cleaned-index azureml:empi-cleaned-records:2026.07.25 \\
+        --labels azureml:empi-gold-labels:2026.07.25 \\
+        --compute cpu-cluster [--promote]
+
+    uv run python -m empi_model_training.submit --job gate \\
         --cleaned-index azureml:empi-cleaned-records:2026.07.25 \\
         --labels azureml:empi-gold-labels:2026.07.25 \\
         --compute cpu-cluster [--promote]
@@ -26,13 +31,20 @@ from azure.ai.ml import Input
 
 from empi_model_training.components.fs_train_component import build_fs_train_component
 from empi_model_training.components.lightgbm_train_component import build_lightgbm_train_component
+from empi_model_training.components.nonmatch_gate_train_component import (
+    build_nonmatch_gate_train_component,
+)
 from empi_model_training.utils.azure_client import get_ml_client
 from empi_model_training.utils.preflight import PreflightError, run_preflight
 from empi_model_training.utils.register_environment import ENVIRONMENT_NAME
 
 logger = logging.getLogger("empi_model_training.submit")
 
-_EXPERIMENT_NAMES = {"fs": "empi-fs-matcher", "lightgbm": "empi-ml-matcher"}
+_EXPERIMENT_NAMES = {
+    "fs": "empi-fs-matcher",
+    "lightgbm": "empi-ml-matcher",
+    "gate": "empi-nonmatch-gate",
+}
 
 
 def _resolve_environment(environment_arg: str | None) -> str:
@@ -86,6 +98,13 @@ def submit_job(
         node = component(
             cleaned_index=Input(path=cleaned_index_ref),
             silver_labels=Input(path=labels_ref),
+            promote=promote or None,
+        )
+    elif job == "gate":
+        component = build_nonmatch_gate_train_component(resolved_environment)
+        node = component(
+            cleaned_index=Input(path=cleaned_index_ref),
+            gold_labels=Input(path=labels_ref),
             promote=promote or None,
         )
     else:

@@ -38,6 +38,7 @@ on:
         options:
           - empi-fs-matcher
           - empi-ml-matcher
+          - empi-nonmatch-gate
       model_version:
         description: "Version to promote"
         required: true

@@ -8,6 +8,13 @@ services:
       context: ./empi-service
     ports:
       - "8000:8000"
+    # Local dev's .env overrides (gate/explanations feature flags, thresholds,
+    # etc.) — without this, compose runs on config.py's field defaults only,
+    # silently diverging from a bare `uvicorn` run, which does pick up .env.
+    # Optional so a fresh clone with no .env yet still starts (field defaults).
+    env_file:
+      - path: ./empi-service/.env
+        required: false
     volumes:
       # data/empi.db and data/local_index/ are the durable state — without
       # this volume every `docker compose up` starts from an empty resolved
@@ -15,19 +22,26 @@ services:
       - empi-data:/app/data
       - empi-logs:/app/logs
       # Inputs come from the host; everything the container *writes* stays in
-      # the named volumes above. Both mounts are read-only, so the container
-      # keeps writing as its own non-root `empi` user and there's no host-uid
-      # mapping to get right. Nested-under-empi-data is fine — Docker mounts
+      # the named volumes above (or, for models/ below, back onto the host —
+      # see its own comment). Nested-under-empi-data is fine — Docker mounts
       # the longer path last.
       #
       # data/raw/ is the pipeline input (real MDM_Population.csv is
-      # gitignored). Read-only also means a run can't touch the source data.
+      # gitignored). Read-only so a run can't touch the source data.
       - ./empi-service/data/raw:/app/data/raw:ro
       # models/ holds the served gate + ML artifacts. The .pkl files are
       # gitignored while models/*/active.json is tracked, so a fresh clone has
       # pointers to files that only exist on the host — and .dockerignore keeps
       # models/ out of the build context, so this mount is the only way in.
-      - ./empi-service/models:/app/models:ro
+      # Read-write (not :ro): `docker compose exec empi-service python
+      # scripts/train_synthetic_models.py ...` is the documented way to get
+      # non-PHI models for local dev, and it promotes by writing .pkl +
+      # active.json here — a real promotion workflow needs the same write
+      # access this container's non-root `empi` user gets. Files the
+      # container creates will show up host-side owned by that container
+      # uid; harmless to read, `sudo rm` if you ever need to delete one from
+      # the host directly.
+      - ./empi-service/models:/app/models
     restart: unless-stopped
     # First run against a fresh empi-data volume: the app connects to the
     # database but no longer creates its schema itself (empi-service/

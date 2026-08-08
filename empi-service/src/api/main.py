@@ -14,9 +14,9 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api import jobs
+from src.api import jobs, threshold_store
 from src.api.backends import sql_backend
-from src.api.routers import admin, audit, dashboard, health, records, runs
+from src.api.routers import admin, audit, dashboard, explanations, health, records, runs
 from src.config import configure_logging, settings
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,7 @@ async def lifespan(app: FastAPI):
     configure_logging(settings)  # idempotent — see src/config.py
     settings.ensure_dirs()
     _check_schema_ready(settings)
+    threshold_store.apply_persisted_overrides(settings)
     jobs.reconcile_interrupted_jobs(settings)
     logger.info("eMPI API started — backend=%s", getattr(settings, "index_backend", "sqlite"))
     yield
@@ -99,6 +100,7 @@ app.include_router(records.router)
 app.include_router(audit.router)
 app.include_router(dashboard.router)
 app.include_router(admin.router)
+app.include_router(explanations.router)
 
 
 __all__ = ["app"]

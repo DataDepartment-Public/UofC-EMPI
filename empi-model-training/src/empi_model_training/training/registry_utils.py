@@ -3,7 +3,8 @@
 Deliberately NOT imported from `empi-service` (see `CLAUDE.md` — this repo
 never calls across repos). Writes the same file-naming convention
 (`<prefix>_model_<ts>.json|.pkl`, `<prefix>_model_<ts>.meta.json`,
-`active.json`) as `empi-service/src/models/{fs_matcher,ml_matcher}/registry.py`
+`active.json`) as
+`empi-service/src/models/{fs_matcher,ml_matcher,nonmatch_gate}/registry.py`
 so a promoted artifact drops into the serving share unchanged, but the
 deploy-gate logic here is its own small copy, not a shared import.
 """
@@ -46,21 +47,36 @@ def _pointer_model_path(model_dir: Path) -> Path | None:
         return None
 
 
-def _auto_merge_pr(meta: dict[str, Any] | None) -> tuple[float, float]:
+def auto_merge_pr(meta: dict[str, Any] | None) -> tuple[float, float]:
+    """(precision, recall) of the ML matcher's `auto_merge` tier at its served
+    threshold -- the metric shape `training/lightgbm_train.py` writes."""
     am = (meta or {}).get("test_metrics", {}).get("metrics_auto_merge", {})
     return float(am.get("precision", 0.0)), float(am.get("recall", 0.0))
 
 
+def gate_pr(meta: dict[str, Any] | None) -> tuple[float, float]:
+    """(precision, recall) of the non-match gate's `plausible` class at its
+    served threshold -- the metric shape `training/nonmatch_gate_train.py`
+    writes. Recall is what matters operationally (a drop is unrecoverable
+    downstream), but both are gated the same way as the matcher's."""
+    at = (meta or {}).get("test_metrics", {}).get("gate_at_threshold", {})
+    return float(at.get("plausible_precision", 0.0)), float(at.get("plausible_recall", 0.0))
+
+
 def passes_deploy_gate(
-    new_meta: dict[str, Any], active_meta: dict[str, Any] | None, margin: float
+    new_meta: dict[str, Any],
+    active_meta: dict[str, Any] | None,
+    margin: float,
+    *,
+    metric_fn: Any = auto_merge_pr,
 ) -> tuple[bool, str]:
-    """New held-out auto_merge precision AND recall must each be no worse than
-    the active model's by more than `margin`. No active model -> first
-    promotion always passes."""
+    """New held-out precision AND recall (per `metric_fn`) must each be no
+    worse than the active model's by more than `margin`. No active model ->
+    first promotion always passes."""
     if active_meta is None:
         return True, "no active model -- first promotion"
-    np_, nr = _auto_merge_pr(new_meta)
-    ap, ar = _auto_merge_pr(active_meta)
+    np_, nr = metric_fn(new_meta)
+    ap, ar = metric_fn(active_meta)
     ok = (np_ >= ap - margin) and (nr >= ar - margin)
     reason = (
         f"new P={np_:.3f}/R={nr:.3f} vs active P={ap:.3f}/R={ar:.3f} "
@@ -70,9 +86,17 @@ def passes_deploy_gate(
 
 
 def promote(
-    model_path: Path, model_dir: Path, deploy_gate_margin: float, *, force: bool = False
+    model_path: Path,
+    model_dir: Path,
+    deploy_gate_margin: float,
+    *,
+    force: bool = False,
+    metric_fn: Any = auto_merge_pr,
 ) -> str:
     """Point `active.json` at `model_path`, subject to the deploy-gate.
+
+    `metric_fn` selects which metric shape the deploy gate reads -- pass
+    `gate_pr` when promoting a non-match gate model instead of an ML matcher.
 
     Returns the gate reason string. Raises `DeployGateError` if the gate
     fails and `force` is False.
@@ -83,7 +107,9 @@ def promote(
     prev = _pointer_model_path(model_dir)
     prev_active_meta = load_model_meta(prev) if prev is not None else None
 
-    ok, reason = passes_deploy_gate(new_meta, prev_active_meta, deploy_gate_margin)
+    ok, reason = passes_deploy_gate(
+        new_meta, prev_active_meta, deploy_gate_margin, metric_fn=metric_fn
+    )
     if not ok and not force:
         raise DeployGateError(
             f"Deploy gate refused promotion of {model_path.name}: {reason}. "
@@ -110,6 +136,8 @@ __all__ = [
     "DeployGateError",
     "meta_path_for",
     "load_model_meta",
+    "auto_merge_pr",
+    "gate_pr",
     "passes_deploy_gate",
     "promote",
 ]

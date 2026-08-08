@@ -283,8 +283,9 @@ def run_pipeline(
     confirmed = apply_rules(
         candidate_pairs, cleaned, ssn_fanout_threshold=settings.ssn_fanout_threshold
     )
-    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; the rest
-    # (NAME_DOB_SEX / NAME_DOB_ADDRESS) are confirmed but routed to review.
+    # Split confirmed pairs by rule tier: AUTO_MERGE_RULES auto-merge; any
+    # review-tier rule (none defined today — see REVIEW_RULES) would be
+    # confirmed but routed to review instead.
     is_auto = confirmed["match_rule"].isin(AUTO_MERGE_RULES)
     matches = confirmed[is_auto].reset_index(drop=True)
     review_confirmed = confirmed[~is_auto].reset_index(drop=True)
@@ -511,7 +512,7 @@ def run_pipeline(
 
         _ml_model = MLMatcher(
             model=model_cache.get_or_load("ml_matcher", active_ml_model, load_model_artifact),
-            feature_builder=V3FeatureBuilder(),
+            feature_builder=FeatureBuilderV5(),
             classification_config=MLClassificationConfig(
                 auto_merge_threshold=settings.ml_auto_merge_threshold,
             ),

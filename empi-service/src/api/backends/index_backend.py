@@ -140,6 +140,8 @@ class IndexBackend(Protocol):
         next_state: str,
         run_id: str | None,
         related_patids: str | None = None,
+        prev_mid: str | None = None,
+        undo_of: int | None = None,
     ) -> int: ...
 
     def list_audit_log(
@@ -294,12 +296,12 @@ class SqlIndexBackend:
 
     def insert_audit_log(
         self, *, ts_utc, user, action, patids, mid, prev_state, next_state, run_id,
-        related_patids=None,
+        related_patids=None, prev_mid=None, undo_of=None,
     ) -> int:
         return self._store.insert_audit_log(
             self.conn, ts_utc=ts_utc, user=user, action=action, patids=patids,
             mid=mid, prev_state=prev_state, next_state=next_state, run_id=run_id,
-            related_patids=related_patids,
+            related_patids=related_patids, prev_mid=prev_mid, undo_of=undo_of,
         )
 
     def list_audit_log(self, *, limit: int = 100, since: str | None = None) -> list[dict]:

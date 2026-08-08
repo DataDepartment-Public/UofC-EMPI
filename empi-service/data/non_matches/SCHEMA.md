@@ -19,9 +19,9 @@ Full contract: `docs/Data-Contract.md` → "Stage 3 — ..." (§3b).
 This is easy to miss if you only look at the `review_evidence` companion file
 below — the FS matcher scores **both** of these the same way:
 
-1. **Review-tier rule-confirmed pairs** — `NAME_DOB_SEX` (~65% adjudicated
-   precision) or `NAME_DOB_ADDRESS` (~67%) fired, but the rule's tier means
-   it's routed here rather than auto-merged.
+1. **Review-tier rule-confirmed pairs** — none possible today (no
+   review-tier rule is defined; `NAME_DOB_SEX` at ~65% adjudicated precision
+   and `NAME_DOB_ADDRESS` at ~67% held this tier briefly before removal).
 2. **Genuine rule-undecided pairs** — no rule fired at all, and
    `classify_non_matches` found fewer than 3 strong-identifier
    contradictions (not confident enough to reject either).

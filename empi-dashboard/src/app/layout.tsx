@@ -31,7 +31,11 @@ export default function RootLayout({
       <body className="min-h-screen bg-bg text-ink antialiased">
         <Providers>
           <TopNav />
-          <main className="mx-auto max-w-[1180px] px-6 pt-6 pb-16">
+          {/* Capped rather than full-bleed so text columns stay readable on an
+              ultrawide, but wide enough that the Review Queue's detail panel
+              (viewport − the list's fixed 400px) fits the Pipeline Trail without
+              a horizontal scrollbar on any normal laptop. */}
+          <main className="mx-auto max-w-[1600px] px-6 pt-6 pb-16">
             {children}
           </main>
         </Providers>

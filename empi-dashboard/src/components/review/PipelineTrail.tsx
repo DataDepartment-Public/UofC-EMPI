@@ -33,8 +33,11 @@ export function PipelineTrail({ item }: { item: ReviewQueueItem }) {
     formatRawDate(data?.fields?.["BirthDT_raw"]);
 
   return (
+    // The four stages stretch to fill whatever width the detail panel has; the
+    // scroll container is only the floor for a genuinely narrow window, since
+    // below ~640px the stage text stops being readable at all.
     <div className="overflow-x-auto pb-1">
-      <div className="flex min-w-[760px]">
+      <div className="flex min-w-[640px]">
         <Stage num={1} label="Source" title="Raw">
           {rawA.isLoading || rawB.isLoading ? (
             <Row muted>Loading…</Row>
@@ -114,7 +117,7 @@ function Stage({
   return (
     <div
       className={clsx(
-        "min-w-[152px] flex-1 border border-line px-3 py-2.5",
+        "min-w-0 flex-1 basis-0 border border-line px-3 py-2.5",
         "first:rounded-l-md last:rounded-r-md [&:not(:last-child)]:border-r-0",
       )}
     >

@@ -1,15 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReviewCandidateDetail } from "./ReviewCandidateDetail";
 import { api } from "@/lib/api-client";
 import type { ReviewQueueItem } from "@/lib/schemas";
 
-/** The Merge/Not-a-match/View-raw-data buttons are the primary way a
- * reviewer acts on a candidate pair — this pins that each one calls its
- * callback with the exact patid/mid arguments the parent page needs to
- * build the right request, not just that the button exists. */
+/** The Merge/Not-a-match buttons are the primary way a reviewer acts on a
+ * candidate pair — this pins that each one calls its callback with the exact
+ * patid/mid arguments the parent page needs to build the right request, not
+ * just that the button exists. */
+
+const getRaw = vi.fn();
 
 vi.mock("@/lib/api-client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api-client")>();
@@ -17,12 +19,26 @@ vi.mock("@/lib/api-client", async (importOriginal) => {
     ...actual,
     api: {
       ...actual.api,
-      getRaw: vi.fn().mockResolvedValue(null),
+      getRaw: (patid: string) => getRaw(patid),
       getExplanation: vi.fn().mockResolvedValue(null),
     },
   };
 });
 void api; // keep the mocked import referenced for clarity
+
+beforeEach(() => {
+  getRaw.mockReset();
+  getRaw.mockImplementation((patid: string) =>
+    Promise.resolve({
+      patid,
+      fields: {
+        FirstNM_raw: "Jane",
+        BirthDT_raw: patid === "P1" ? "1974-02-12 00:00:00" : "1974-02-12",
+        Email_raw: patid === "P1" ? "jane@example.com" : "j.doe@example.com",
+      },
+    }),
+  );
+});
 
 const item: ReviewQueueItem = {
   patid_a: "P1",
@@ -35,7 +51,9 @@ const item: ReviewQueueItem = {
   confidence: 0.99,
   evidence: "NAME_DOB_EMAIL",
   source_blocks: "B3|B7",
-  reviewed: false,
+  verdict: "ml_human_review",
+  bucket: "needs_review",
+  reviewer_decision: null,
   patient_a: { patid: "P1", first_name: "Jane", last_name: "Doe" },
   patient_b: { patid: "P2", first_name: "Jane", last_name: "Doe" },
 };
@@ -56,7 +74,6 @@ describe("ReviewCandidateDetail", () => {
         item={item}
         onMerge={onMerge}
         onDismiss={vi.fn()}
-        onViewRaw={vi.fn()}
         dismissPending={false}
       />,
     );
@@ -73,7 +90,6 @@ describe("ReviewCandidateDetail", () => {
         item={item}
         onMerge={vi.fn()}
         onDismiss={onDismiss}
-        onViewRaw={vi.fn()}
         dismissPending={false}
       />,
     );
@@ -82,34 +98,65 @@ describe("ReviewCandidateDetail", () => {
     expect(onDismiss).toHaveBeenCalledWith("P1", "P2");
   });
 
-  it("calls onViewRaw with patid_a when View raw data is clicked", async () => {
-    const onViewRaw = vi.fn();
-    const user = userEvent.setup();
-    renderWithClient(
-      <ReviewCandidateDetail
-        item={item}
-        onMerge={vi.fn()}
-        onDismiss={vi.fn()}
-        onViewRaw={onViewRaw}
-        dismissPending={false}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: /view raw data/i }));
-    expect(onViewRaw).toHaveBeenCalledWith("P1");
-  });
-
   it("disables Not a match while a dismiss is already pending", () => {
     renderWithClient(
       <ReviewCandidateDetail
         item={item}
         onMerge={vi.fn()}
         onDismiss={vi.fn()}
-        onViewRaw={vi.fn()}
         dismissPending={true}
       />,
     );
 
     expect(screen.getByRole("button", { name: /not a match/i })).toBeDisabled();
+  });
+});
+
+/** The panel replaced a drawer that could only show one side of the pair, so
+ * what matters is that it stays out of the way until asked and then renders
+ * *both* records against each other — a regression to one side would
+ * silently reinstate the view this panel exists to fix. */
+describe("ReviewCandidateDetail raw comparison", () => {
+  const renderDetail = () =>
+    renderWithClient(
+      <ReviewCandidateDetail
+        item={item}
+        onMerge={vi.fn()}
+        onDismiss={vi.fn()}
+        dismissPending={false}
+      />,
+    );
+
+  it("stays collapsed until the reviewer asks for it", () => {
+    renderDetail();
+    expect(
+      screen.getByRole("button", { name: /compare raw source data/i }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("FirstNM_raw")).not.toBeInTheDocument();
+  });
+
+  it("shows both records and compares them field by field", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+
+    await user.click(
+      screen.getByRole("button", { name: /compare raw source data/i }),
+    );
+
+    expect(getRaw).toHaveBeenCalledWith("P1");
+    expect(getRaw).toHaveBeenCalledWith("P2");
+
+    const firstNameRow = (await screen.findByText("FirstNM_raw")).closest("tr")!;
+    expect(within(firstNameRow).getByText("Exact match")).toBeInTheDocument();
+
+    // Both sides present but unequal — the reviewer's actual signal.
+    const emailRow = screen.getByText("Email_raw").closest("tr")!;
+    expect(within(emailRow).getByText("jane@example.com")).toBeInTheDocument();
+    expect(within(emailRow).getByText("j.doe@example.com")).toBeInTheDocument();
+    expect(within(emailRow).getByText("Different")).toBeInTheDocument();
+
+    // A midnight time on one side only must not read as a disagreement.
+    const dobRow = screen.getByText("BirthDT_raw").closest("tr")!;
+    expect(within(dobRow).getByText("Exact match")).toBeInTheDocument();
   });
 });

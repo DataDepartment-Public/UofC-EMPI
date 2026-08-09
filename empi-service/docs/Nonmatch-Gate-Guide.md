@@ -111,6 +111,16 @@ The dropped pairs live only in this frame — they are not written to `data/no_m
 holds the deterministic rules' rejects. Read `gate_results` when you need to know why a pair
 vanished between the rules and the matcher.
 
+`score` is also threaded into the resolved-output index at publish time, as
+`review_candidate.gate_score` (`src/api/ingest/publish.py`). It is the **only** number a
+gate-dropped row carries — no rule fired and Stage 4.5 never scored it — so without it the
+Review Queue's Auto-rejected section is unrankable. It is a separate axis from
+`ml_match_probability`, not a fallback for it: a pair the gate passed at 70% plausible can
+score near zero on the matcher, and reading the second as "probably not the same person" is
+exactly the confusion the two-axis band scale in `empi-dashboard/src/lib/pair-signal.ts`
+exists to prevent. `GET /review-queue` filters it via `gate_score_min` / `gate_score_max`.
+Rows published before this column existed read NULL until the run is re-published.
+
 Alongside it, `data/gate_output/gate_explanations_<run_id>.parquet` carries the per-pair SHAP
 contributions behind each of those verdicts — including the drops, which is what keeps "why was
 this pair dropped?" answerable. Served by `GET /explanations/nonmatch_gate/{a}/{b}`; see

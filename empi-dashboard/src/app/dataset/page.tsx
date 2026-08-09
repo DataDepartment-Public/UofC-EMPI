@@ -3,46 +3,58 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, RecordsFilters } from "@/lib/api-client";
-import { useRecords, useUnmergeMutation } from "@/lib/hooks";
-import { DatasetFilters } from "@/components/dataset/DatasetFilters";
-import { DatasetRow } from "@/components/dataset/DatasetRow";
+import { useCluster, useRecords, useUnmergeMutation } from "@/lib/hooks";
+import { ClusterDetail } from "@/components/dataset/ClusterDetail";
+import { ClusterList } from "@/components/dataset/ClusterList";
 import { UnmergeModal } from "@/components/dataset/UnmergeModal";
 import { AuditLog } from "@/components/shared/AuditLog";
-import { RawDataDrawer } from "@/components/shared/RawDataDrawer";
 import { Toast } from "@/components/shared/Toast";
 
 const PAGE_SIZE = 25;
 
-// The registry shows only resolved, final clusters — auto-matched,
-// manually merged, or standalone with nothing pending. Anything still
-// awaiting a decision (`origin: "review"`) belongs on the Review Queue tab,
-// not here.
-const FINAL_ORIGINS = "deterministic,merge,none";
+// Every origin — auto-matched, manually merged, standalone with nothing
+// pending, and standalone-but-pending-review. A record only ever exists as
+// `origin: "review"` when it's a singleton (see `publish.py`'s per-cluster
+// loop). The registry lists every cluster, singletons included, so such a
+// record is reachable here. Deciding it (merge/dismiss) still only happens
+// on the Review Queue tab; this just makes sure a pending record isn't
+// invisible to someone browsing/searching the registry who doesn't know to
+// look there.
+const ALL_ORIGINS = "deterministic,merge,none,review";
 
-/** Filters live in the URL (not just component state) so that navigating
- * away — e.g. to a patient's Model Explanation page — and back with the
- * browser's own back button, or a plain page refresh, lands on the exact
- * same search/filter/page a reviewer had open, instead of a freshly reset
- * Patient Registry. */
-function filtersFromSearchParams(searchParams: URLSearchParams): RecordsFilters {
+/** Filters *and* the selected cluster live in the URL so a reviewer can link
+ * a colleague straight to the cluster they're questioning, and so back/refresh
+ * lands on the same page of the same list rather than a reset registry. (The
+ * Review Queue keeps its selection in local state only; this page can do
+ * better because a cluster has a stable id, where a pending pair does not.) */
+interface UrlState {
+  filters: RecordsFilters;
+  mid: string | null;
+}
+
+function stateFromSearchParams(searchParams: URLSearchParams): UrlState {
   const sort = searchParams.get("sort");
   return {
-    page: Number(searchParams.get("page")) || 1,
-    page_size: PAGE_SIZE,
-    search: searchParams.get("search") ?? undefined,
-    birth_date: searchParams.get("birth_date") ?? undefined,
-    ssn_last4: searchParams.get("ssn_last4") ?? undefined,
-    sort: sort === "confidence" || sort === "name" ? sort : undefined,
+    filters: {
+      page: Number(searchParams.get("page")) || 1,
+      page_size: PAGE_SIZE,
+      search: searchParams.get("search") ?? undefined,
+      birth_date: searchParams.get("birth_date") ?? undefined,
+      ssn_last4: searchParams.get("ssn_last4") ?? undefined,
+      sort: sort === "confidence" || sort === "name" ? sort : undefined,
+    },
+    mid: searchParams.get("mid"),
   };
 }
 
-function filtersToSearch(filters: RecordsFilters): string {
+function stateToSearch({ filters, mid }: UrlState): string {
   const params = new URLSearchParams();
   if (filters.search) params.set("search", filters.search);
   if (filters.birth_date) params.set("birth_date", filters.birth_date);
   if (filters.ssn_last4) params.set("ssn_last4", filters.ssn_last4);
   if (filters.sort) params.set("sort", filters.sort);
   if (filters.page && filters.page !== 1) params.set("page", String(filters.page));
+  if (mid) params.set("mid", mid);
   return params.toString();
 }
 
@@ -57,28 +69,20 @@ export default function DatasetPage() {
 function DatasetPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [filters, setFiltersState] = useState<RecordsFilters>(() =>
-    filtersFromSearchParams(searchParams),
+  const [state, setState] = useState<UrlState>(() =>
+    stateFromSearchParams(searchParams),
   );
 
-  const setFilters = (
-    next: RecordsFilters | ((prev: RecordsFilters) => RecordsFilters),
-  ) => {
-    setFiltersState((prev) => (typeof next === "function" ? next(prev) : next));
-  };
-
-  // Syncing the URL is a side effect of `filters` changing, not part of the
-  // state update itself — doing it inside the `setFiltersState` updater
-  // above (a `router.replace` call in a "pure" state-updater function) trips
-  // React's "Cannot update a component while rendering a different
+  // Syncing the URL is a side effect of `state` changing, not part of the
+  // state update itself — a `router.replace` inside a "pure" state-updater
+  // trips React's "Cannot update a component while rendering a different
   // component" warning.
   useEffect(() => {
-    const qs = filtersToSearch(filters);
+    const qs = stateToSearch(state);
     router.replace(qs ? `/dataset?${qs}` : "/dataset", { scroll: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters]);
+  }, [state]);
 
-  const [rawPatid, setRawPatid] = useState<string | null>(null);
   const [pendingUnmerge, setPendingUnmerge] = useState<{
     mid: string;
     patid: string;
@@ -87,8 +91,8 @@ function DatasetPageContent() {
   const [toast, setToast] = useState<string | null>(null);
 
   const { data, isLoading, isError } = useRecords({
-    ...filters,
-    origin: FINAL_ORIGINS,
+    ...state.filters,
+    origin: ALL_ORIGINS,
   });
   const unmergeMutation = useUnmergeMutation();
 
@@ -96,6 +100,28 @@ function DatasetPageContent() {
     setToast(msg);
     setTimeout(() => setToast(null), 3200);
   };
+
+  const items = data?.items ?? [];
+  const onThisPage = items.find((e) => e.mid === state.mid) ?? null;
+
+  // A requested `mid` usually sits in the current page of results, but not
+  // always: a link shared with a colleague, or a jump out of the comparison
+  // history into the cluster that a record was declined against, names a mid
+  // that can be on page 40 of 237 — or excluded by the active filters
+  // entirely. Falling back to `items[0]` there silently shows the wrong
+  // patient, which is worse than slow. So fetch it directly when it isn't in
+  // hand; `useCluster` hits `GET /clusters/{mid}` and is skipped whenever the
+  // list already has the answer.
+  const needsFetch = Boolean(state.mid) && !onThisPage;
+  const detached = useCluster(needsFetch ? state.mid : null);
+
+  // Only fall back to the first row when nothing specific was asked for. If a
+  // mid *was* named and simply can't be resolved, the empty state below says
+  // so rather than quietly substituting a different cluster.
+  const selected =
+    onThisPage ?? (needsFetch ? detached.data ?? null : items[0] ?? null);
+  const selectionPending = needsFetch && detached.isLoading;
+  const selectionMissing = needsFetch && detached.isError;
 
   const confirmUnmerge = () => {
     if (!pendingUnmerge) return;
@@ -114,87 +140,54 @@ function DatasetPageContent() {
     );
   };
 
-  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
-  const page = filters.page ?? 1;
-
   return (
     <div>
       <div className="mb-5">
         <h2 className="text-[22px] font-extrabold text-ink-2">Patient Registry</h2>
       </div>
 
-      <DatasetFilters value={filters} onChange={setFilters} />
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_minmax(0,1fr)]">
+        <ClusterList
+          filters={state.filters}
+          onFiltersChange={(filters) => setState((s) => ({ ...s, filters }))}
+          items={items}
+          total={data?.total ?? 0}
+          isLoading={isLoading}
+          isError={isError}
+          selectedMid={selected?.mid ?? null}
+          onSelect={(mid) => setState((s) => ({ ...s, mid }))}
+        />
 
-      {isLoading && <p className="text-sm text-gray">Loading records…</p>}
-      {isError && (
-        <p className="text-sm text-status-nomatch">
-          Couldn&apos;t reach the eMPI API. Is the backend running?
-        </p>
-      )}
-
-      {data && (
-        <>
-          <div className="mb-2 flex items-center justify-between text-xs text-gray">
-            <span>
-              {data.total.toLocaleString()} patient{data.total === 1 ? "" : "s"}
-            </span>
-            <span>
-              Page {page} of {totalPages}
-            </span>
+        {selected ? (
+          // Remount per cluster so the detail's internal state — which raw
+          // panel is open, which pair cards are expanded — resets instead of
+          // carrying over onto a different patient's record.
+          <ClusterDetail
+            key={selected.mid}
+            entity={selected}
+            onUnmerge={(mid, patid, patientName) =>
+              setPendingUnmerge({ mid, patid, patientName })
+            }
+          />
+        ) : (
+          <div className="card flex h-[calc(100vh-220px)] min-h-[520px] items-center justify-center p-6 text-center text-sm text-gray">
+            {selectionMissing ? (
+              <span>
+                No cluster <span className="font-mono">{state.mid}</span>. It may
+                have been split or merged away since this link was made.
+              </span>
+            ) : isLoading || selectionPending ? (
+              "Loading…"
+            ) : (
+              "Select a cluster from the list to compare its records."
+            )}
           </div>
-
-          {data.items.length === 0 ? (
-            <p className="card p-6 text-center text-sm text-gray">
-              No records match these filters.
-            </p>
-          ) : (
-            <>
-              <div className="mb-1.5 grid grid-cols-[20px_1.5fr_0.9fr_1fr_1fr_0.8fr_1fr] gap-3 px-4 text-[10px] font-bold tracking-wide text-gray uppercase">
-                <span />
-                <span>Patient name</span>
-                <span>Match status</span>
-                <span>Masked SSN</span>
-                <span>Birthdate</span>
-                <span># of entries</span>
-                <span>Last updated</span>
-              </div>
-              {data.items.map((entity) => (
-                <DatasetRow
-                  key={entity.mid}
-                  entity={entity}
-                  onUnmerge={(mid, patid, patientName) =>
-                    setPendingUnmerge({ mid, patid, patientName })
-                  }
-                  onViewRaw={setRawPatid}
-                />
-              ))}
-            </>
-          )}
-
-          <div className="mt-4 flex justify-center gap-2">
-            <button
-              disabled={page <= 1}
-              onClick={() => setFilters((f) => ({ ...f, page: page - 1 }))}
-              className="rounded-md border border-line px-3 py-1.5 text-sm font-semibold text-gray-2 disabled:opacity-40 hover:bg-bg"
-            >
-              ← Prev
-            </button>
-            <button
-              disabled={page >= totalPages}
-              onClick={() => setFilters((f) => ({ ...f, page: page + 1 }))}
-              className="rounded-md border border-line px-3 py-1.5 text-sm font-semibold text-gray-2 disabled:opacity-40 hover:bg-bg"
-            >
-              Next →
-            </button>
-          </div>
-        </>
-      )}
+        )}
+      </div>
 
       <div className="mt-8">
         <AuditLog onFlash={flash} />
       </div>
-
-      <RawDataDrawer patid={rawPatid} onClose={() => setRawPatid(null)} />
 
       {pendingUnmerge && (
         <UnmergeModal

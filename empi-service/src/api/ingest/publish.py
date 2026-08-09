@@ -22,18 +22,20 @@ smallest existing `mid`), else mint a fresh one.
 highest-confidence deterministic pair connecting its *unlocked* members — the
 pipeline's evidence for the grouping actually being written.
 
-Review-tier data (FR-7/8/19/20/21 in the Dashboard FR doc): `non_matches`
-minus whatever the Stage-4.25 gate (`gate_results`) confidently dropped as
-`TIER_NO_MATCH` is the review queue — those dropped pairs already carry a
-decisive automated non-match decision and resolve straight to `origin='none'`
-instead of surfacing for a human. The companion `review_evidence` artifact
-(rule provenance for the rule-confirmed subset — see `src/pipeline.py`)
-supplies `match_rule`/`rules_fired` for that subset. `gate_results` is `None`
-on manifests with no gate model (legacy FS-gate fallback, or no gate
-available at all — Stage 4.25 in `src/pipeline.py`), in which case every
-`non_matches` pair is still review-eligible, matching pre-gate behavior.
-A singleton entity whose sole member appears in the review queue gets
-`origin='review'` instead of `'none'`.
+Review-tier data (FR-7/8/19/20/21 in the Dashboard FR doc): every candidate
+pair the run decided — `matches` ∪ `rejects` ∪ `non_matches` — becomes a
+`review_candidate` row stamped with its `src/api/pair_verdicts.py` verdict.
+The dashboard's Review Queue slices those rows into four sections (needs
+review / already reviewed / auto-merged / auto-rejected), which is why the
+auto-decided pools are published at all: they carry no human work, but a
+reviewer still needs to see what the pipeline did unattended. The companion
+`review_evidence` artifact (rule provenance for the review-tier
+rule-confirmed subset — see `src/pipeline.py`) supplies `match_rule`/
+`rules_fired`, and `gate_results`/`ml_features` supply the later stages'
+verdicts and scores; each is `None` on a manifest whose run didn't produce
+it, in which case its pairs simply fall through to a less specific verdict.
+Only a pair *no* stage resolved counts as open work, so only those PATIDs
+make a singleton entity `origin='review'` rather than `'none'`.
 
 Raw fields (FR-24, "View Raw Data" drawer): every `*_raw` passthrough column
 from the cleaned dataset is denormalized into `record_raw` as one JSON blob
@@ -69,6 +71,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.api.backends.index_backend import IndexBackend
+from src.api.pair_verdicts import MERGE_VERDICTS, REJECT_VERDICTS, verdict_for_pair
 from src.config import Settings
 from src.contracts import (
     ADDRESS1,
@@ -84,7 +87,6 @@ from src.contracts import (
     SEX,
     SSN,
     SSN_LAST4,
-    TIER_NO_MATCH,
     VALID_RECORD,
     ZIP_BASE,
 )
@@ -113,6 +115,14 @@ RAW_COLUMNS: tuple[str, ...] = (
 #: PHONES/Phones_set is) — the single primary cleaned phone, for the
 #: NAME_DOB_PHONE rule's "key matching feature" display.
 PHONE_CLEAN = "PrimaryPhoneNBR_clean"
+
+#: Cleaned columns no pipeline stage matches on, carried into `record_attrs`
+#: purely so the dashboard's feature-comparison table can show a reviewer the
+#: fields they'd check by eye. Like `PHONE_CLEAN`, not in contracts.py — a
+#: stage boundary doesn't depend on them.
+MIDDLE_NM_CLEAN = "MiddleNM_clean"
+SUFFIX_NM_CLEAN = "SuffixNM_clean"
+CITY_CLEAN = "CityNM_clean"
 
 
 def _now() -> str:
@@ -215,6 +225,13 @@ def _attrs_row(patid: str, attrs_by_patid: dict[str, dict], run_id: str) -> tupl
         _clean_str(row.get(ADDRESS1)),
         _clean_str(row.get(SEX)),
         _clean_str(row.get(PHONE_CLEAN)),
+        _clean_str(row.get(MIDDLE_NM_CLEAN)),
+        _clean_str(row.get(SUFFIX_NM_CLEAN)),
+        _clean_str(row.get(CITY_CLEAN)),
+        # The full multi-phone set, not just `PHONE_CLEAN`'s primary: a pair
+        # can match on B5 / NAME_DOB_PHONE through a secondary number, and a
+        # reviewer shown only the primary would read that as disagreement.
+        json.dumps(sorted(_parse_phone_set(row.get(PHONES)))),
         run_id,
     )
 
@@ -233,7 +250,23 @@ def _raw_row(patid: str, raw_by_patid: dict[str, dict], run_id: str) -> tuple | 
     return (patid, json.dumps(payload), run_id)
 
 
+def _pair_frames(
+    matches: pd.DataFrame,
+    rejects: pd.DataFrame | None,
+    non_matches: pd.DataFrame,
+) -> list[tuple[str, pd.DataFrame]]:
+    """The three disjoint pools that partition a run's candidate pairs, each
+    tagged with the stage that produced it. `rejects` may be `None` on a
+    manifest written before the artifact was recorded."""
+    frames = [("matches", matches), ("non_matches", non_matches)]
+    if rejects is not None:
+        frames.append(("rejects", rejects))
+    return [(name, frame) for name, frame in frames if frame is not None]
+
+
 def _review_candidate_rows(
+    matches: pd.DataFrame,
+    rejects: pd.DataFrame | None,
     non_matches: pd.DataFrame,
     review_evidence: pd.DataFrame | None,
     gate_results: pd.DataFrame | None,
@@ -241,45 +274,48 @@ def _review_candidate_rows(
     run_id: str,
     now: str,
 ) -> tuple[list[tuple], set[str]]:
-    """The review queue is `non_matches` (rule-uncertain pairs) minus
-    whatever the Stage-4.25 gate confidently dropped as `TIER_NO_MATCH` in
-    `gate_results` — those pairs already have a decisive automated
-    non-match decision (see `src/models/nonmatch_gate/gate.py`) and belong
-    in `origin='none'`, not the human queue. `gate_results` is `None` when
-    no gate model scored this run (legacy FS-gate fallback or no gate
-    available — Stage 4.25 in `src/pipeline.py`); every `non_matches` pair
-    stays review-eligible in that case. `review_evidence` (may be `None`
-    for pre-existing manifests without it) carries `match_rule`/
-    `rules_fired` for the rule-confirmed subset. `ml_features` (may be
-    `None` when no ML model scored this run) carries the Stage 4.5 ML
-    matcher's `match_probability`/`classification_tier` — most queue pairs
-    have no rule confidence at all, so without this the list/sort/filter
-    have nothing but insertion order to fall back on for the ML-scored
-    majority (see `sql_backend.list_review_candidates`'s `COALESCE`).
-    Returns (rows, {every PATID in the queue})."""
-    if non_matches.empty:
-        return [], set()
+    """One `review_candidate` row per candidate pair the run decided —
+    **the whole pool, not just the human queue** — each stamped with the
+    `pair_verdicts` verdict for the stage that decided it. The dashboard's
+    Review Queue splits those rows into its four sections; publishing only
+    the queue-bound subset (as this did before the Auto-merged /
+    Auto-rejected sections existed) left a reviewer no way to see what the
+    pipeline merged or discarded on its own.
 
-    if gate_results is not None and not gate_results.empty:
-        dropped = gate_results.loc[
-            gate_results["predicted_tier"] == TIER_NO_MATCH, [PATID_A, PATID_B]
-        ]
-        if not dropped.empty:
-            non_matches = non_matches.merge(
-                dropped.assign(_gate_dropped=True), on=[PATID_A, PATID_B], how="left"
-            )
-            non_matches = non_matches[non_matches["_gate_dropped"].isna()].drop(
-                columns="_gate_dropped"
-            )
-        if non_matches.empty:
-            return [], set()
+    The pools are disjoint by construction: Stage 3 routes each candidate
+    pair to exactly one of `matches` / `rejects` / `non_matches`, and the
+    later stages only annotate the third. `gate_results` (`None` on a run
+    with no gate model — legacy FS-gate fallback or none available) supplies
+    the `gate_dropped` verdict **and `gate_score`**, the P(plausible) that is
+    the only number a gate-dropped row carries; `ml_features` (`None` when no ML model
+    scored the run) supplies `ml_auto_merge` / `ml_human_review` plus the
+    `match_probability` the queue sorts and filters on, since most pairs
+    have no rule confidence at all (see `sql_backend.list_review_candidates`'s
+    `COALESCE`). `review_evidence` (`None` on pre-existing manifests without
+    it) carries `match_rule`/`rules_fired` for the review-tier rule-confirmed
+    subset.
 
+    Returns `(rows, patids_still_awaiting_review)` — the second is only the
+    PATIDs of pairs no stage resolved, since it decides which singleton
+    entities get `origin='review'` rather than `'none'`. A record whose only
+    candidate pair was auto-merged or auto-rejected has no open work on it.
+    """
     evidence_by_pair: dict[frozenset, tuple[str, float, str]] = {}
     if review_evidence is not None and not review_evidence.empty:
         for a, b, rule, conf, fired in zip(
             review_evidence[PATID_A], review_evidence[PATID_B],
             review_evidence["match_rule"], review_evidence["confidence"],
             review_evidence["rules_fired"],
+        ):
+            evidence_by_pair[frozenset((a, b))] = (rule, float(conf), fired)
+
+    # The auto-merge pool carries its own rule provenance on every row (the
+    # `Matches` contract makes `match_rule`/`confidence`/`rules_fired`
+    # non-nullable), so it needs no `review_evidence` lookup.
+    if not matches.empty:
+        for a, b, rule, conf, fired in zip(
+            matches[PATID_A], matches[PATID_B], matches["match_rule"],
+            matches["confidence"], matches["rules_fired"],
         ):
             evidence_by_pair[frozenset((a, b))] = (rule, float(conf), fired)
 
@@ -291,16 +327,59 @@ def _review_candidate_rows(
         ):
             ml_by_pair[frozenset((a, b))] = (float(proba), tier)
 
+    # The gate's score is kept alongside its tier, not just the tier: for a
+    # pair the gate dropped it is the *only* number the published row
+    # carries (no rule fired, and Stage 4.5 never scored it), so without it
+    # the whole auto-rejected section is unrankable. It also explains an
+    # otherwise baffling queue row — a near-zero `ml_match_probability` on a
+    # pair the gate passed at 70% plausible is ambiguous, not a non-match.
+    gate_by_pair: dict[frozenset, tuple[str, float | None]] = {}
+    if gate_results is not None and not gate_results.empty:
+        has_score = "score" in gate_results.columns
+        scores = (
+            gate_results["score"]
+            if has_score
+            else pd.Series([None] * len(gate_results), index=gate_results.index)
+        )
+        for a, b, tier, score in zip(
+            gate_results[PATID_A], gate_results[PATID_B],
+            gate_results["predicted_tier"], scores,
+        ):
+            # `ClassificationResults.score` is nullable by contract.
+            gate_by_pair[frozenset((a, b))] = (
+                tier, None if pd.isna(score) else float(score)
+            )
+
     rows: list[tuple] = []
     patids: set[str] = set()
-    for a, b, blocks in zip(
-        non_matches[PATID_A], non_matches[PATID_B], non_matches["source_blocks"]
-    ):
-        patids.add(a)
-        patids.add(b)
-        rule, conf, fired = evidence_by_pair.get(frozenset((a, b)), (None, None, None))
-        ml_proba, ml_tier = ml_by_pair.get(frozenset((a, b)), (None, None))
-        rows.append((a, b, rule, conf, fired, blocks, run_id, now, ml_proba, ml_tier))
+    for pool, frame in _pair_frames(matches, rejects, non_matches):
+        if frame.empty:
+            continue
+        # `matches` has no `source_blocks` on very old manifests; the queue
+        # renders it as provenance only, so a missing column is not fatal.
+        blocks_col = (
+            frame["source_blocks"]
+            if "source_blocks" in frame.columns
+            else pd.Series([None] * len(frame), index=frame.index)
+        )
+        for a, b, blocks in zip(frame[PATID_A], frame[PATID_B], blocks_col):
+            key = frozenset((a, b))
+            gate_tier, gate_score = gate_by_pair.get(key, (None, None))
+            verdict = verdict_for_pair(
+                in_matches=pool == "matches",
+                in_rejects=pool == "rejects",
+                ml_tier=ml_by_pair.get(key, (None, None))[1],
+                gate_tier=gate_tier,
+            )
+            rule, conf, fired = evidence_by_pair.get(key, (None, None, None))
+            ml_proba, ml_tier = ml_by_pair.get(key, (None, None))
+            rows.append(
+                (a, b, rule, conf, fired, blocks, run_id, now,
+                 ml_proba, ml_tier, gate_score, verdict)
+            )
+            if verdict not in MERGE_VERDICTS and verdict not in REJECT_VERDICTS:
+                patids.add(a)
+                patids.add(b)
     return rows, patids
 
 
@@ -365,6 +444,11 @@ def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
     matches = pd.read_parquet(_resolve(manifest.matches.path, settings))
     non_matches = pd.read_parquet(_resolve(manifest.non_matches.path, settings))
     cleaned = pd.read_parquet(_resolve(manifest.cleaned.path, settings))
+    rejects = (
+        pd.read_parquet(_resolve(manifest.rejects.path, settings))
+        if manifest.rejects is not None
+        else None
+    )
     review_evidence = (
         pd.read_parquet(_resolve(manifest.review_evidence.path, settings))
         if manifest.review_evidence is not None
@@ -391,7 +475,8 @@ def publish_run(backend: IndexBackend, run_id: str, settings: Settings) -> dict:
     now = _now()
 
     review_candidate_rows, review_patids = _review_candidate_rows(
-        non_matches, review_evidence, gate_results, ml_features, run_id, now
+        matches, rejects, non_matches, review_evidence, gate_results,
+        ml_features, run_id, now,
     )
 
     # Incremental-scoring index rebuild — pure Python/pandas, no DB round-trips

@@ -36,6 +36,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
+from src.api.backends.search_terms import search_tokens
 from src.preprocessing.blocking import HASHED_BLOCKS, hash_block_key  # noqa: F401
 
 PgConnection = psycopg.Connection[dict[str, Any]]
@@ -91,6 +92,12 @@ CREATE TABLE IF NOT EXISTS record_attrs (
     address1     TEXT,
     sex          TEXT,
     phone        TEXT,
+    middle_name  TEXT,
+    suffix       TEXT,
+    city         TEXT,
+    -- JSON array of every cleaned phone (`Phones_set`), not just the primary
+    -- `phone` above — see `publish._attrs_row`.
+    phones       TEXT,
     run_id       TEXT NOT NULL
 );
 
@@ -114,10 +121,30 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     fs_classification_tier TEXT,
     ml_match_probability   REAL,
     ml_classification_tier TEXT,
+    -- The Stage-4.25 gate's P(plausible); the only score a gate-dropped pair
+    -- carries. See `sql_backend.SCHEMA_SQL`.
+    gate_score   REAL,
+    -- Which stage decided this pair (`src/api/pair_verdicts.py`); NULL reads
+    -- as `needs_review`. See `sql_backend.SCHEMA_SQL`.
+    verdict      TEXT,
     UNIQUE(patid_a, patid_b, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_review_candidate_a ON review_candidate(patid_a);
 CREATE INDEX IF NOT EXISTS idx_review_candidate_b ON review_candidate(patid_b);
+
+-- Per-pair record of what a reviewer concluded, kept out of
+-- `review_candidate` so a republish can't erase it. See
+-- `sql_backend.SCHEMA_SQL` for the full rationale.
+CREATE TABLE IF NOT EXISTS reviewer_pair_decision (
+    patid_a      TEXT NOT NULL,
+    patid_b      TEXT NOT NULL,
+    decision     TEXT NOT NULL,
+    audit_id     INTEGER NOT NULL,
+    ts_utc       TEXT NOT NULL,
+    PRIMARY KEY (patid_a, patid_b)
+);
+CREATE INDEX IF NOT EXISTS idx_reviewer_pair_decision_audit
+    ON reviewer_pair_decision(audit_id);
 
 CREATE TABLE IF NOT EXISTS entity_suggestion (
     patid          TEXT PRIMARY KEY,
@@ -197,11 +224,23 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "fs_classification_tier": "TEXT",
         "ml_match_probability": "REAL",
         "ml_classification_tier": "TEXT",
+        "verdict": "TEXT",
+        # NULL on an existing database until the run is re-published.
+        "gate_score": "REAL",
     },
     "audit_log": {
         "related_patids": "TEXT",
         "prev_mid": "TEXT",
         "undo_of": "INTEGER",
+    },
+    # Display-only fields added for the feature-comparison table; NULL on an
+    # existing database until the run is re-published. See
+    # `sql_backend._COLUMN_MIGRATIONS`.
+    "record_attrs": {
+        "middle_name": "TEXT",
+        "suffix": "TEXT",
+        "city": "TEXT",
+        "phones": "TEXT",
     },
 }
 
@@ -290,13 +329,16 @@ _MEMBER_UPSERT_SQL = """
 _ATTRS_UPSERT_SQL = """
     INSERT INTO record_attrs
         (patid, first_name, last_name, birth_date, ssn_last4, email,
-         zip_code, address1, sex, phone, run_id)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         zip_code, address1, sex, phone, middle_name, suffix, city, phones,
+         run_id)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT(patid) DO UPDATE SET
         first_name=excluded.first_name, last_name=excluded.last_name,
         birth_date=excluded.birth_date, ssn_last4=excluded.ssn_last4,
         email=excluded.email, zip_code=excluded.zip_code,
         address1=excluded.address1, sex=excluded.sex, phone=excluded.phone,
+        middle_name=excluded.middle_name, suffix=excluded.suffix,
+        city=excluded.city, phones=excluded.phones,
         run_id=excluded.run_id
 """
 
@@ -398,14 +440,17 @@ def insert_review_candidates(conn: PgConnection, rows: list[tuple]) -> None:
 _REVIEW_CANDIDATE_INSERT_SQL = """
     INSERT INTO review_candidate
         (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
-         run_id, created_utc, ml_match_probability, ml_classification_tier)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         run_id, created_utc, ml_match_probability, ml_classification_tier,
+         gate_score, verdict)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
         match_rule=excluded.match_rule, confidence=excluded.confidence,
         evidence=excluded.evidence, source_blocks=excluded.source_blocks,
         created_utc=excluded.created_utc,
         ml_match_probability=excluded.ml_match_probability,
-        ml_classification_tier=excluded.ml_classification_tier
+        ml_classification_tier=excluded.ml_classification_tier,
+        gate_score=excluded.gate_score,
+        verdict=excluded.verdict
 """
 
 
@@ -413,33 +458,89 @@ def replace_review_candidates_for_run(
     conn: PgConnection, run_id: str, rows: list[tuple]
 ) -> None:
     """Replace this run's review-candidate rows wholesale (delete + bulk
-    insert) — a review pair no longer in the latest run's output should
+    insert) — a pair no longer in the latest run's candidate pool should
     disappear rather than linger as a stale suggestion. `rows` are
     `(patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
-    run_id, created_utc, ml_match_probability, ml_classification_tier)`."""
+    run_id, created_utc, ml_match_probability, ml_classification_tier,
+    gate_score, verdict)`. Never touches `reviewer_pair_decision`."""
     conn.execute("DELETE FROM review_candidate WHERE run_id = %s", (run_id,))
     _executemany(conn, _REVIEW_CANDIDATE_INSERT_SQL, rows)
 
 
+#: `record_attrs` display columns aliased `a_*`/`b_*`, shared by the two pair
+#: readers below — the counterpart of `sql_backend._PAIR_ATTR_SELECT`, and
+#: kept in step with it so both backends return the same payload keys.
+_PAIR_ATTR_SELECT = ",\n".join(
+    f"               ra_{side}.{col} AS {side}_{col}"
+    for side in ("a", "b")
+    for col in (
+        "first_name", "last_name", "birth_date", "ssn_last4", "email",
+        "zip_code", "address1", "sex", "phone", "middle_name", "suffix",
+        "city", "phones",
+    )
+)
+
+
+#: The counterpart of `sql_backend._DEDUPED_REVIEW_CANDIDATE`, and required
+#: for the same reason: the UNIQUE constraint is `(patid_a, patid_b, run_id)`,
+#: so a candidate still unresolved across successive publishes gets a fresh
+#: row per run (`replace_review_candidates_for_run` only clears its OWN
+#: run_id). Reading the table raw therefore lists the same pair once per run
+#: it survived — duplicate queue rows, inflated pagination totals, and
+#: double-counted bucket tallies. Every read below goes through this instead.
+#:
+#: `DISTINCT ON` rather than SQLite's `ROW_NUMBER()` window: same result (the
+#: single most-recently-created row per pair), and it is the idiomatic and
+#: cheaper form here. The ORDER BY must lead with the DISTINCT ON expressions;
+#: the callers' own ordering is applied outside this subquery.
+_DEDUPED_REVIEW_CANDIDATE = """
+    SELECT DISTINCT ON (patid_a, patid_b) *
+    FROM review_candidate
+    ORDER BY patid_a, patid_b, created_utc DESC, id DESC
+"""
+
+#: Pairs no pipeline stage resolved — the counterpart of
+#: `sql_backend._UNRESOLVED_VERDICT`, kept in step with it.
+_UNRESOLVED_VERDICT = (
+    "(rc.verdict IS NULL OR rc.verdict NOT IN "
+    "('auto_merge_rule', 'ml_auto_merge', 'reject', 'gate_dropped'))"
+)
+
+#: The reviewer's own conclusion about a pair, if any — see
+#: `sql_backend._PAIR_DECISION_JOIN`.
+_PAIR_DECISION_JOIN = """
+        LEFT JOIN reviewer_pair_decision rpd
+               ON rpd.patid_a = rc.patid_a AND rpd.patid_b = rc.patid_b
+"""
+
+#: The four Review Queue sections — the counterpart of
+#: `sql_backend._BUCKET_EXPR`, and identical to it (no dialect differences
+#: apply to a plain CASE). Both mirror `pair_verdicts.bucket_for`.
+_BUCKET_EXPR = """
+    CASE
+        WHEN rpd.decision IS NOT NULL THEN 'reviewed'
+        WHEN ema.mid = emb.mid THEN 'auto_merged'
+        WHEN rc.verdict IN ('reject', 'gate_dropped') THEN 'auto_rejected'
+        ELSE 'needs_review'
+    END
+"""
+
+
 def review_candidates_for_patid(conn: PgConnection, patid: str) -> list[dict]:
-    """Every review-candidate pair touching `patid`, joined to `record_attrs`
-    on *both* sides — the UI needs the other PATID's name/SSN/DOB to render
-    the expanded-row candidate list, not just its ID."""
+    """Every *unresolved* candidate pair touching `patid`, joined to
+    `record_attrs` on both sides — see `sql_backend.review_candidates_for_patid`
+    for why both callers want the open pairs rather than the whole pool."""
     rows = conn.execute(
-        """
+        f"""
         SELECT rc.*,
-               ra_a.first_name AS a_first_name, ra_a.last_name AS a_last_name,
-               ra_a.birth_date AS a_birth_date, ra_a.ssn_last4 AS a_ssn_last4,
-               ra_a.email AS a_email, ra_a.zip_code AS a_zip_code,
-               ra_a.address1 AS a_address1, ra_a.sex AS a_sex, ra_a.phone AS a_phone,
-               ra_b.first_name AS b_first_name, ra_b.last_name AS b_last_name,
-               ra_b.birth_date AS b_birth_date, ra_b.ssn_last4 AS b_ssn_last4,
-               ra_b.email AS b_email, ra_b.zip_code AS b_zip_code,
-               ra_b.address1 AS b_address1, ra_b.sex AS b_sex, ra_b.phone AS b_phone
-        FROM review_candidate rc
+{_PAIR_ATTR_SELECT}
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
-        WHERE rc.patid_a = %s OR rc.patid_b = %s
+{_PAIR_DECISION_JOIN}
+        WHERE (rc.patid_a = %s OR rc.patid_b = %s)
+          AND {_UNRESOLVED_VERDICT}
+          AND rpd.decision IS NULL
         ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
         """,
         (patid, patid),
@@ -452,49 +553,71 @@ def list_review_candidates(
     *,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
-    reviewed: bool | None = None,
+    gate_score_min: float | None = None,
+    gate_score_max: float | None = None,
+    verdict: str | None = None,
+    bucket: str | None = None,
     search: str | None = None,
+    patid_a: str | None = None,
+    patid_b: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
     """Paginated, candidate-grain review queue — see
-    `sql_backend.list_review_candidates` for the full filter semantics this
-    mirrors exactly (case-insensitive `search` is `ILIKE` here, not `LIKE` —
-    Postgres's `LIKE` is case-sensitive, unlike SQLite's)."""
+    `sql_backend.list_review_candidates` for the full filter and bucket
+    semantics this mirrors exactly (case-insensitive `search` is `ILIKE`
+    here, not `LIKE` — Postgres's `LIKE` is case-sensitive, unlike
+    SQLite's)."""
     where = []
     params: list = []
+    if patid_a is not None and patid_b is not None:
+        where.append("rc.patid_a = %s AND rc.patid_b = %s")
+        params.extend([patid_a, patid_b])
     if confidence_min is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) >= %s")
         params.append(confidence_min)
     if confidence_max is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) <= %s")
         params.append(confidence_max)
-    if search:
-        where.append(
-            "(ra_a.first_name ILIKE %s OR ra_a.last_name ILIKE %s OR "
-            "ra_b.first_name ILIKE %s OR ra_b.last_name ILIKE %s OR "
-            "rc.patid_a ILIKE %s OR rc.patid_b ILIKE %s)"
+    if gate_score_min is not None:
+        where.append("rc.gate_score >= %s")
+        params.append(gate_score_min)
+    if gate_score_max is not None:
+        # Half-open, matching sql_backend.
+        where.append("rc.gate_score < %s")
+        params.append(gate_score_max)
+    if verdict is not None:
+        where.append("rc.verdict = %s")
+        params.append(verdict)
+    tokens = search_tokens(search)
+    if tokens:
+        # Mirrors sql_backend.list_review_candidates — all tokens on one side.
+        side_a = " AND ".join(
+            "(ra_a.first_name ILIKE %s OR ra_a.last_name ILIKE %s OR rc.patid_a ILIKE %s)"
+            for _ in tokens
         )
-        like = f"%{search}%"
-        params.extend([like, like, like, like, like, like])
+        side_b = " AND ".join(
+            "(ra_b.first_name ILIKE %s OR ra_b.last_name ILIKE %s OR rc.patid_b ILIKE %s)"
+            for _ in tokens
+        )
+        where.append(f"(({side_a}) OR ({side_b}))")
+        for _side in (side_a, side_b):
+            for token in tokens:
+                like = f"%{token}%"
+                params.extend([like, like, like])
 
-    reviewed_expr = (
-        "(ema.mid = emb.mid OR EXISTS ("
-        "SELECT 1 FROM audit_log al WHERE al.action = 'dismiss' "
-        "AND al.patids = rc.patid_a || ',' || rc.patid_b))"
-    )
-    if reviewed is True:
-        where.append(reviewed_expr)
-    elif reviewed is False:
-        where.append(f"NOT {reviewed_expr}")
+    if bucket is not None:
+        where.append(f"({_BUCKET_EXPR}) = %s")
+        params.append(bucket)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
-    base_from = """
-        FROM review_candidate rc
+    base_from = f"""
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         JOIN entity_member ema ON ema.patid = rc.patid_a
         JOIN entity_member emb ON emb.patid = rc.patid_b
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
+{_PAIR_DECISION_JOIN}
     """
 
     total_row = conn.execute(
@@ -507,17 +630,11 @@ def list_review_candidates(
     rows = conn.execute(
         f"""
         SELECT rc.*, ema.mid AS mid_a, emb.mid AS mid_b,
-               ra_a.first_name AS a_first_name, ra_a.last_name AS a_last_name,
-               ra_a.birth_date AS a_birth_date, ra_a.ssn_last4 AS a_ssn_last4,
-               ra_a.email AS a_email, ra_a.zip_code AS a_zip_code,
-               ra_a.address1 AS a_address1, ra_a.sex AS a_sex, ra_a.phone AS a_phone,
-               ra_b.first_name AS b_first_name, ra_b.last_name AS b_last_name,
-               ra_b.birth_date AS b_birth_date, ra_b.ssn_last4 AS b_ssn_last4,
-               ra_b.email AS b_email, ra_b.zip_code AS b_zip_code,
-               ra_b.address1 AS b_address1, ra_b.sex AS b_sex, ra_b.phone AS b_phone,
+{_PAIR_ATTR_SELECT},
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = ema.mid) AS member_count_a,
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = emb.mid) AS member_count_b,
-               {reviewed_expr} AS reviewed
+               rpd.decision AS reviewer_decision,
+               ({_BUCKET_EXPR}) AS bucket
         {base_from}
         {where_sql}
         ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
@@ -526,6 +643,46 @@ def list_review_candidates(
         [*params, page_size, offset],
     ).fetchall()
     return [dict(r) for r in rows], total
+
+
+def review_bucket_counts(conn: PgConnection) -> dict[str, int]:
+    """Counterpart of `sql_backend.review_bucket_counts` — counts the deduped
+    pairs, so a section tab can't report more pairs than the section lists."""
+    rows = conn.execute(
+        f"""
+        SELECT ({_BUCKET_EXPR}) AS bucket, COUNT(*) AS n
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
+        JOIN entity_member ema ON ema.patid = rc.patid_a
+        JOIN entity_member emb ON emb.patid = rc.patid_b
+{_PAIR_DECISION_JOIN}
+        GROUP BY 1
+        """
+    ).fetchall()
+    return {row["bucket"]: int(row["n"]) for row in rows}
+
+
+def record_pair_decisions(conn: PgConnection, rows: list[tuple]) -> None:
+    """Counterpart of `sql_backend.record_pair_decisions` — upsert keyed on
+    the pair, last write wins."""
+    _executemany(
+        conn,
+        """
+        INSERT INTO reviewer_pair_decision
+            (patid_a, patid_b, decision, audit_id, ts_utc)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT(patid_a, patid_b) DO UPDATE SET
+            decision=excluded.decision, audit_id=excluded.audit_id,
+            ts_utc=excluded.ts_utc
+        """,
+        rows,
+    )
+
+
+def clear_pair_decisions_for_audit(conn: PgConnection, audit_id: int) -> None:
+    """Counterpart of `sql_backend.clear_pair_decisions_for_audit`."""
+    conn.execute(
+        "DELETE FROM reviewer_pair_decision WHERE audit_id = %s", (audit_id,)
+    )
 
 
 def upsert_suggestion(
@@ -558,7 +715,8 @@ def get_entity(conn: PgConnection, mid: str) -> dict | None:
         """
         SELECT em.patid, em.is_primary, em.added_by, em.updated_utc,
                ra.first_name, ra.last_name, ra.birth_date, ra.ssn_last4,
-               ra.email, ra.zip_code, ra.address1, ra.sex, ra.phone
+               ra.email, ra.zip_code, ra.address1, ra.sex, ra.phone,
+               ra.middle_name, ra.suffix, ra.city, ra.phones
         FROM entity_member em
         LEFT JOIN record_attrs ra ON ra.patid = em.patid
         WHERE em.mid = %s
@@ -581,13 +739,22 @@ def list_entities(
     updated_before: str | None = None,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    min_members: int | None = None,
+    sort: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
     """Paginated master rows (one per entity) + their member count — see
     `sql_backend.list_entities` for full filter semantics. `search` is
     `ILIKE` here (case-insensitive), matching SQLite's default `LIKE`
-    behavior rather than Postgres's case-sensitive default."""
+    behavior rather than Postgres's case-sensitive default.
+
+    `sort` accepts the same three orderings as the SQLite store. It was
+    previously missing from this signature while `SqlIndexBackend` passed it
+    unconditionally, so every `GET /records` against Postgres raised
+    `TypeError`; adding `min_members` here would have widened that same crash
+    by one more argument, so both are implemented rather than only the new one.
+    """
     where = []
     params: list = []
     if origin is not None:
@@ -609,15 +776,28 @@ def list_entities(
     if confidence_max is not None:
         where.append("e.confidence <= %s")
         params.append(confidence_max)
-    if search:
+    if min_members is not None:
+        where.append(
+            "(SELECT COUNT(*) FROM entity_member em5 WHERE em5.mid = e.mid) >= %s"
+        )
+        params.append(min_members)
+    tokens = search_tokens(search)
+    if tokens:
+        # Mirrors sql_backend.list_entities — every token on the same member,
+        # each free to match a different column. See `search_terms`.
+        member_sql = " AND ".join(
+            "(em2.patid ILIKE %s OR ra2.first_name ILIKE %s OR ra2.last_name ILIKE %s)"
+            for _ in tokens
+        )
         where.append(
             "(e.mid ILIKE %s OR EXISTS (SELECT 1 FROM entity_member em2 "
             "LEFT JOIN record_attrs ra2 ON ra2.patid = em2.patid "
-            "WHERE em2.mid = e.mid AND ("
-            "em2.patid ILIKE %s OR ra2.first_name ILIKE %s OR ra2.last_name ILIKE %s)))"
+            f"WHERE em2.mid = e.mid AND {member_sql}))"
         )
-        like = f"%{search}%"
-        params.extend([like, like, like, like])
+        params.append(f"%{search}%")
+        for token in tokens:
+            like = f"%{token}%"
+            params.extend([like, like, like])
     if birth_date:
         where.append(
             "EXISTS (SELECT 1 FROM entity_member em3 "
@@ -640,15 +820,31 @@ def list_entities(
     assert total_row is not None
     total = total_row["n"]
 
+    if sort == "confidence":
+        sort_join_sql = ""
+        order_sql = "e.confidence DESC NULLS LAST, e.mid"
+    elif sort == "name":
+        sort_join_sql = (
+            "LEFT JOIN entity_member pm ON pm.mid = e.mid AND pm.is_primary "
+            "LEFT JOIN record_attrs pa ON pa.patid = pm.patid"
+        )
+        order_sql = (
+            "LOWER(pa.last_name) NULLS LAST, LOWER(pa.first_name), e.mid"
+        )
+    else:
+        sort_join_sql = ""
+        order_sql = "e.updated_utc DESC, e.mid"
+
     offset = max(page - 1, 0) * page_size
     rows = conn.execute(
         f"""
         SELECT e.*, COUNT(em.patid) AS member_count
         FROM entity e
         LEFT JOIN entity_member em ON em.mid = e.mid
+        {sort_join_sql}
         {where_sql}
-        GROUP BY e.mid
-        ORDER BY e.updated_utc DESC, e.mid
+        GROUP BY e.mid{", pa.last_name, pa.first_name" if sort == "name" else ""}
+        ORDER BY {order_sql}
         LIMIT %s OFFSET %s
         """,
         [*params, page_size, offset],
@@ -953,6 +1149,9 @@ __all__ = [
     "replace_review_candidates_for_run",
     "insert_review_candidates",
     "review_candidates_for_patid",
+    "review_bucket_counts",
+    "record_pair_decisions",
+    "clear_pair_decisions_for_audit",
     "all_entity_member_mids",
     "get_entity",
     "list_entities",

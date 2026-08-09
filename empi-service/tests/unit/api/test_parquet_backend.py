@@ -171,7 +171,7 @@ class TestBulkPublishMethods:
     def test_upsert_record_attrs_and_raw_bulk(self, backend):
         backend.begin()
         backend.upsert_record_attrs_bulk([
-            ("P1", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, "r1"),
+            ("P1", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, None, None, None, None, "r1"),
         ])
         backend.upsert_record_raw_bulk([("P1", '{"FirstNM_raw": "JANE"}', "r1")])
         backend.commit()
@@ -193,7 +193,7 @@ class TestBulkPublishMethods:
             "r1",
             [(
                 "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
-                None, None,
+                None, None, None, "ml_human_review",
             )],
         )
         backend.commit()
@@ -208,7 +208,7 @@ class TestBulkPublishMethods:
             "r1",
             [(
                 "P3", "P4", "NAME_DOB_ADDRESS", 0.97, "NAME_DOB_ADDRESS", "B7", "r1", "t1",
-                None, None,
+                None, None, None, "ml_human_review",
             )],
         )
         backend.commit()
@@ -219,12 +219,18 @@ class TestBulkPublishMethods:
     def test_replace_review_candidates_for_run_carries_ml_score(self, backend):
         backend.begin()
         backend.replace_review_candidates_for_run(
-            "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0", 0.24, "human_review")]
+            "r1",
+            [(
+                "P1", "P2", None, None, None, "B3", "r1", "t0",
+                0.24, "human_review", 0.81, "ml_human_review",
+            )],
         )
         backend.commit()
         df = backend._tables["review_candidate"]
         assert df.iloc[0]["ml_match_probability"] == 0.24
         assert df.iloc[0]["ml_classification_tier"] == "human_review"
+        # Separate axis from the matcher score — see the SQL backend's twin.
+        assert df.iloc[0]["gate_score"] == 0.81
 
     def test_replace_cleaned_attrs_full_rebuild(self, backend):
         backend.begin()
@@ -280,10 +286,10 @@ def _seed_three_entities(backend):
         ("P4", "M-000003", 1, "pipeline", "t2"),
     ])
     backend.upsert_record_attrs_bulk([
-        ("P1", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, "r1"),
-        ("P2", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, "r1"),
-        ("P3", "Amy", "Lee", "1975-03-03", "1234", None, None, None, None, None, "r1"),
-        ("P4", "John", "Smith", "1985-05-05", "4321", None, None, None, None, None, "r1"),
+        ("P1", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, None, None, None, None, "r1"),
+        ("P2", "Jane", "Doe", "1990-01-01", "6789", None, None, None, None, None, None, None, None, None, "r1"),
+        ("P3", "Amy", "Lee", "1975-03-03", "1234", None, None, None, None, None, None, None, None, None, "r1"),
+        ("P4", "John", "Smith", "1985-05-05", "4321", None, None, None, None, None, None, None, None, None, "r1"),
     ])
     backend.insert_review_candidates([
         ("P3", "P5", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t1", None, None),
@@ -340,6 +346,37 @@ class TestReadSideMethods:
         assert {r["mid"] for r in by_name} == {"M-000003"}
         by_mid, _ = backend.list_entities(search="M-000001")
         assert {r["mid"] for r in by_mid} == {"M-000001"}
+
+    def test_list_entities_search_by_full_name(self, backend):
+        """Parity with `sql_backend`: a full name spans `first_name` +
+        `last_name`, so the query is tokenized rather than matched whole."""
+        _seed_three_entities(backend)
+        rows, total = backend.list_entities(search="John Smith")
+        assert total == 1
+        assert rows[0]["mid"] == "M-000003"
+
+    def test_list_entities_search_full_name_order_insensitive(self, backend):
+        _seed_three_entities(backend)
+        _, total = backend.list_entities(search="smith john")
+        assert total == 1
+
+    def test_list_entities_search_tokens_are_anded(self, backend):
+        """Amy is Lee and John is Smith — "Amy Smith" is nobody."""
+        _seed_three_entities(backend)
+        _, total = backend.list_entities(search="Amy Smith")
+        assert total == 0
+
+    def test_list_entities_blank_search_does_not_filter(self, backend):
+        _seed_three_entities(backend)
+        _, total = backend.list_entities(search="   ")
+        assert total == 3
+
+    def test_list_entities_search_treats_query_as_text_not_regex(self, backend):
+        """A name is not a pattern: an unbalanced paren must return no rows,
+        not raise `re.error` out of the dashboard's registry search."""
+        _seed_three_entities(backend)
+        _, total = backend.list_entities(search="Smith (")
+        assert total == 0
 
     def test_dashboard_summary_aggregates(self, backend):
         _seed_three_entities(backend)

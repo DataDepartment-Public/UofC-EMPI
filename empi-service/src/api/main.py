@@ -16,7 +16,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api import jobs, threshold_store
 from src.api.backends import sql_backend
-from src.api.routers import admin, audit, dashboard, explanations, health, records, runs
+from src.api.routers import (
+    admin,
+    audit,
+    cluster_pairs,
+    dashboard,
+    explanations,
+    health,
+    records,
+    runs,
+)
 from src.config import configure_logging, settings
 
 logger = logging.getLogger(__name__)
@@ -97,6 +106,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(runs.router)
 app.include_router(records.router)
+app.include_router(cluster_pairs.router)
 app.include_router(audit.router)
 app.include_router(dashboard.router)
 app.include_router(admin.router)

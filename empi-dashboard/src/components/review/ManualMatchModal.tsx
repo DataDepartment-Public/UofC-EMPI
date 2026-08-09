@@ -5,13 +5,13 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { compareRecords } from "@/lib/compare";
 import type { ExplainPatient } from "@/lib/explain";
-import { fullName, maskSsn, formatDate } from "@/lib/format";
+import { fullName, maskSsn, formatDate, formatRawDate } from "@/lib/format";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
 
 /** "Find a match manually" — search for and propose a match between two
  * records blocking never paired, not just merge auto-suggested candidates.
  * Reuses `compareRecords`/`FeatureComparisonTable` for the preview and hands
- * off to the caller's existing `onMerge` (the same callback `DatasetRow`
+ * off to the caller's existing `onMerge` (the same callback the review page
  * already wires to `MergeModal`'s confirmation) rather than building a
  * second confirm step. */
 export function ManualMatchModal({
@@ -92,14 +92,18 @@ export function ManualMatchModal({
                       setSelected({
                         patid: primary.patid,
                         first_name: primary.first_name ?? null,
+                        middle_name: primary.middle_name ?? null,
                         last_name: primary.last_name ?? null,
+                        suffix: primary.suffix ?? null,
                         birth_date: primary.birth_date ?? null,
                         ssn_last4: primary.ssn_last4 ?? null,
                         email: primary.email ?? null,
                         zip_code: primary.zip_code ?? null,
+                        city: primary.city ?? null,
                         address1: primary.address1 ?? null,
                         sex: primary.sex ?? null,
                         phone: primary.phone ?? null,
+                        phones: primary.phones ?? null,
                       })
                     }
                     className="flex w-full items-center justify-between rounded-md border border-line px-3 py-2 text-left text-[13px] hover:border-brand-blue hover:bg-bg"
@@ -108,7 +112,7 @@ export function ManualMatchModal({
                       {fullName(primary.first_name, primary.last_name)}
                     </span>
                     <span className="flex gap-3 text-xs text-gray-2">
-                      <span>{primary.birth_date ?? "—"}</span>
+                      <span>{formatRawDate(primary.birth_date)}</span>
                       <span>{maskSsn(primary.ssn_last4)}</span>
                       <span className="font-mono text-gray">{e.mid}</span>
                       <span>{formatDate(e.updated_utc)}</span>

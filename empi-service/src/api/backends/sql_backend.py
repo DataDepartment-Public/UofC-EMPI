@@ -38,6 +38,8 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
+from src.api.backends.search_terms import search_tokens
+
 #: Re-exported so existing `store.hash_block_key` / `store.HASHED_BLOCKS` call
 #: sites (`publish.py`, tests) keep working — these are pure/data, not tied
 #: to SQLite, which is why `src/api/ingest/incremental.py` imports them from
@@ -99,6 +101,12 @@ CREATE TABLE IF NOT EXISTS record_attrs (
     address1     TEXT,
     sex          TEXT,
     phone        TEXT,
+    middle_name  TEXT,
+    suffix       TEXT,
+    city         TEXT,
+    -- JSON array of every cleaned phone (`Phones_set`), not just the primary
+    -- `phone` above — see `publish._attrs_row`.
+    phones       TEXT,
     run_id       TEXT NOT NULL
 );
 
@@ -122,10 +130,42 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     fs_classification_tier TEXT,
     ml_match_probability   REAL,
     ml_classification_tier TEXT,
+    -- The Stage-4.25 gate's P(plausible). Recorded for every pair the gate
+    -- scored, dropped ones included -- it is the only number an auto-rejected
+    -- row carries, and the reason a pair with a near-zero
+    -- `ml_match_probability` can still be worth a human's time. NULL where the
+    -- gate never scored the pair (a deterministic reject, an ungated run) and
+    -- on rows from a publish that predates the column.
+    gate_score   REAL,
+    -- Which stage decided this pair, from `src/api/pair_verdicts.py`. NULL on
+    -- rows written by incremental scoring (no model stage runs there) and on
+    -- rows from a publish that predates the column; both read as
+    -- `needs_review`, which is what they were.
+    verdict      TEXT,
     UNIQUE(patid_a, patid_b, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_review_candidate_a ON review_candidate(patid_a);
 CREATE INDEX IF NOT EXISTS idx_review_candidate_b ON review_candidate(patid_b);
+
+-- What a human concluded about one specific pair, written by every
+-- `/audit/*` action that rules on one (`routers/audit.py`). Deliberately its
+-- own table rather than a column on `review_candidate`: publishes replace
+-- that table per run (`replace_review_candidates_for_run`), and a reviewer's
+-- decision must outlive any number of republishes — the same stickiness
+-- `locked_patids` gives entity membership, at pair grain.
+--
+-- `audit_id` is the entry that produced it, so an undo can retract exactly
+-- the decisions its own action wrote (`clear_pair_decisions_for_audit`).
+CREATE TABLE IF NOT EXISTS reviewer_pair_decision (
+    patid_a      TEXT NOT NULL,
+    patid_b      TEXT NOT NULL,
+    decision     TEXT NOT NULL,
+    audit_id     INTEGER NOT NULL,
+    ts_utc       TEXT NOT NULL,
+    PRIMARY KEY (patid_a, patid_b)
+);
+CREATE INDEX IF NOT EXISTS idx_reviewer_pair_decision_audit
+    ON reviewer_pair_decision(audit_id);
 
 CREATE TABLE IF NOT EXISTS entity_suggestion (
     patid          TEXT PRIMARY KEY,
@@ -177,6 +217,13 @@ CREATE TABLE IF NOT EXISTS cleaned_attrs (
 """
 
 
+#: How long a blocked writer waits for the lock before giving up. Generous on
+#: purpose: the alternative to waiting is a 500 the user sees, and every write
+#: in this schema is a small single-row statement, so a queue this deep only
+#: forms under a burst of concurrent requests — exactly the case to absorb.
+_BUSY_TIMEOUT_MS = 5000
+
+
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """Open one SQLite connection. Callers own its lifecycle (one per request
     or per script run) — this module never pools connections.
@@ -190,12 +237,53 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     intermittently raises `sqlite3.ProgrammingError: SQLite objects created
     in a thread can only be used in that same thread.` when it lands on a
     different thread than the one that opened the connection.
+
+    `busy_timeout`: SQLite allows one writer at a time and, by default, fails
+    a blocked writer *immediately* with `OperationalError: database is locked`
+    rather than waiting. Several of our read routes are secretly writers —
+    `GET /records/{patid}/raw` and `/ssn-clean` each append an audit row — so
+    a page that opens N records at once fires N concurrent writes and loses
+    all but one to a 500. (The Patient Registry's raw comparison panel does
+    exactly that for every member of a cluster; the Review Queue's two-record
+    version mostly got away with it.) The timeout makes a blocked writer wait
+    and retry instead, which is the intended behavior: every write here is a
+    single-row statement measured in microseconds, so they queue rather than
+    collide.
+
+    `journal_mode = WAL`: lets readers proceed while a writer holds the lock,
+    so one request's audit insert can't stall an unrelated `GET /records` on
+    another. Persistent — it is a property of the database file, not the
+    connection — so re-setting it per connection is a cheap no-op.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
+
+
+def begin(conn: sqlite3.Connection) -> None:
+    """Open a write transaction, taking the write lock up front.
+
+    `BEGIN IMMEDIATE`, not the default `BEGIN DEFERRED`, and the difference is
+    the whole point. Every caller of this is a read-modify-write: `/audit/merge`
+    reads the entity then updates it, `GET /records/{patid}/raw` looks up the
+    patid's mid then inserts an audit row. Under a deferred transaction that
+    sequence takes a SHARED lock on the read and only then tries to upgrade to
+    RESERVED for the write — and when another connection already holds
+    RESERVED, SQLite returns `SQLITE_BUSY` *immediately* on the upgrade instead
+    of waiting, because two readers both waiting to upgrade would deadlock.
+    `busy_timeout` cannot rescue that case; it only applies to a lock that can
+    be acquired by waiting.
+
+    Taking the write lock at `BEGIN` removes the upgrade step, so concurrent
+    writers queue on `busy_timeout` (see `get_connection`) and succeed in turn.
+    The cost is that write transactions serialize — which they already did;
+    they just used to serialize by failing.
+    """
+    conn.execute("BEGIN IMMEDIATE")
 
 
 #: Columns added to a table after its original release — `CREATE TABLE IF NOT
@@ -208,11 +296,27 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "fs_classification_tier": "TEXT",
         "ml_match_probability": "REAL",
         "ml_classification_tier": "TEXT",
+        "verdict": "TEXT",
+        # All-NULL on an existing `empi.db` until the run is re-published
+        # (`python -m src.api.ingest.publish_local --run-id <run_id>`).
+        # Until then the two gate bands can't be told apart and the queue
+        # shows both as `Implausible` — degraded, not broken.
+        "gate_score": "REAL",
     },
     "audit_log": {
         "related_patids": "TEXT",
         "prev_mid": "TEXT",
         "undo_of": "INTEGER",
+    },
+    # Display-only fields added for the feature-comparison table. An existing
+    # `empi.db` gets them as all-NULL until the run is re-published
+    # (`python -m src.api.ingest.publish_local --run-id <run_id>`), which
+    # upserts every `record_attrs` row.
+    "record_attrs": {
+        "middle_name": "TEXT",
+        "suffix": "TEXT",
+        "city": "TEXT",
+        "phones": "TEXT",
     },
 }
 
@@ -294,13 +398,16 @@ _MEMBER_UPSERT_SQL = """
 _ATTRS_UPSERT_SQL = """
     INSERT INTO record_attrs
         (patid, first_name, last_name, birth_date, ssn_last4, email,
-         zip_code, address1, sex, phone, run_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         zip_code, address1, sex, phone, middle_name, suffix, city, phones,
+         run_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(patid) DO UPDATE SET
         first_name=excluded.first_name, last_name=excluded.last_name,
         birth_date=excluded.birth_date, ssn_last4=excluded.ssn_last4,
         email=excluded.email, zip_code=excluded.zip_code,
         address1=excluded.address1, sex=excluded.sex, phone=excluded.phone,
+        middle_name=excluded.middle_name, suffix=excluded.suffix,
+        city=excluded.city, phones=excluded.phones,
         run_id=excluded.run_id
 """
 
@@ -372,12 +479,17 @@ def upsert_record_attrs(
     sex: str | None,
     run_id: str,
     phone: str | None = None,
+    middle_name: str | None = None,
+    suffix: str | None = None,
+    city: str | None = None,
+    phones: str | None = None,
 ) -> None:
     conn.execute(
         _ATTRS_UPSERT_SQL,
         (
             patid, first_name, last_name, birth_date, ssn_last4, email,
-            zip_code, address1, sex, phone, run_id,
+            zip_code, address1, sex, phone, middle_name, suffix, city, phones,
+            run_id,
         ),
     )
 
@@ -412,14 +524,17 @@ def get_record_raw(conn: sqlite3.Connection, patid: str) -> str | None:
 _REVIEW_CANDIDATE_INSERT_SQL = """
     INSERT INTO review_candidate
         (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
-         run_id, created_utc, ml_match_probability, ml_classification_tier)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         run_id, created_utc, ml_match_probability, ml_classification_tier,
+         gate_score, verdict)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
         match_rule=excluded.match_rule, confidence=excluded.confidence,
         evidence=excluded.evidence, source_blocks=excluded.source_blocks,
         created_utc=excluded.created_utc,
         ml_match_probability=excluded.ml_match_probability,
-        ml_classification_tier=excluded.ml_classification_tier
+        ml_classification_tier=excluded.ml_classification_tier,
+        gate_score=excluded.gate_score,
+        verdict=excluded.verdict
 """
 
 
@@ -427,11 +542,14 @@ def replace_review_candidates_for_run(
     conn: sqlite3.Connection, run_id: str, rows: list[tuple]
 ) -> None:
     """Replace this run's review-candidate rows wholesale (delete + bulk
-    insert) — unlike entities/members, a review pair that's no longer in the
-    latest run's `non_matches` (resolved, or reclassified) should disappear
-    rather than linger as a stale suggestion. `rows` are `(patid_a, patid_b,
+    insert) — unlike entities/members, a pair that's no longer in the latest
+    run's candidate pool (resolved, or reclassified) should disappear rather
+    than linger as a stale suggestion. `rows` are `(patid_a, patid_b,
     match_rule, confidence, evidence, source_blocks, run_id, created_utc,
-    ml_match_probability, ml_classification_tier)`."""
+    ml_match_probability, ml_classification_tier, verdict)`.
+
+    Reviewer decisions live in `reviewer_pair_decision` precisely so this
+    delete can't take them with it."""
     conn.execute("DELETE FROM review_candidate WHERE run_id = ?", (run_id,))
     if rows:
         conn.executemany(_REVIEW_CANDIDATE_INSERT_SQL, rows)
@@ -479,26 +597,65 @@ _DEDUPED_REVIEW_CANDIDATE = """
     ) WHERE rn = 1
 """
 
+#: The `record_attrs` display columns, aliased `a_*`/`b_*` for a pair query.
+#: Shared by the two pair readers below so a column added to `record_attrs`
+#: can't reach one route's payload and silently miss the other's.
+#: `run_id` is deliberately excluded (it describes the row's provenance, not
+#: the patient) — see `parquet_backend._DISPLAY_ATTR_COLUMNS`, its counterpart.
+_PAIR_ATTR_SELECT = ",\n".join(
+    f"               ra_{side}.{col} AS {side}_{col}"
+    for side in ("a", "b")
+    for col in (
+        "first_name", "last_name", "birth_date", "ssn_last4", "email",
+        "zip_code", "address1", "sex", "phone", "middle_name", "suffix",
+        "city", "phones",
+    )
+)
+
+
+#: `review_candidate` holds the whole candidate pool, not just the human
+#: queue — every pair the pipeline decided, so the dashboard can show its
+#: Auto-merged / Auto-rejected sections. This predicate narrows it back to
+#: the pairs still genuinely awaiting a human: the ones no stage resolved.
+#: NULL passes (incremental-scoring rows and pre-`verdict` publishes, both of
+#: which predate any auto tier).
+_UNRESOLVED_VERDICT = (
+    "(rc.verdict IS NULL OR rc.verdict NOT IN "
+    "('auto_merge_rule', 'ml_auto_merge', 'reject', 'gate_dropped'))"
+)
+
+#: A reviewer's own conclusion about a pair, if any. LEFT JOINed rather than
+#: EXISTS-ed so the queue can report *which* way they ruled, not just that
+#: they did.
+_PAIR_DECISION_JOIN = """
+        LEFT JOIN reviewer_pair_decision rpd
+               ON rpd.patid_a = rc.patid_a AND rpd.patid_b = rc.patid_b
+"""
+
 
 def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[dict]:
-    """Every review-candidate pair touching `patid`, joined to `record_attrs`
-    on *both* sides — the UI needs the other PATID's name/SSN/DOB to render
-    the expanded-row candidate list, not just its ID."""
+    """Every *unresolved* candidate pair touching `patid`, joined to
+    `record_attrs` on both sides — the UI needs the other PATID's
+    name/SSN/DOB to render the expanded-row candidate list, not just its ID.
+
+    "Unresolved" is what both callers mean: `records.py`'s expand-row shows a
+    reviewer what's still open on a record, and `audit.py`'s
+    `_single_member_origin` decides whether a leftover singleton is
+    `origin='review'` or `origin='none'`. A pair the gate dropped or the ML
+    matcher auto-merged is in `review_candidate` for the queue's sake, but it
+    is not open work — hence `_UNRESOLVED_VERDICT` plus the requirement that
+    no reviewer has already ruled."""
     rows = conn.execute(
         f"""
         SELECT rc.*,
-               ra_a.first_name AS a_first_name, ra_a.last_name AS a_last_name,
-               ra_a.birth_date AS a_birth_date, ra_a.ssn_last4 AS a_ssn_last4,
-               ra_a.email AS a_email, ra_a.zip_code AS a_zip_code,
-               ra_a.address1 AS a_address1, ra_a.sex AS a_sex, ra_a.phone AS a_phone,
-               ra_b.first_name AS b_first_name, ra_b.last_name AS b_last_name,
-               ra_b.birth_date AS b_birth_date, ra_b.ssn_last4 AS b_ssn_last4,
-               ra_b.email AS b_email, ra_b.zip_code AS b_zip_code,
-               ra_b.address1 AS b_address1, ra_b.sex AS b_sex, ra_b.phone AS b_phone
+{_PAIR_ATTR_SELECT}
         FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
-        WHERE rc.patid_a = ? OR rc.patid_b = ?
+{_PAIR_DECISION_JOIN}
+        WHERE (rc.patid_a = ? OR rc.patid_b = ?)
+          AND {_UNRESOLVED_VERDICT}
+          AND rpd.decision IS NULL
         ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
         """,
         (patid, patid),
@@ -506,64 +663,131 @@ def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[di
     return [dict(r) for r in rows]
 
 
+#: The four Review Queue sections as one SQL expression, mirroring
+#: `src/api/pair_verdicts.py::bucket_for` clause for clause — keep the two in
+#: step. Referenced by both the WHERE (to filter) and the SELECT (so a row
+#: carries the section it came from), which is why it's a module constant.
+_BUCKET_EXPR = """
+    CASE
+        WHEN rpd.decision IS NOT NULL THEN 'reviewed'
+        WHEN ema.mid = emb.mid THEN 'auto_merged'
+        WHEN rc.verdict IN ('reject', 'gate_dropped') THEN 'auto_rejected'
+        ELSE 'needs_review'
+    END
+"""
+
+
 def list_review_candidates(
     conn: sqlite3.Connection,
     *,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
-    reviewed: bool | None = None,
+    gate_score_min: float | None = None,
+    gate_score_max: float | None = None,
+    verdict: str | None = None,
+    bucket: str | None = None,
     search: str | None = None,
+    patid_a: str | None = None,
+    patid_b: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
-    """Paginated, candidate-grain review queue — one row per pending pair,
+    """Paginated, candidate-grain review queue — one row per candidate pair,
     not per cluster (docs/Dashboard-Guide.md's Review Queue: the same cluster
     can surface multiple candidates, and each should appear once here).
 
-    A pair counts as "reviewed" if either:
-      * both sides currently share a `mid` (the merge already happened —
-        mirrors the client-side `pendingCandidates` filter in
-        `DatasetRow.tsx`), or
-      * a `dismiss` audit_log entry exists for the exact `(patid_a, patid_b)`
-        pair (the reviewer's "Not a match" action — `POST /audit/dismiss`).
+    `bucket` selects one of the four sections (`src/api/pair_verdicts.py`);
+    unset returns every candidate. Each row carries its own `bucket` and
+    `reviewer_decision` regardless, so a caller listing across sections can
+    still tell them apart:
 
-    `reviewed=False` (the default queue) excludes both; `reviewed=True`
-    surfaces only them ("Already reviewed"). Default order is
-    `COALESCE(confidence, ml_match_probability)` DESC, with pairs that have
-    neither (blocking-only, no rule fired and not ML-scored) last — same
-    convention as `review_candidates_for_patid`.
+      * `needs_review` — no stage resolved it and no reviewer has ruled.
+      * `reviewed` — a reviewer merged or dismissed this exact pair
+        (`reviewer_pair_decision`). Always wins over the pipeline's verdict.
+      * `auto_merged` — a deterministic rule or the Stage-4.5 ML matcher
+        merged it, **or** its two records share a `mid` today. That second
+        clause is not redundant: clustering is transitive, so a pair the
+        matcher left at `human_review` can still have been merged through a
+        path of other pairs, and those records genuinely are together.
+      * `auto_rejected` — the deterministic reject rules or the Stage-4.25
+        gate declined it.
+
+    Default order is `COALESCE(confidence, ml_match_probability)` DESC, with
+    pairs that have neither (blocking-only, no rule fired and not ML-scored)
+    last — same convention as `review_candidates_for_patid`.
 
     `confidence_min`/`confidence_max` filter that same coalesced value —
     most pairs in the queue only have an ML score (no rule fired), so
     filtering on `rc.confidence` alone would hide the entire ML-scored
     majority (`NULL >= x` is never true in SQL).
+
+    `gate_score_min`/`gate_score_max` bound `rc.gate_score` — the Stage-4.25
+    gate's P(plausible). A separate axis from the confidence bounds above,
+    not a fallback for them: the gate answers "is this worth a human's
+    time?" while the matcher answers "should this merge unattended?", and a
+    pair can score near zero on the second while the gate kept it. These are
+    what the dashboard's two reject bands are built on, since a gate-dropped
+    pair carries no other number.
+
+    `verdict` filters on `src/api/pair_verdicts.py`'s vocabulary exactly —
+    the one filter that reaches the pairs with no score at all (a
+    deterministic `reject` was never scored by any model), which no range
+    bound can select for.
+
+    `patid_a`/`patid_b` (the router canonicalizes so `a < b` before calling)
+    narrow to one exact pair — a deep link from elsewhere in the UI (e.g. a
+    cluster's comparison history) knows which pair it wants and shouldn't
+    have to guess the confidence/search filter that would surface it on the
+    current page. Combines with the other filters by AND like everything
+    else here, so a caller resolving a specific pair should pass no other
+    filter alongside it.
     """
     where = []
     params: list = []
+    if patid_a is not None and patid_b is not None:
+        where.append("rc.patid_a = ? AND rc.patid_b = ?")
+        params.extend([patid_a, patid_b])
     if confidence_min is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) >= ?")
         params.append(confidence_min)
     if confidence_max is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) <= ?")
         params.append(confidence_max)
-    if search:
-        where.append(
-            "(ra_a.first_name LIKE ? OR ra_a.last_name LIKE ? OR "
-            "ra_b.first_name LIKE ? OR ra_b.last_name LIKE ? OR "
-            "rc.patid_a LIKE ? OR rc.patid_b LIKE ?)"
+    if gate_score_min is not None:
+        where.append("rc.gate_score >= ?")
+        params.append(gate_score_min)
+    if gate_score_max is not None:
+        # Half-open `[min, max)`, so the dashboard's adjacent gate bands
+        # can't both claim a score sitting exactly on their shared edge.
+        # `confidence_max` above is inclusive and predates this; its bands
+        # can double-claim an exact boundary value, which for a float coming
+        # out of a model is rare enough not to be worth an API break.
+        where.append("rc.gate_score < ?")
+        params.append(gate_score_max)
+    if verdict is not None:
+        where.append("rc.verdict = ?")
+        params.append(verdict)
+    tokens = search_tokens(search)
+    if tokens:
+        # All tokens must land on one side of the pair, so a query can't be
+        # satisfied by taking the first name from side A and the last from B.
+        side_a = " AND ".join(
+            "(ra_a.first_name LIKE ? OR ra_a.last_name LIKE ? OR rc.patid_a LIKE ?)"
+            for _ in tokens
         )
-        like = f"%{search}%"
-        params.extend([like, like, like, like, like, like])
+        side_b = " AND ".join(
+            "(ra_b.first_name LIKE ? OR ra_b.last_name LIKE ? OR rc.patid_b LIKE ?)"
+            for _ in tokens
+        )
+        where.append(f"(({side_a}) OR ({side_b}))")
+        for _side in (side_a, side_b):
+            for token in tokens:
+                like = f"%{token}%"
+                params.extend([like, like, like])
 
-    reviewed_expr = (
-        "(ema.mid = emb.mid OR EXISTS ("
-        "SELECT 1 FROM audit_log al WHERE al.action = 'dismiss' "
-        "AND al.patids = rc.patid_a || ',' || rc.patid_b))"
-    )
-    if reviewed is True:
-        where.append(reviewed_expr)
-    elif reviewed is False:
-        where.append(f"NOT {reviewed_expr}")
+    if bucket is not None:
+        where.append(f"({_BUCKET_EXPR}) = ?")
+        params.append(bucket)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
     base_from = f"""
@@ -572,6 +796,7 @@ def list_review_candidates(
         JOIN entity_member emb ON emb.patid = rc.patid_b
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
+{_PAIR_DECISION_JOIN}
     """
 
     total = conn.execute(
@@ -582,17 +807,11 @@ def list_review_candidates(
     rows = conn.execute(
         f"""
         SELECT rc.*, ema.mid AS mid_a, emb.mid AS mid_b,
-               ra_a.first_name AS a_first_name, ra_a.last_name AS a_last_name,
-               ra_a.birth_date AS a_birth_date, ra_a.ssn_last4 AS a_ssn_last4,
-               ra_a.email AS a_email, ra_a.zip_code AS a_zip_code,
-               ra_a.address1 AS a_address1, ra_a.sex AS a_sex, ra_a.phone AS a_phone,
-               ra_b.first_name AS b_first_name, ra_b.last_name AS b_last_name,
-               ra_b.birth_date AS b_birth_date, ra_b.ssn_last4 AS b_ssn_last4,
-               ra_b.email AS b_email, ra_b.zip_code AS b_zip_code,
-               ra_b.address1 AS b_address1, ra_b.sex AS b_sex, ra_b.phone AS b_phone,
+{_PAIR_ATTR_SELECT},
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = ema.mid) AS member_count_a,
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = emb.mid) AS member_count_b,
-               {reviewed_expr} AS reviewed
+               rpd.decision AS reviewer_decision,
+               ({_BUCKET_EXPR}) AS bucket
         {base_from}
         {where_sql}
         ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
@@ -601,6 +820,23 @@ def list_review_candidates(
         [*params, page_size, offset],
     ).fetchall()
     return [dict(r) for r in rows], total
+
+
+def review_bucket_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """How many candidate pairs sit in each of the four sections — one
+    GROUP BY instead of the four COUNT-only round-trips the dashboard would
+    otherwise make to label its section tabs."""
+    rows = conn.execute(
+        f"""
+        SELECT ({_BUCKET_EXPR}) AS bucket, COUNT(*) AS n
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
+        JOIN entity_member ema ON ema.patid = rc.patid_a
+        JOIN entity_member emb ON emb.patid = rc.patid_b
+{_PAIR_DECISION_JOIN}
+        GROUP BY 1
+        """
+    ).fetchall()
+    return {row["bucket"]: int(row["n"]) for row in rows}
 
 
 def patids_with_review_candidates(conn: sqlite3.Connection) -> set[str]:
@@ -648,7 +884,8 @@ def get_entity(conn: sqlite3.Connection, mid: str) -> dict | None:
         """
         SELECT em.patid, em.is_primary, em.added_by, em.updated_utc,
                ra.first_name, ra.last_name, ra.birth_date, ra.ssn_last4,
-               ra.email, ra.zip_code, ra.address1, ra.sex, ra.phone
+               ra.email, ra.zip_code, ra.address1, ra.sex, ra.phone,
+               ra.middle_name, ra.suffix, ra.city, ra.phones
         FROM entity_member em
         LEFT JOIN record_attrs ra ON ra.patid = em.patid
         WHERE em.mid = ?
@@ -671,6 +908,7 @@ def list_entities(
     updated_before: str | None = None,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    min_members: int | None = None,
     sort: str | None = None,
     page: int = 1,
     page_size: int = 50,
@@ -682,13 +920,20 @@ def list_entities(
     last-updated date):
       * `search` — case-insensitive substring against PATID/mid/first/last name.
       * `origin` — match status ('deterministic' | 'review' | 'merge' | 'none'),
-        or a comma-separated list of any of those (e.g. the Patient Registry
-        view's "final clusters only" = "deterministic,merge,none", excluding
-        'review' — still-pending candidates belong in the Review Queue, not
-        the resolved registry).
+        or a comma-separated list of any of those. The Patient Registry passes
+        all four and no `min_members`, so it lists every cluster — singletons
+        included, `origin='review'` ones among them — which keeps a
+        pending-review record *findable* by search there even though deciding
+        it (merge/dismiss) still only happens on the Review Queue.
       * `is_merged` — merge status, independent of origin (a reviewer-merge is
         `origin='merge'` AND `is_merged=1`; this lets a caller ask for "any
         merged entity" without caring how it got there).
+      * `min_members` — entities with at least this many members. **Not a
+        synonym for `is_merged`**: `publish.py` sets `is_merged` from the
+        count of *unlocked* patids, so a cluster whose members a reviewer has
+        touched can hold three records and still be `is_merged=0` (168 of 762
+        multi-record clusters in run `uidev3`). A caller that means "clusters
+        with something to compare" wants this filter, not that flag.
       * `birth_date` — exact `YYYY-MM-DD` match against any member.
       * `ssn_last4` — exact 4-digit match against any member.
       * `updated_after` / `updated_before` — ISO-8601 bounds on `updated_utc`.
@@ -724,15 +969,32 @@ def list_entities(
     if confidence_max is not None:
         where.append("e.confidence <= ?")
         params.append(confidence_max)
-    if search:
+    if min_members is not None:
+        # A correlated subquery rather than a HAVING on the page query's
+        # GROUP BY: the same predicate has to narrow the COUNT(*) below, and
+        # that query has no GROUP BY to hang a HAVING on.
+        where.append(
+            "(SELECT COUNT(*) FROM entity_member em5 WHERE em5.mid = e.mid) >= ?"
+        )
+        params.append(min_members)
+    tokens = search_tokens(search)
+    if tokens:
+        # Every token must match the *same* member, each token free to match a
+        # different column of it — so "PATRICIA PATEL" finds the member whose
+        # first/last names are PATRICIA/PATEL. See `search_terms`.
+        member_sql = " AND ".join(
+            "(em2.patid LIKE ? OR ra2.first_name LIKE ? OR ra2.last_name LIKE ?)"
+            for _ in tokens
+        )
         where.append(
             "(e.mid LIKE ? OR EXISTS (SELECT 1 FROM entity_member em2 "
             "LEFT JOIN record_attrs ra2 ON ra2.patid = em2.patid "
-            "WHERE em2.mid = e.mid AND ("
-            "em2.patid LIKE ? OR ra2.first_name LIKE ? OR ra2.last_name LIKE ?)))"
+            f"WHERE em2.mid = e.mid AND {member_sql}))"
         )
-        like = f"%{search}%"
-        params.extend([like, like, like, like])
+        params.append(f"%{search}%")
+        for token in tokens:
+            like = f"%{token}%"
+            params.extend([like, like, like])
     if birth_date:
         where.append(
             "EXISTS (SELECT 1 FROM entity_member em3 "
@@ -930,6 +1192,41 @@ def member_count(conn: sqlite3.Connection, mid: str) -> int:
     return int(row["n"])
 
 
+# ── Reviewer pair decisions (src/api/routers/audit.py) ──────────────────────
+
+def record_pair_decisions(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    """Upsert `(patid_a, patid_b, decision, audit_id, ts_utc)` rows — the
+    per-pair record of what a reviewer concluded. Callers canonicalize the
+    pair (`a < b`) so it matches `review_candidate`'s own ordering.
+
+    Last write wins: a reviewer who dismisses a pair they earlier merged has
+    changed their mind, and the queue should reflect the current conclusion,
+    not the first one. The `audit_log` keeps the full history either way."""
+    if rows:
+        conn.executemany(
+            """
+            INSERT INTO reviewer_pair_decision
+                (patid_a, patid_b, decision, audit_id, ts_utc)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(patid_a, patid_b) DO UPDATE SET
+                decision=excluded.decision, audit_id=excluded.audit_id,
+                ts_utc=excluded.ts_utc
+            """,
+            rows,
+        )
+
+
+def clear_pair_decisions_for_audit(conn: sqlite3.Connection, audit_id: int) -> None:
+    """Retract the pair decisions one audit entry wrote — the undo path.
+
+    Scoped by `audit_id` rather than by pair so undoing an old entry can't
+    silently erase a newer decision about the same pair: the upsert above
+    stamps the newer `audit_id`, and this deletes nothing."""
+    conn.execute(
+        "DELETE FROM reviewer_pair_decision WHERE audit_id = ?", (audit_id,)
+    )
+
+
 # ── Persisted blocking index (`block_key`) ──────────────────────────────────
 
 def replace_block_keys(conn: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> None:
@@ -1096,7 +1393,10 @@ __all__ = [
     "replace_review_candidates_for_run",
     "insert_review_candidates",
     "review_candidates_for_patid",
+    "review_bucket_counts",
     "patids_with_review_candidates",
+    "record_pair_decisions",
+    "clear_pair_decisions_for_audit",
     "all_entity_member_mids",
     "get_entity",
     "list_entities",

@@ -117,7 +117,9 @@ CREATE TABLE entity_member (
     updated_utc  TEXT NOT NULL
 );
 
--- One row per unresolved pair awaiting review (backs GET /review-queue).
+-- One row per candidate pair the run decided -- the WHOLE pool, not just the
+-- human queue (backs GET /review-queue and all four of its sections). See
+-- src/api/pair_verdicts.py.
 CREATE TABLE review_candidate (
     id                      INTEGER PRIMARY KEY,
     patid_a, patid_b        TEXT NOT NULL,
@@ -129,7 +131,34 @@ CREATE TABLE review_candidate (
     fs_match_probability    REAL,       -- incremental scoring only
     fs_classification_tier  TEXT,
     ml_match_probability    REAL,       -- Stage 4.5 score, threaded in at batch publish
-    ml_classification_tier  TEXT
+    ml_classification_tier  TEXT,
+    gate_score              REAL,       -- Stage 4.25 P(plausible), threaded in at batch
+                                        -- publish. A SEPARATE AXIS from
+                                        -- ml_match_probability, not a fallback for it:
+                                        -- for a gate-dropped pair it is the only score
+                                        -- there is (the matcher never saw the pair),
+                                        -- and for a pair the gate passed it is what
+                                        -- explains a near-zero match probability on a
+                                        -- row that still warrants review. NULL where
+                                        -- the gate never scored the pair (a
+                                        -- deterministic reject, an ungated run).
+    verdict                 TEXT        -- which stage decided it: auto_merge_rule |
+                                        -- reject | gate_dropped | ml_auto_merge |
+                                        -- ml_human_review | undecided. NULL from
+                                        -- incremental scoring (no model stage runs).
+);
+
+-- What a human concluded about one specific pair. Its own table, not a column
+-- on review_candidate, because publish REPLACES that table per run and a
+-- reviewer's decision must survive any number of republishes -- the same
+-- stickiness locked_patids gives entity membership, at pair grain. Written by
+-- every /audit/* action that rules on a pair; an undo deletes by audit_id.
+CREATE TABLE reviewer_pair_decision (
+    patid_a, patid_b        TEXT NOT NULL,
+    decision                TEXT NOT NULL,   -- 'merged' | 'not_a_match'
+    audit_id                INTEGER NOT NULL,
+    ts_utc                  TEXT NOT NULL,
+    PRIMARY KEY (patid_a, patid_b)
 );
 
 -- Append-only audit trail. Never updated in place except the `undone` flag.
@@ -214,6 +243,30 @@ GET /records?search=&origin=&is_merged=&birth_date=&ssn_last4=
     &updated_after=&updated_before=&page=&page_size=
                                      → paginated master rows + their candidate members
 GET /clusters/{mid}                 → one entity, its members, and field values
+GET /clusters/{mid}/pairs[?run_id=] → the pairwise decision trace behind a cluster,
+                                       read from the run's Parquet artifacts (see
+                                       src/api/routers/cluster_pairs.py). Two guards
+                                       shape the response:
+                                       • the trace comes from the run that produced
+                                         the entity or from NOWHERE — never quietly
+                                         from another run. An entity last touched by
+                                         incremental scoring names a job that writes
+                                         no manifest; that id comes back as
+                                         `unresolved_run_id` with
+                                         `artifacts_available=false`, rather than
+                                         being back-filled from the newest batch run
+                                         (which knows nothing about these records and
+                                         would render as "the pipeline decided
+                                         nothing"). The `latest_run_with` fallback
+                                         applies only when the entity names no run.
+                                       • `pairs` is quadratic in members and the
+                                         transitive path walk is worse, so above
+                                         EMPI_CLUSTER_PAIRS_MAX_MEMBERS (200) both are
+                                         omitted and `pairs_truncated=true`; `members`
+                                         and `external_pairs` are still complete. A
+                                         several-hundred-member hub cluster would
+                                         otherwise cost minutes of blocking CPU and a
+                                         response measured in hundreds of MB.
 GET /records/{patid}/raw            → the un-scrubbed *_raw source fields ("View Raw
                                        Data" drawer) — writes a `view_raw` audit_log
                                        entry on every successful call
@@ -227,12 +280,50 @@ GET /records/{patid}/ssn-clean      → the pipeline-normalized SSN (`cleaned_at
                                        logged as its own `view_ssn_clean` audit action
                                        — the two are not interchangeable and not
                                        logged identically.
-GET /review-queue?confidence_min=&confidence_max=&reviewed=&search=&page=&page_size=
+GET /review-queue?confidence_min=&confidence_max=&gate_score_min=&gate_score_max=
+                  &verdict=&bucket=&search=&page=&page_size=
                                      → candidate-grain review queue (one row per
-                                       pending pair, not per cluster). Sorted/filtered
-                                       on COALESCE(confidence, ml_match_probability) —
+                                       candidate pair, not per cluster). Sorted on
+                                       COALESCE(confidence, ml_match_probability) —
                                        most pairs have no rule confidence, only an ML
                                        score.
+
+                                       Two independent score axes, matching the two
+                                       models:
+                                         confidence_min/max — the matcher side
+                                           (COALESCE(confidence, ml_match_probability)).
+                                           Max is INCLUSIVE.
+                                         gate_score_min/max — the Stage-4.25 gate's
+                                           P(plausible). Max is EXCLUSIVE, so adjacent
+                                           bands can't both claim a boundary value.
+                                       These are not two views of one number: a
+                                       gate-dropped pair has no matcher score at all
+                                       and is invisible to any confidence_* bound
+                                       (NULL >= x is never true), reachable only on the
+                                       gate axis.
+
+                                       `verdict` filters on src/api/pair_verdicts.py's
+                                       vocabulary exactly (422 on anything else). It is
+                                       the only filter that reaches pairs no model
+                                       scored — a deterministic `reject` carries no
+                                       number for any range to match.
+
+                                       `bucket` is one of the four reviewer-facing
+                                       sections (422 on anything else); unset returns
+                                       every candidate, and each row carries its own
+                                       `bucket` either way:
+                                         needs_review  — nothing resolved it, nobody ruled
+                                         reviewed      — a reviewer ruled on this exact pair
+                                         auto_merged   — the two records share a mid today
+                                         auto_rejected — the reject rules or the gate
+                                                         declined it
+                                       A reviewer decision always wins over the
+                                       pipeline's verdict. "Merged" is read off the
+                                       index, not the verdict, since the two can
+                                       disagree — see src/api/pair_verdicts.py.
+                                       Every response also carries `bucket_counts`,
+                                       the whole-index total per section (not narrowed
+                                       by this request's filters).
 POST /records/score
 GET /records/score/{run_id}         → incremental single/batch scoring against the
                                        existing published population, no full re-run
@@ -300,14 +391,33 @@ POST /audit/unmerge
 
 POST /audit/dismiss
   headers: X-Reviewer-Id: <reviewer>
-  body: {"patid_a": "P1", "patid_b": "P2"}   # "Not a match" on a review-queue pair
-  → 200 {audit_id}
+  body: {"patid_a": "P1", "patid_b": "P2"}   # "Not a match" on a candidate pair
+  → 200 {audit_id, unmerged_to_mid}
+  # If the two records currently share a mid, this SPLITS them first (an
+  # ordinary unmerge of patid_b, its own audit entry, undoable on its own
+  # terms) and returns the new mid — that's the override for the queue's
+  # Auto-merged section. `unmerged_to_mid` is null when they weren't merged.
 
 POST /audit/{audit_id}/undo
   headers: X-Reviewer-Id: <reviewer>
-  → 200 {audit_id, reversed_action, entity, new_mids}
-  # reverses a prior merge/unmerge by id; marks the original row undone=true,
-  # writes a new row with prev_mid/undo_of set. 404 if already undone.
+  → 200 {audit_id, reversed_action, entity, new_mids, already_detached}
+  # reverses a prior merge/unmerge/dismiss by id; marks the original row
+  # undone=true, writes a new row with prev_mid/undo_of set, and retracts the
+  # reviewer_pair_decision rows that entry wrote. Undoing a dismiss mutates no
+  # entity (a dismiss never did) — it only retracts the decision, returning the
+  # pair to whichever section its verdict puts it in. 404 if already undone.
+  #
+  # ONE transaction for the WHOLE reversal, retraction included — a merge undo
+  # is N unmerges, and committing them one at a time could leave the entity
+  # half-split while `undone` went true anyway (it is derived: any row pointing
+  # at the entry via undo_of sets it), i.e. an audit trail claiming a clean
+  # reversal that did not happen. Either every patid came back out, or nothing
+  # changed and the entry is still undoable.
+  #
+  # `already_detached` lists patids of an undone merge that a LATER action had
+  # already moved out of the merged entity. They are skipped, not treated as a
+  # failure: they are already where the reversal wants them, and 404-ing over
+  # one would leave the reviewer unable to reverse the rest of the merge.
 
 GET /audit?limit=&since=  → [audit_log rows, newest first]
 ```

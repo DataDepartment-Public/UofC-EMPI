@@ -1,12 +1,15 @@
 "use client";
 
 import { useState } from "react";
+import clsx from "clsx";
 import { compareRecords } from "@/lib/compare";
 import { fullName } from "@/lib/format";
+import { bandDef, bucketBadge, signalFor, signalTooltip } from "@/lib/pair-signal";
 import type { ReviewQueueItem } from "@/lib/schemas";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
-import { ShapWaterfall } from "@/components/shared/ShapWaterfall";
-import { usePairExplanation } from "@/lib/hooks";
+import { RawComparisonPanel } from "@/components/shared/RawComparisonPanel";
+import { ClusterLinks } from "./ClusterLinks";
+import { ExplanationPanel } from "./ExplanationPanel";
 import { ManualMatchModal } from "./ManualMatchModal";
 import { PipelineTrail } from "./PipelineTrail";
 
@@ -17,21 +20,16 @@ export function ReviewCandidateDetail({
   item,
   onMerge,
   onDismiss,
-  onViewRaw,
   dismissPending,
 }: {
   item: ReviewQueueItem;
   onMerge: (mid: string, patids: string[]) => void;
   onDismiss: (patidA: string, patidB: string) => void;
-  onViewRaw: (patid: string) => void;
   dismissPending: boolean;
 }) {
   const [manualMatchOpen, setManualMatchOpen] = useState(false);
   const rows = compareRecords(item.patient_a, item.patient_b);
-  const { data: explanation } = usePairExplanation(item.patid_a, item.patid_b);
-  const predictedClass = item.match_rule
-    ? "Confirmed duplicate (rule-matched)"
-    : "Uncertain — pending review";
+  const merged = item.mid_a === item.mid_b;
 
   return (
     <div className="card p-5">
@@ -51,45 +49,53 @@ export function ReviewCandidateDetail({
             )}
           </p>
         </div>
-        <div className="flex flex-shrink-0 gap-2">
-          <button
-            onClick={() => onMerge(item.mid_a, [item.patid_b])}
-            className="rounded-md bg-status-auto px-3.5 py-1.5 text-xs font-bold text-white hover:opacity-90"
+        {/* Both actions stay available in every section — that's what makes
+            Auto-merged and Auto-rejected overridable rather than read-only.
+            Only the labels change, so the button says what it will actually
+            do: "Merge" on a pair the pipeline already merged would be a
+            no-op, and "Not a match" on one is really a split. */}
+        <div className="flex flex-shrink-0 items-center gap-2">
+          {/* Where the pair stands, right where the decision gets made — the
+              band's strength and the section it's in. Both were only visible
+              in the list before, so a reviewer working from this panel had
+              to look away to see whether they were overriding the pipeline
+              or resolving open work. */}
+          <span
+            title={signalTooltip(item)}
+            className={clsx(
+              "rounded-full px-2 py-1 text-[9.5px] font-bold uppercase",
+              bandDef(signalFor(item).band).tone,
+            )}
           >
-            Merge
-          </button>
+            {bandDef(signalFor(item).band).label}
+          </span>
+          <span
+            className={clsx(
+              "rounded-full px-2 py-1 text-[9.5px] font-bold uppercase",
+              bucketBadge(item).tone,
+            )}
+          >
+            {bucketBadge(item).label}
+          </span>
+          {!merged && (
+            <button
+              onClick={() => onMerge(item.mid_a, [item.patid_b])}
+              className="rounded-md bg-status-auto px-3.5 py-1.5 text-xs font-bold text-white hover:opacity-90"
+            >
+              {item.bucket === "auto_rejected" ? "Merge anyway" : "Merge"}
+            </button>
+          )}
           <button
             disabled={dismissPending}
             onClick={() => onDismiss(item.patid_a, item.patid_b)}
             className="rounded-md border border-status-nomatch px-3.5 py-1.5 text-xs font-bold text-status-nomatch hover:bg-status-nomatch/10 disabled:opacity-50"
           >
-            Not a match
-          </button>
-          <button
-            onClick={() => onViewRaw(item.patid_a)}
-            className="rounded-md border border-line px-3.5 py-1.5 text-xs font-bold text-gray-2 hover:bg-bg"
-          >
-            View raw data
+            {merged ? "Not a match — split them" : "Not a match"}
           </button>
         </div>
       </div>
 
-      <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
-        <MetaCard
-          label="Confidence"
-          value={item.confidence != null ? `${Math.round(item.confidence * 100)}%` : "No rule signal"}
-        />
-        <MetaCard label="Rule fired" value={item.match_rule ?? "None (unconfirmed)"} />
-        <MetaCard label="Predicted class" value={predictedClass} small />
-        <MetaCard
-          label="Cluster context"
-          value={
-            item.member_count_a > 1 || item.member_count_b > 1
-              ? `${Math.max(item.member_count_a, item.member_count_b)} members`
-              : "Standalone pair"
-          }
-        />
-      </div>
+      <VerdictBanner item={item} />
 
       <div className="mb-5">
         <h4 className="mb-1 text-[13px] font-bold text-ink-2">Pipeline trail</h4>
@@ -97,18 +103,17 @@ export function ReviewCandidateDetail({
       </div>
 
       <div className="mb-5">
-        <h4 className="mb-1 text-[13px] font-bold text-ink-2">Feature comparison</h4>
-        <FeatureComparisonTable rows={rows} patidA={item.patid_a} patidB={item.patid_b} />
+        <h4 className="mb-1.5 text-[13px] font-bold text-ink-2">Clusters</h4>
+        <ClusterLinks item={item} />
       </div>
 
-      {explanation && (
-        <div className="mb-5">
-          <h4 className="mb-1 text-[13px] font-bold text-ink-2">
-            Feature contributions (SHAP)
-          </h4>
-          <ShapWaterfall explanation={explanation} />
-        </div>
-      )}
+      <div className="mb-5">
+        <h4 className="mb-1 text-[13px] font-bold text-ink-2">Feature comparison</h4>
+        <FeatureComparisonTable rows={rows} patidA={item.patid_a} patidB={item.patid_b} />
+        <RawComparisonPanel patidA={item.patid_a} patidB={item.patid_b} />
+      </div>
+
+      <ExplanationPanel item={item} />
 
       <button
         onClick={() => setManualMatchOpen(true)}
@@ -129,21 +134,42 @@ export function ReviewCandidateDetail({
   );
 }
 
-function MetaCard({
-  label,
-  value,
-  small = false,
-}: {
-  label: string;
-  value: string;
-  small?: boolean;
-}) {
+/** The reviewed banner's palette. The other buckets used to need one too, for
+ * the "Outcome" meta card; the left-hand queue list already badges the bucket
+ * on every row, so the card was a second copy of it. */
+const REVIEWED_TONE = "border-brand-blue/30 bg-brand-blue/5 text-brand-blue";
+
+/** What the pipeline concluded, in the reviewer's words rather than the
+ * stage's. Used only to say what a *human* decision overrode — the pipeline's
+ * own story is told stage by stage, with real scores, by the pipeline trail
+ * below, so restating it in prose above the trail would just be a vaguer
+ * second copy. */
+const VERDICT_TEXT: Record<string, string> = {
+  auto_merge_rule: "a deterministic rule had merged it",
+  ml_auto_merge: "the ML matcher had merged it",
+  ml_human_review: "the ML matcher had left it for a human",
+  reject: "the reject rules had discarded it",
+  gate_dropped: "the non-match gate had discarded it",
+  undecided: "no model stage scored it",
+};
+
+/** Only rendered for a pair a human ruled on — that's the one thing the
+ * pipeline trail can't show, since a reviewer decision isn't a pipeline
+ * stage. Every other bucket is fully explained by the trail. */
+function VerdictBanner({ item }: { item: ReviewQueueItem }) {
+  if (item.bucket !== "reviewed") return null;
+  const overruled = item.verdict ? VERDICT_TEXT[item.verdict] : null;
   return (
-    <div className="rounded-md border border-line px-3 py-2.5">
-      <div className="text-[10px] font-bold tracking-wide text-gray uppercase">{label}</div>
-      <div className={`mt-1 font-bold text-ink-2 ${small ? "text-xs" : "text-sm"}`}>
-        {value}
-      </div>
+    <div className={`mb-4 rounded-md border px-3 py-2 text-xs ${REVIEWED_TONE}`}>
+      <span className="font-bold">Reviewed.</span>{" "}
+      <span className="opacity-90">
+        {item.reviewer_decision === "merged"
+          ? "A reviewer merged these records."
+          : "A reviewer marked this pair not a match."}
+      </span>
+      {overruled && (
+        <span className="opacity-70"> The pipeline had said {overruled}.</span>
+      )}
     </div>
   );
 }

@@ -9,6 +9,8 @@ import {
   AuditLogRowSchema,
   CleanSsn,
   CleanSsnSchema,
+  ClusterPairsResponse,
+  ClusterPairsResponseSchema,
   DashboardSummary,
   DashboardSummarySchema,
   DismissResponseSchema,
@@ -23,6 +25,7 @@ import {
   ReadyResponseSchema,
   RecordsPage,
   RecordsPageSchema,
+  ReviewBucket,
   ReviewQueuePage,
   ReviewQueuePageSchema,
   RunCreateResponse,
@@ -104,6 +107,11 @@ export interface RecordsFilters {
   ssn_last4?: string;
   confidence_min?: number;
   confidence_max?: number;
+  /** Clusters with at least this many members. The Patient Registry's
+   * "something to compare" filter — deliberately not `is_merged`, which the
+   * backend derives from the *unlocked* member count at publish time and so
+   * misses any multi-record cluster a reviewer has already touched. */
+  min_members?: number;
   sort?: "confidence" | "name" | "updated";
   page?: number;
   page_size?: number;
@@ -113,7 +121,25 @@ export interface ReviewQueueFilters {
   search?: string;
   confidence_min?: number;
   confidence_max?: number;
-  reviewed?: boolean;
+  /** Bounds on the Stage-4.25 gate's P(plausible). A separate axis from
+   * `confidence_*`, which bounds the matcher side — a gate-dropped pair has
+   * no matcher score at all and is reachable only here. `gate_score_max` is
+   * exclusive (half-open bands); `confidence_max` is inclusive. */
+  gate_score_min?: number;
+  gate_score_max?: number;
+  /** One of `src/api/pair_verdicts.py`'s verdicts. The only filter that
+   * reaches pairs no model scored — a deterministic reject has no number for
+   * any range to match. */
+  verdict?: string;
+  /** Which of the four sections to list. Unset returns every candidate; each
+   * item carries its own `bucket` either way. */
+  bucket?: ReviewBucket;
+  /** Narrow to one exact pair (either order — the backend canonicalizes),
+   * ignoring pagination and every other filter's meaning for that pair.
+   * Used to deep-link from elsewhere in the UI (e.g. a cluster's comparison
+   * history) straight to a specific candidate. Pass both or neither. */
+  patid_a?: string;
+  patid_b?: string;
   page?: number;
   page_size?: number;
 }
@@ -144,6 +170,17 @@ export const api = {
 
   getCluster: (mid: string) =>
     call<Entity>(EntitySchema, `/api/clusters/${encodeURIComponent(mid)}`),
+
+  /** Every pair of a cluster's members and what the pipeline decided about
+   * it. `runId` pins the trace to the run the reviewer is looking at; omitted,
+   * the backend uses the run that published the entity. */
+  getClusterPairs: (mid: string, runId?: string) =>
+    call<ClusterPairsResponse>(
+      ClusterPairsResponseSchema,
+      `/api/clusters/${encodeURIComponent(mid)}/pairs${
+        runId ? `?run_id=${encodeURIComponent(runId)}` : ""
+      }`,
+    ),
 
   getRaw: (patid: string) =>
     call<RawRecord>(

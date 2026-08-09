@@ -74,11 +74,22 @@ describe("AuditLog undo button", () => {
     expect(screen.queryByRole("button", { name: /undo/i })).not.toBeInTheDocument();
   });
 
-  it("shows no undo control for a non-undoable action (dismiss), even if undone is false", async () => {
+  it("offers Undo for a dismiss, which retracts the reviewer's pair decision", async () => {
+    // A dismiss mutates no entity, but it does record a per-pair decision
+    // that moves the pair into the queue's Reviewed section — undoing it
+    // retracts that, returning the pair to whatever the pipeline concluded.
     mockedApi.listAudit.mockResolvedValue([row({ id: 1, action: "dismiss", undone: false })]);
     renderWithClient(<AuditLog onFlash={vi.fn()} />);
 
     await screen.findByText("Dismissed");
+    expect(await screen.findByRole("button", { name: /^undo$/i })).toBeEnabled();
+  });
+
+  it("shows no undo control for a non-undoable action, even if undone is false", async () => {
+    mockedApi.listAudit.mockResolvedValue([row({ id: 1, action: "split", undone: false })]);
+    renderWithClient(<AuditLog onFlash={vi.fn()} />);
+
+    await screen.findByText("Split out");
     expect(screen.queryByRole("button", { name: /undo/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/^undone$/i)).not.toBeInTheDocument();
   });

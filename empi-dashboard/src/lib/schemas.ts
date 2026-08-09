@@ -41,14 +41,26 @@ export type RunDetail = z.infer<typeof RunDetailSchema>;
 
 const recordAttrsFields = {
   first_name: z.string().nullable().optional(),
+  middle_name: z.string().nullable().optional(),
   last_name: z.string().nullable().optional(),
+  suffix: z.string().nullable().optional(),
   birth_date: z.string().nullable().optional(),
   ssn_last4: z.string().nullable().optional(),
   email: z.string().nullable().optional(),
   zip_code: z.string().nullable().optional(),
+  city: z.string().nullable().optional(),
   address1: z.string().nullable().optional(),
   sex: z.string().nullable().optional(),
+  /** The single primary cleaned phone. `phones` is the full set. */
   phone: z.string().nullable().optional(),
+  /**
+   * Every cleaned phone on the record — the set B5 blocking and the
+   * NAME_DOB_PHONE rule intersect on, so a pair can agree here while
+   * disagreeing on `phone`. Optional rather than defaulted so a payload
+   * predating the field (an index published before the column existed)
+   * still parses; `compareRecords` falls back to `phone`.
+   */
+  phones: z.array(z.string()).nullable().optional(),
 };
 
 export const RecordAttrsSchema = z.object(recordAttrsFields);
@@ -113,6 +125,23 @@ export const RecordsPageSchema = z.object({
 });
 export type RecordsPage = z.infer<typeof RecordsPageSchema>;
 
+/** The Review Queue's four sections — mirrors `QUEUE_BUCKETS` in
+ * `empi-service/src/api/pair_verdicts.py`, which the API validates `?bucket=`
+ * against.
+ *
+ * `needs_review` and `reviewed` are the human ones; `auto_merged` and
+ * `auto_rejected` are what the pipeline decided unattended. A pair sits in
+ * exactly one, and a reviewer decision always moves it to `reviewed`
+ * regardless of what the pipeline concluded. */
+export const REVIEW_BUCKETS = [
+  "needs_review",
+  "reviewed",
+  "auto_merged",
+  "auto_rejected",
+] as const;
+export const ReviewBucketSchema = z.enum(REVIEW_BUCKETS);
+export type ReviewBucket = z.infer<typeof ReviewBucketSchema>;
+
 export const ReviewQueueItemSchema = z.object({
   patid_a: z.string(),
   patid_b: z.string(),
@@ -126,7 +155,18 @@ export const ReviewQueueItemSchema = z.object({
   source_blocks: z.string().nullable(),
   ml_match_probability: z.number().nullable().optional(),
   ml_classification_tier: z.string().nullable().optional(),
-  reviewed: z.boolean(),
+  /** The Stage-4.25 gate's P(plausible) — a separate axis from
+   * `ml_match_probability`, not a fallback for it. For a gate-dropped pair
+   * it's the only score there is; for a pair the gate passed it's what makes
+   * sense of a near-zero match probability. Null where the gate never scored
+   * the pair, or the run predates the column. */
+  gate_score: z.number().nullable().optional(),
+  /** Which pipeline stage decided this pair. Null for pairs written by
+   * incremental scoring, which runs no model stage. */
+  verdict: z.string().nullable().optional(),
+  bucket: ReviewBucketSchema,
+  /** Non-null exactly when `bucket === "reviewed"`. */
+  reviewer_decision: z.enum(["merged", "not_a_match"]).nullable().optional(),
   patient_a: CandidatePatientSchema,
   patient_b: CandidatePatientSchema,
 });
@@ -137,11 +177,17 @@ export const ReviewQueuePageSchema = z.object({
   page: z.number(),
   page_size: z.number(),
   items: z.array(ReviewQueueItemSchema),
+  /** Pair count per section — always the whole-index totals, unaffected by
+   * this response's filters, so the section tabs don't change as you filter. */
+  bucket_counts: z.record(z.string(), z.number()).default({}),
 });
 export type ReviewQueuePage = z.infer<typeof ReviewQueuePageSchema>;
 
 export const DismissResponseSchema = z.object({
   audit_id: z.number(),
+  /** The `mid` the B-side record was moved to, when dismissing a pair the
+   * pipeline had merged. Null for the ordinary "wasn't merged" case. */
+  unmerged_to_mid: z.string().nullable().optional(),
 });
 
 export const RawRecordSchema = z.object({
@@ -224,6 +270,11 @@ export const UndoResponseSchema = z.object({
   reversed_action: z.enum(["merge", "unmerge"]),
   entity: EntitySchema.nullable().optional(),
   new_mids: z.array(z.string()).default([]),
+  // Patids of an undone merge that a later action had already moved out of
+  // the merged entity — reversed already, so they got no new singleton.
+  // Optional rather than defaulted so callers constructing an UndoResponse
+  // (tests, fixtures) aren't forced to name a field they don't care about.
+  already_detached: z.array(z.string()).optional(),
 });
 export type UndoResponse = z.infer<typeof UndoResponseSchema>;
 
@@ -272,6 +323,86 @@ export const PairExplanationSchema = z.object({
   features: z.array(ExplanationFeatureSchema),
 });
 export type PairExplanation = z.infer<typeof PairExplanationSchema>;
+
+// ── Cluster pair trace (GET /clusters/{mid}/pairs) ───────────────────────────
+/** Every verdict the backend can assign a pair, most decisive stage first —
+ * mirrors `CLUSTER_PAIR_VERDICTS` in `src/api/schemas.py`, and the order the
+ * comparisons list sorts by. Kept as a `z.enum` rather than a bare string so
+ * a backend that adds a rung fails the parse loudly instead of falling
+ * through the UI's badge map to an unstyled label. */
+export const ClusterPairVerdictSchema = z.enum([
+  "auto_merge_rule",
+  "reject",
+  "ml_auto_merge",
+  "ml_human_review",
+  "gate_dropped",
+  "blocked_undecided",
+  "not_compared",
+]);
+export type ClusterPairVerdict = z.infer<typeof ClusterPairVerdictSchema>;
+
+export const ClusterPairSchema = z.object({
+  patid_a: z.string(),
+  patid_b: z.string(),
+  verdict: ClusterPairVerdictSchema,
+  blocked: z.boolean(),
+  source_blocks: z.string().nullable().optional(),
+  n_blocks: z.number().nullable().optional(),
+  match_rule: z.string().nullable().optional(),
+  rules_fired: z.string().nullable().optional(),
+  confidence: z.number().nullable().optional(),
+  reject_rule: z.string().nullable().optional(),
+  n_contradictions: z.number().nullable().optional(),
+  gate_score: z.number().nullable().optional(),
+  gate_tier: z.string().nullable().optional(),
+  ml_score: z.number().nullable().optional(),
+  ml_tier: z.string().nullable().optional(),
+  joined_by: z.enum(["pipeline", "reviewer"]).default("pipeline"),
+  reviewer_id: z.string().nullable().optional(),
+  reviewer_ts_utc: z.string().nullable().optional(),
+  /** Stage 6 — clustering. Set only for a pair whose own verdict formed no
+   * merge edge (not `auto_merge_rule`/`ml_auto_merge`, and not a reviewer
+   * merge): the chain of members, `[patid_a, ..., patid_b]`, whose own
+   * confirmed edges connected the two ends anyway. `null` when this pair
+   * *is* itself the edge (nothing to explain) or no such chain exists. */
+  cluster_path: z.array(z.string()).nullable().optional(),
+});
+export type ClusterPair = z.infer<typeof ClusterPairSchema>;
+
+/** A comparison between a cluster member and a record that ended up
+ * elsewhere. Same stage fields as `ClusterPair`, plus which side is ours and
+ * who the counterpart is. Never carries a `not_compared` verdict — the
+ * backend builds this list from artifact rows, so a pair only appears if some
+ * stage actually looked at it. */
+export const ClusterExternalPairSchema = ClusterPairSchema.extend({
+  member_patid: z.string(),
+  other_patid: z.string(),
+  other_mid: z.string().nullable().optional(),
+  other_first_name: z.string().nullable().optional(),
+  other_last_name: z.string().nullable().optional(),
+  other_birth_date: z.string().nullable().optional(),
+  other_ssn_last4: z.string().nullable().optional(),
+});
+export type ClusterExternalPair = z.infer<typeof ClusterExternalPairSchema>;
+
+export const ClusterPairsResponseSchema = z.object({
+  mid: z.string(),
+  run_id: z.string().nullable().optional(),
+  artifacts_available: z.boolean(),
+  // Set when the entity's own run has no readable manifest (an incremental
+  // scoring job, which writes no artifacts). The API returns an empty trace
+  // rather than filling it from an unrelated run, so the UI must say which
+  // run went missing instead of "the pipeline decided nothing".
+  unresolved_run_id: z.string().nullable().optional(),
+  // Set when the cluster exceeds the API's `cluster_pairs_max_members`:
+  // `pairs` is omitted (it is quadratic in members), `external_pairs` isn't.
+  pairs_truncated: z.boolean().default(false),
+  members: z.array(z.string()).default([]),
+  thresholds: z.record(z.string(), z.number()).default({}),
+  pairs: z.array(ClusterPairSchema).default([]),
+  external_pairs: z.array(ClusterExternalPairSchema).default([]),
+});
+export type ClusterPairsResponse = z.infer<typeof ClusterPairsResponseSchema>;
 
 // ── Admin (GET/PUT /admin/thresholds) ────────────────────────────────────────
 export const ThresholdSettingsSchema = z.object({

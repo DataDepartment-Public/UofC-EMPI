@@ -17,6 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from src.api import jobs
 from src.api.deps import get_backend, get_reviewer_id_optional, get_settings
 from src.api.backends.index_backend import IndexBackend
+from src.api.pair_verdicts import QUEUE_BUCKETS, VERDICTS
 from src.api.schemas import (
     CandidatePatient,
     CleanSsn,
@@ -37,6 +38,41 @@ from src.config import Settings
 router = APIRouter(tags=["records"])
 
 
+def _phones(raw: object) -> list[str]:
+    """`record_attrs.phones` (a JSON array, stored as TEXT) -> `list[str]`.
+    NULL for a row written before the column existed, or by a backend that
+    round-trips a missing Parquet value as NaN — both mean "not known", which
+    is the empty list, not an error."""
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [str(p) for p in parsed] if isinstance(parsed, list) else []
+
+
+def _candidate_patient(rc: dict, side: str) -> CandidatePatient:
+    """One side of a review-candidate row, whose `record_attrs` columns the
+    backends alias `a_*`/`b_*` (`sql_backend._PAIR_ATTR_SELECT`)."""
+    return CandidatePatient(
+        patid=rc[f"patid_{side}"],
+        first_name=rc[f"{side}_first_name"],
+        middle_name=rc.get(f"{side}_middle_name"),
+        last_name=rc[f"{side}_last_name"],
+        suffix=rc.get(f"{side}_suffix"),
+        birth_date=rc[f"{side}_birth_date"],
+        ssn_last4=rc[f"{side}_ssn_last4"],
+        email=rc[f"{side}_email"],
+        zip_code=rc[f"{side}_zip_code"],
+        city=rc.get(f"{side}_city"),
+        address1=rc[f"{side}_address1"],
+        sex=rc[f"{side}_sex"],
+        phone=rc[f"{side}_phone"],
+        phones=_phones(rc.get(f"{side}_phones")),
+    )
+
+
 def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict]) -> Entity:
     review_candidates: dict[tuple, ReviewCandidate] = {}
     for m in member_rows:
@@ -50,20 +86,8 @@ def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict])
                 fs_classification_tier=rc.get("fs_classification_tier"),
                 ml_match_probability=rc.get("ml_match_probability"),
                 ml_classification_tier=rc.get("ml_classification_tier"),
-                patient_a=CandidatePatient(
-                    patid=rc["patid_a"], first_name=rc["a_first_name"],
-                    last_name=rc["a_last_name"], birth_date=rc["a_birth_date"],
-                    ssn_last4=rc["a_ssn_last4"], email=rc["a_email"],
-                    zip_code=rc["a_zip_code"], address1=rc["a_address1"],
-                    sex=rc["a_sex"], phone=rc["a_phone"],
-                ),
-                patient_b=CandidatePatient(
-                    patid=rc["patid_b"], first_name=rc["b_first_name"],
-                    last_name=rc["b_last_name"], birth_date=rc["b_birth_date"],
-                    ssn_last4=rc["b_ssn_last4"], email=rc["b_email"],
-                    zip_code=rc["b_zip_code"], address1=rc["b_address1"],
-                    sex=rc["b_sex"], phone=rc["b_phone"],
-                ),
+                patient_a=_candidate_patient(rc, "a"),
+                patient_b=_candidate_patient(rc, "b"),
             )
 
     return Entity(
@@ -82,14 +106,18 @@ def _to_entity(backend: IndexBackend, entity_row: dict, member_rows: list[dict])
                 added_by=m["added_by"],
                 updated_utc=m["updated_utc"],
                 first_name=m.get("first_name"),
+                middle_name=m.get("middle_name"),
                 last_name=m.get("last_name"),
+                suffix=m.get("suffix"),
                 birth_date=m.get("birth_date"),
                 ssn_last4=m.get("ssn_last4"),
                 email=m.get("email"),
                 zip_code=m.get("zip_code"),
+                city=m.get("city"),
                 address1=m.get("address1"),
                 sex=m.get("sex"),
                 phone=m.get("phone"),
+                phones=_phones(m.get("phones")),
             )
             for m in member_rows
         ],
@@ -108,21 +136,12 @@ def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
         fs_classification_tier=rc.get("fs_classification_tier"),
         ml_match_probability=rc.get("ml_match_probability"),
         ml_classification_tier=rc.get("ml_classification_tier"),
-        reviewed=bool(rc["reviewed"]),
-        patient_a=CandidatePatient(
-            patid=rc["patid_a"], first_name=rc["a_first_name"],
-            last_name=rc["a_last_name"], birth_date=rc["a_birth_date"],
-            ssn_last4=rc["a_ssn_last4"], email=rc["a_email"],
-            zip_code=rc["a_zip_code"], address1=rc["a_address1"],
-            sex=rc["a_sex"], phone=rc["a_phone"],
-        ),
-        patient_b=CandidatePatient(
-            patid=rc["patid_b"], first_name=rc["b_first_name"],
-            last_name=rc["b_last_name"], birth_date=rc["b_birth_date"],
-            ssn_last4=rc["b_ssn_last4"], email=rc["b_email"],
-            zip_code=rc["b_zip_code"], address1=rc["b_address1"],
-            sex=rc["b_sex"], phone=rc["b_phone"],
-        ),
+        gate_score=rc.get("gate_score"),
+        verdict=rc.get("verdict"),
+        bucket=rc["bucket"],
+        reviewer_decision=rc.get("reviewer_decision"),
+        patient_a=_candidate_patient(rc, "a"),
+        patient_b=_candidate_patient(rc, "b"),
     )
 
 
@@ -130,25 +149,77 @@ def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
 def list_review_queue(
     confidence_min: float | None = None,
     confidence_max: float | None = None,
-    reviewed: bool | None = None,
+    gate_score_min: float | None = None,
+    gate_score_max: float | None = None,
+    verdict: str | None = None,
+    bucket: str | None = None,
     search: str | None = None,
+    patid_a: str | None = None,
+    patid_b: str | None = None,
     page: int = 1,
     page_size: int | None = None,
     backend: IndexBackend = Depends(get_backend),
     settings: Settings = Depends(get_settings),
 ) -> ReviewQueuePage:
-    """Candidate-grain review queue — one row per pending pair, independent
+    """Candidate-grain review queue — one row per candidate pair, independent
     of which cluster it belongs to (docs/Dashboard-Guide.md's Review Queue
-    tab). `reviewed` unset returns every candidate; pass `reviewed=false` for
-    the default "Needs review" queue view, `reviewed=true` for "Already
-    reviewed"."""
+    tab).
+
+    `bucket` picks one of the queue's four sections and must be one of
+    `src/api/pair_verdicts.py`'s `QUEUE_BUCKETS`: `needs_review` (nothing
+    resolved it and no reviewer has ruled), `reviewed` (a reviewer merged or
+    dismissed this exact pair), `auto_merged` (the pipeline merged it), or
+    `auto_rejected` (the pipeline declined it). Unset returns every
+    candidate; every row carries its own `bucket` either way.
+
+    `confidence_min`/`confidence_max` bound the matcher-side score
+    (`COALESCE(confidence, ml_match_probability)`);
+    `gate_score_min`/`gate_score_max` bound the Stage-4.25 gate's
+    `P(plausible)`. **These are two different axes, not two views of one**
+    — the gate asks whether a pair is worth a human's time, the matcher
+    whether it should merge unattended — and a pair can score near zero on
+    the second while the gate kept it. For a gate-dropped pair the gate
+    score is the only number there is.
+
+    `verdict` filters on `src/api/pair_verdicts.py`'s vocabulary and is the
+    only filter that reaches pairs no model ever scored (a deterministic
+    `reject`), which no numeric bound can select for.
+
+    `patid_a`/`patid_b` (either order — canonicalized here) narrow to one
+    exact pair: the deep link a cluster's comparison history sends a
+    reviewer on knows the pair, not what confidence/search/page would
+    currently surface it. They combine with any other filter passed
+    alongside them by AND, same as every filter here — a caller resolving a
+    specific pair should pass no other filter, `bucket` least of all, since
+    the pair's section is exactly what the caller doesn't know yet."""
+    if bucket is not None and bucket not in QUEUE_BUCKETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"bucket must be one of {list(QUEUE_BUCKETS)}, got {bucket!r}",
+        )
+    if verdict is not None and verdict not in VERDICTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"verdict must be one of {list(VERDICTS)}, got {verdict!r}",
+        )
     page_size = page_size or settings.records_page_size
+    if patid_a is not None and patid_b is not None:
+        patid_a, patid_b = sorted((patid_a, patid_b))
     rows, total = backend.list_review_candidates(
         confidence_min=confidence_min, confidence_max=confidence_max,
-        reviewed=reviewed, search=search, page=page, page_size=page_size,
+        gate_score_min=gate_score_min, gate_score_max=gate_score_max,
+        verdict=verdict,
+        bucket=bucket, search=search, patid_a=patid_a, patid_b=patid_b,
+        page=page, page_size=page_size,
     )
     items = [_to_review_queue_item(row) for row in rows]
-    return ReviewQueuePage(total=total, page=page, page_size=page_size, items=items)
+    counts = backend.review_bucket_counts()
+    return ReviewQueuePage(
+        total=total, page=page, page_size=page_size, items=items,
+        # Absent sections report 0 rather than being missing, so the UI can
+        # render every tab from this dict alone.
+        bucket_counts={b: counts.get(b, 0) for b in QUEUE_BUCKETS},
+    )
 
 
 @router.get("/records", response_model=RecordsPage)
@@ -162,6 +233,7 @@ def list_records(
     updated_before: str | None = None,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    min_members: int | None = None,
     sort: str | None = None,
     page: int = 1,
     page_size: int | None = None,
@@ -169,14 +241,20 @@ def list_records(
     settings: Settings = Depends(get_settings),
 ) -> RecordsPage:
     """`sort` — `'confidence'`, `'name'`, or unset/anything else for the
-    default most-recently-updated-first (see `IndexBackend.list_entities`)."""
+    default most-recently-updated-first (see `IndexBackend.list_entities`).
+
+    `min_members=2` is the Patient Registry's "clusters with something to
+    compare" filter. Use it rather than `is_merged=true`, which is derived
+    from the *unlocked* member count at publish time and so misses any
+    multi-record cluster a reviewer has already touched.
+    """
     page_size = page_size or settings.records_page_size
     rows, total = backend.list_entities(
         search=search, origin=origin, is_merged=is_merged,
         birth_date=birth_date, ssn_last4=ssn_last4,
         updated_after=updated_after, updated_before=updated_before,
         confidence_min=confidence_min, confidence_max=confidence_max,
-        sort=sort, page=page, page_size=page_size,
+        min_members=min_members, sort=sort, page=page, page_size=page_size,
     )
     items = []
     for row in rows:

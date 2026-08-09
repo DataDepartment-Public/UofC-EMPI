@@ -98,6 +98,11 @@ Postgres reachable via `EMPI_TEST_POSTGRES_DSN`; it skips itself otherwise. A
 local one for this alone:
 
 ```bash
+# The client driver isn't in requirements.txt (it's an Azure-deploy dep), and
+# Homebrew's postgresql is keg-only, so put both on the path first:
+pip install "psycopg[binary]"
+brew install postgresql@17 && export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
+
 initdb -D /tmp/empi_pg_test/data -U postgres -A trust --encoding=UTF8
 pg_ctl -D /tmp/empi_pg_test/data -l /tmp/empi_pg_test/server.log -o "-p 55432 -k /tmp/empi_pg_test" start
 createdb -h /tmp/empi_pg_test -p 55432 -U postgres empi_test

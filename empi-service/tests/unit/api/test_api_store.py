@@ -133,6 +133,65 @@ class TestListEntities:
         assert total == 1
         assert rows[0]["mid"] == "M-2"
 
+    def test_search_by_full_name_spanning_two_columns(self, conn):
+        """A steward types the whole name they're looking at. Matching the
+        raw string per-column found nothing, since neither `first_name` nor
+        `last_name` alone contains "John Smith"."""
+        self._seed(conn)
+        rows, total = sql_backend.list_entities(conn, search="John Smith")
+        assert total == 1
+        assert rows[0]["mid"] == "M-2"
+
+    def test_search_by_full_name_is_order_insensitive(self, conn):
+        """"LAST, FIRST" pastes and reversed typing must work too."""
+        self._seed(conn)
+        _, total = sql_backend.list_entities(conn, search="Smith John")
+        assert total == 1
+
+    def test_search_tokens_narrow_rather_than_widen(self, conn):
+        """Tokens are ANDed: adding a word must never return *more* rows.
+        "Jane Smith" is nobody here — Jane is Doe, John is Smith."""
+        self._seed(conn)
+        _, total = sql_backend.list_entities(conn, search="Jane Smith")
+        assert total == 0
+
+    def test_search_tokens_must_land_on_the_same_member(self, conn):
+        """Two members in one cluster must not jointly satisfy a name: M-3
+        holds a JANE ROE and a BOB SMITH, so "Jane Smith" matches neither."""
+        sql_backend.upsert_entity(conn, "M-3", "r1", "deterministic", True, 0.9, "t0")
+        sql_backend.upsert_entity_member(conn, "P3", "M-3", True, "pipeline", "t0")
+        sql_backend.upsert_entity_member(conn, "P4", "M-3", False, "pipeline", "t0")
+        sql_backend.upsert_record_attrs(
+            conn, "P3", first_name="Jane", last_name="Roe", birth_date=None,
+            ssn_last4=None, email=None, zip_code=None, address1=None, sex=None,
+            run_id="r1",
+        )
+        sql_backend.upsert_record_attrs(
+            conn, "P4", first_name="Bob", last_name="Smith", birth_date=None,
+            ssn_last4=None, email=None, zip_code=None, address1=None, sex=None,
+            run_id="r1",
+        )
+        conn.commit()
+        rows, total = sql_backend.list_entities(conn, search="Jane Smith")
+        assert total == 0
+
+    def test_search_ignores_extra_whitespace(self, conn):
+        self._seed(conn)
+        _, total = sql_backend.list_entities(conn, search="  John   Smith  ")
+        assert total == 1
+
+    def test_blank_search_does_not_filter(self, conn):
+        """A box holding only spaces is not a query for nothing."""
+        self._seed(conn)
+        _, total = sql_backend.list_entities(conn, search="   ")
+        assert total == 2
+
+    def test_search_still_matches_mid(self, conn):
+        self._seed(conn)
+        rows, total = sql_backend.list_entities(conn, search="M-1")
+        assert total == 1
+        assert rows[0]["mid"] == "M-1"
+
     def test_pagination(self, conn):
         self._seed(conn)
         rows, total = sql_backend.list_entities(conn, page=1, page_size=1)
@@ -187,7 +246,7 @@ class TestReviewCandidate:
             conn, "r1",
             [(
                 "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
-                None, None,
+                None, None, None, "ml_human_review",
             )],
         )
         conn.commit()
@@ -199,25 +258,65 @@ class TestReviewCandidate:
     def test_replace_review_candidates_for_run_carries_ml_score(self, conn):
         sql_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", None, None, None, "B3", "r1", "t0", 0.24, "human_review")],
+            [(
+                "P1", "P2", None, None, None, "B3", "r1", "t0",
+                0.24, "human_review", 0.81, "ml_human_review",
+            )],
         )
         conn.commit()
         rows = sql_backend.review_candidates_for_patid(conn, "P1")
         assert rows[0]["ml_match_probability"] == 0.24
         assert rows[0]["ml_classification_tier"] == "human_review"
+        # The gate's score rides along on its own axis — a pair can be near
+        # zero on the matcher and still highly plausible to the gate, and
+        # for a gate-dropped pair this is the only score there is.
+        assert rows[0]["gate_score"] == 0.81
 
     def test_replace_clears_stale_rows_for_same_run(self, conn):
         sql_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None)]
+            conn, "r1",
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None, None)],
         )
         conn.commit()
         sql_backend.replace_review_candidates_for_run(conn, "r1", [])  # nothing this time
         conn.commit()
         assert sql_backend.review_candidates_for_patid(conn, "P1") == []
 
+    def test_a_pair_surviving_two_publishes_is_listed_once(self, conn):
+        """The read-side dedup invariant, pinned here because it is the one
+        `postgres_backend` has to match — see its counterpart test, which
+        needs a live Postgres and so can't run by default. A pair unresolved
+        across two publishes has two rows (UNIQUE is on `(a, b, run_id)`);
+        only the newest may surface."""
+        sql_backend.upsert_entity(conn, "M-1", "r1", "none", False, None, "t0")
+        sql_backend.upsert_entity_member(conn, "P1", "M-1", True, "pipeline", "t0")
+        sql_backend.upsert_entity(conn, "M-2", "r1", "none", False, None, "t0")
+        sql_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
+        for run_id, ts, conf in (("r1", "t0", 0.40), ("r2", "t1", 0.70)):
+            sql_backend.replace_review_candidates_for_run(
+                conn, run_id,
+                [("P1", "P2", None, conf, None, "B3", run_id, ts,
+                  None, None, None, None)],
+            )
+        conn.commit()
+
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM review_candidate"
+        ).fetchone()["n"] == 2
+
+        rows = sql_backend.review_candidates_for_patid(conn, "P1")
+        assert len(rows) == 1
+        assert rows[0]["run_id"] == "r2"
+        assert rows[0]["confidence"] == 0.70
+
+        listed, total = sql_backend.list_review_candidates(conn)
+        assert total == 1 and len(listed) == 1
+        assert sql_backend.review_bucket_counts(conn) == {"needs_review": 1}
+
     def test_patids_with_review_candidates(self, conn):
         sql_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None)]
+            conn, "r1",
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None, None)],
         )
         conn.commit()
         assert sql_backend.patids_with_review_candidates(conn) == {"P1", "P2"}

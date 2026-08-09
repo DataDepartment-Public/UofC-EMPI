@@ -76,14 +76,23 @@ class ModelStatusResponse(BaseModel):
 
 class RecordAttrs(BaseModel):
     first_name: str | None = None
+    middle_name: str | None = None
     last_name: str | None = None
+    suffix: str | None = None
     birth_date: str | None = None
     ssn_last4: str | None = None
     email: str | None = None
     zip_code: str | None = None
+    city: str | None = None
     address1: str | None = None
     sex: str | None = None
+    #: The primary cleaned phone (`PrimaryPhoneNBR_clean`) — one number.
     phone: str | None = None
+    #: Every cleaned phone on the record (`Phones_set`), the set B5 blocking
+    #: and the NAME_DOB_PHONE rule actually intersect on. Empty when the
+    #: record has no phone, or when `record_attrs` predates the column and the
+    #: run hasn't been re-published (see `sql_backend._COLUMN_MIGRATIONS`).
+    phones: list[str] = Field(default_factory=list)
 
 
 class EntityMember(RecordAttrs):
@@ -148,8 +157,8 @@ class RecordsPage(BaseModel):
 
 
 class ReviewQueueItem(BaseModel):
-    """One candidate-grain row of `GET /review-queue` — a pending pair, not a
-    cluster. See `src/api/backends/sql_backend.py` `list_review_candidates`."""
+    """One candidate-grain row of `GET /review-queue` — a candidate pair, not
+    a cluster. See `src/api/backends/sql_backend.py` `list_review_candidates`."""
 
     patid_a: str
     patid_b: str
@@ -165,7 +174,23 @@ class ReviewQueueItem(BaseModel):
     fs_classification_tier: str | None = None
     ml_match_probability: float | None = None
     ml_classification_tier: str | None = None
-    reviewed: bool
+    #: The Stage-4.25 gate's `P(plausible)`. A different axis from
+    #: `ml_match_probability`, not a fallback for it: for a gate-dropped pair
+    #: this is the only score there is, and for a pair the gate passed it is
+    #: what explains why a near-zero match probability still warrants review.
+    #: `None` where the gate never scored the pair (a deterministic reject, an
+    #: ungated run) or the publish predates the column.
+    gate_score: float | None = None
+    #: Which pipeline stage decided this pair (`src/api/pair_verdicts.py`).
+    #: `None` on rows written by incremental scoring, which runs no model
+    #: stage, and on rows from a publish predating the column.
+    verdict: str | None = None
+    #: Which of the four Review Queue sections the pair is in — the
+    #: reviewer-facing resolution of `verdict` plus any human decision.
+    bucket: Literal["needs_review", "reviewed", "auto_merged", "auto_rejected"]
+    #: What a reviewer concluded about this exact pair, if anything. Non-null
+    #: exactly when `bucket == "reviewed"`.
+    reviewer_decision: Literal["merged", "not_a_match"] | None = None
     patient_a: CandidatePatient
     patient_b: CandidatePatient
 
@@ -175,6 +200,9 @@ class ReviewQueuePage(BaseModel):
     page: int
     page_size: int
     items: list[ReviewQueueItem]
+    #: Pair count per section, for the queue's section tabs — always the
+    #: totals across the whole index, unaffected by this response's filters.
+    bucket_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class DismissRequest(BaseModel):
@@ -184,6 +212,10 @@ class DismissRequest(BaseModel):
 
 class DismissResponse(BaseModel):
     audit_id: int
+    #: Set when the dismissed pair was merged and had to be split to honour
+    #: the decision — the `mid` `patid_b` was moved to. `None` when the pair
+    #: was never merged, which is the ordinary "Not a match" case.
+    unmerged_to_mid: str | None = None
 
 
 class RawRecord(BaseModel):
@@ -218,20 +250,33 @@ class UnmergeResponse(BaseModel):
 
 
 class UndoResponse(BaseModel):
-    """`POST /audit/{audit_id}/undo` — reverses a `merge` or `unmerge` entry.
+    """`POST /audit/{audit_id}/undo` — reverses a `merge`, `unmerge` or
+    `dismiss` entry.
 
     `reversed_action` is the action that was undone (not the action taken to
     undo it). Undoing a `merge` unmerges every patid back into its own
     singleton entity (no single `entity` to return, hence `new_mids`);
     undoing an `unmerge` re-merges the one patid back into `prev_mid`
     (`entity` is that reconstituted entity, and `new_mids` is just `[mid]`
-    for symmetry with the merge case).
+    for symmetry with the merge case). Undoing a `dismiss` mutates no
+    entity at all — a dismiss never did — so both fields stay empty; it just
+    retracts the pair decision, returning the pair to whichever section the
+    pipeline's verdict puts it in.
+
+    The whole reversal is one transaction: either every patid came back out
+    and the entry is `undone`, or nothing changed and it is still undoable.
     """
 
     audit_id: int
-    reversed_action: Literal["merge", "unmerge"]
+    reversed_action: Literal["merge", "unmerge", "dismiss"]
     entity: Entity | None = None
     new_mids: list[str] = Field(default_factory=list)
+    #: Patids of an undone `merge` that a *later* action had already moved
+    #: out of the merged entity — already where the reversal wanted them, so
+    #: they got no new singleton of their own and appear here instead of in
+    #: `new_mids`. Non-empty means the merge was partly superseded before it
+    #: was undone, which is worth surfacing to the reviewer.
+    already_detached: list[str] = Field(default_factory=list)
 
 
 class MatchStatusCounts(BaseModel):
@@ -407,6 +452,154 @@ class PairExplanation(BaseModel):
     features: list[ExplanationFeature]
 
 
+# ── Cluster pair trace (GET /clusters/{mid}/pairs) ───────────────────────────
+#: Every value `ClusterPair.verdict` can take, most decisive stage first —
+#: which is also the order the route resolves them in, and the order the
+#: dashboard sorts by. Exported so the UI's badge map and the tests can be
+#: checked against one list rather than three copies of the same strings.
+CLUSTER_PAIR_VERDICTS = (
+    "auto_merge_rule",     # a deterministic auto-merge rule confirmed it
+    "reject",              # the rules rejected it (>=3 strong contradictions)
+    "ml_auto_merge",       # Stage 4.5 scored it a confident match
+    "ml_human_review",     # Stage 4.5 scored it ambiguous
+    "gate_dropped",        # Stage 4.25 dropped it as a confident non-match
+    "blocked_undecided",   # blocked together, but no stage recorded a decision
+    "not_compared",        # never blocked together — same cluster transitively
+)
+
+
+class ClusterPair(BaseModel):
+    """What the pipeline did with one pair of a cluster's current members.
+
+    Assembled from the run's Parquet artifacts, not the index: publishing
+    collapses a cluster's deterministic pairs into one best-pair evidence
+    string and deletes the gate's drops, so this is the only place the full
+    picture survives. Every stage field is nullable — a run that skipped a
+    stage, or a pair that never reached it, reports nothing rather than a
+    fabricated zero.
+    """
+
+    patid_a: str
+    patid_b: str
+    verdict: str
+
+    #: Stage 2 — did blocking ever put these two in the same candidate set?
+    #: `False` with a non-`not_compared` verdict is impossible; `False` alone
+    #: is what makes a pair transitive rather than directly compared.
+    blocked: bool
+    source_blocks: str | None = None
+    n_blocks: int | None = None
+
+    #: Stage 3 — deterministic rules, both directions.
+    match_rule: str | None = None
+    rules_fired: str | None = None
+    confidence: float | None = None
+    reject_rule: str | None = None
+    n_contradictions: int | None = None
+
+    #: Stage 4.25 / 4.5. A gate score is present for every pair the gate saw,
+    #: including the ones it dropped; ML fields only for gate survivors.
+    gate_score: float | None = None
+    gate_tier: str | None = None
+    ml_score: float | None = None
+    ml_tier: str | None = None
+
+    #: Reviewer provenance, from `entity_member.added_by` rather than a scan
+    #: of `audit_log`: a member the pipeline placed reads `"pipeline"`, and
+    #: anything else is the reviewer id that merged it in. A pair is
+    #: reviewer-joined when either side was.
+    joined_by: Literal["pipeline", "reviewer"] = "pipeline"
+    reviewer_id: str | None = None
+    reviewer_ts_utc: str | None = None
+
+    #: Stage 6 — clustering. `assign_clusters` only ever unions the two ends
+    #: of a *confirmed* edge (an auto-merge-tier row, or a reviewer merge);
+    #: it never looks at this pair directly unless this pair *is* one of
+    #: those edges. So a pair whose own verdict never merged anything (an
+    #: ambiguous ML score, a rejection, a gate drop, or one blocking never
+    #: even paired) can still land in the same cluster — because each end
+    #: reached a shared record through its own confirmed edges. This is the
+    #: chain of members (`[patid_a, ..., patid_b]`) that connects them, so a
+    #: reviewer can see exactly which other merges are responsible. `None`
+    #: when this pair *is* itself a merge edge (nothing to explain) or, in
+    #: the rare case the recorded edges don't reconnect them — e.g. tracing
+    #: a different run than the one that actually produced this cluster's
+    #: current membership — when no such chain exists.
+    cluster_path: list[str] | None = None
+
+
+class ClusterExternalPair(ClusterPair):
+    """A comparison between one of this cluster's members and a record that
+    ended up somewhere else.
+
+    Why this is a separate list from `pairs`: those explain how the cluster
+    was *built*, these explain where it *stopped* — the near-misses the
+    pipeline considered and declined. For a singleton it is the only thing
+    there is to show, and "nothing was ever compared to this record" and
+    "six records were compared and all six were rejected" are very different
+    answers to "why is this patient alone?".
+
+    Unlike `pairs`, this list never contains a `not_compared` verdict. It is
+    built by reading the artifacts and keeping rows that touch a member, so a
+    pair only appears if some stage actually looked at it — enumerating the
+    other ~7,000 records the pipeline never considered would be noise, not
+    evidence.
+    """
+
+    #: Which side of the pair belongs to this cluster; the other is outside.
+    #: `patid_a`/`patid_b` stay canonically ordered, so the UI needs this to
+    #: know which record to describe rather than re-deriving it.
+    member_patid: str
+    other_patid: str
+    #: The counterpart's current cluster and display fields, resolved from the
+    #: index at request time — the artifacts carry PATIDs only, and a reviewer
+    #: needs a name to judge whether a rejection looks right.
+    other_mid: str | None = None
+    other_first_name: str | None = None
+    other_last_name: str | None = None
+    other_birth_date: str | None = None
+    other_ssn_last4: str | None = None
+
+
+class ClusterPairsResponse(BaseModel):
+    """Every unordered pair of a cluster's current members, with its trace.
+
+    Membership is read from the index (`entity_member`), not from the run's
+    `cluster_assignments` — sticky-unmerge and reviewer merges make the two
+    diverge, and a reviewer is looking at the cluster as it stands now.
+    A pair whose two records were never in the same run therefore lands on
+    `not_compared`, which is the honest answer.
+    """
+
+    mid: str
+    run_id: str | None = None
+    #: False when the run is unresolvable or its artifacts are gone from disk.
+    #: The pairs are still enumerated (so the UI can list the cluster's
+    #: members) but every stage field is null — distinguishable from "the
+    #: pipeline genuinely decided nothing about this pair".
+    artifacts_available: bool
+    #: Set when the entity names a run that has no readable manifest — an
+    #: incremental-scoring job (`POST /records/score`), which writes no
+    #: artifacts, or a run whose manifest was deleted. The trace comes back
+    #: empty rather than being filled from an unrelated run, and this is the
+    #: id that couldn't be resolved, for the UI to say so.
+    unresolved_run_id: str | None = None
+    #: Set when the cluster has more than `cluster_pairs_max_members`
+    #: members. `pairs` (quadratic in members) and the transitive
+    #: `cluster_path` walk (worse) are then omitted rather than spending
+    #: minutes of CPU and hundreds of MB on one request; `members` and
+    #: `external_pairs` are still complete.
+    pairs_truncated: bool = False
+    members: list[str] = Field(default_factory=list)
+    #: `gate_threshold` / `ml_auto_merge_threshold`, so the UI can draw the
+    #: decision boundary beside a score without a second call to /admin.
+    thresholds: dict[str, float] = Field(default_factory=dict)
+    #: Every unordered pair of members — how the cluster was assembled.
+    pairs: list[ClusterPair] = Field(default_factory=list)
+    #: Comparisons against records outside the cluster — the near-misses.
+    external_pairs: list[ClusterExternalPair] = Field(default_factory=list)
+
+
 # ── Admin (GET/PUT /admin/thresholds) ────────────────────────────────────────
 class ThresholdSettings(BaseModel):
     """The live-tunable ML decision thresholds — see
@@ -471,5 +664,9 @@ __all__ = [
     "ExplanationDecision",
     "ExplanationAxis",
     "PairExplanation",
+    "CLUSTER_PAIR_VERDICTS",
+    "ClusterPair",
+    "ClusterExternalPair",
+    "ClusterPairsResponse",
     "ThresholdSettings",
 ]

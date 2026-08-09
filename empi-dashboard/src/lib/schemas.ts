@@ -155,6 +155,12 @@ export const ReviewQueueItemSchema = z.object({
   source_blocks: z.string().nullable(),
   ml_match_probability: z.number().nullable().optional(),
   ml_classification_tier: z.string().nullable().optional(),
+  /** The Stage-4.25 gate's P(plausible) — a separate axis from
+   * `ml_match_probability`, not a fallback for it. For a gate-dropped pair
+   * it's the only score there is; for a pair the gate passed it's what makes
+   * sense of a near-zero match probability. Null where the gate never scored
+   * the pair, or the run predates the column. */
+  gate_score: z.number().nullable().optional(),
   /** Which pipeline stage decided this pair. Null for pairs written by
    * incremental scoring, which runs no model stage. */
   verdict: z.string().nullable().optional(),

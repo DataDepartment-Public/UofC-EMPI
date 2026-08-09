@@ -49,7 +49,7 @@ _SCHEMAS: dict[str, list[str]] = {
         "source_blocks", "run_id", "created_utc",
         "fs_match_probability", "fs_classification_tier",
         "ml_match_probability", "ml_classification_tier",
-        "verdict",
+        "gate_score", "verdict",
     ],
     "reviewer_pair_decision": [
         "patid_a", "patid_b", "decision", "audit_id", "ts_utc",
@@ -68,17 +68,18 @@ _SCHEMAS: dict[str, list[str]] = {
     ],
 }
 
-#: The 11 columns `publish.py`'s batch replace passes to
+#: The 12 columns `publish.py`'s batch replace passes to
 #: `replace_review_candidates_for_run` — no `fs_match_probability` /
 #: `fs_classification_tier` (batch publish never FS-scores a run; only
 #: incremental scoring does, via `insert_review_candidates`'s 10-column FS
-#: rows), but it does carry the Stage 4.5 ML matcher's score and the pair's
-#: pipeline `verdict`. Matches `sql_backend._REVIEW_CANDIDATE_INSERT_SQL`'s
-#: column list (as opposed to the ``_FULL_SQL`` variant).
+#: rows), but it does carry the Stage 4.5 ML matcher's score, the Stage-4.25
+#: gate's score, and the pair's pipeline `verdict`. Matches
+#: `sql_backend._REVIEW_CANDIDATE_INSERT_SQL`'s column list (as opposed to
+#: the ``_FULL_SQL`` variant).
 _REVIEW_CANDIDATE_BATCH_COLUMNS: list[str] = [
     "patid_a", "patid_b", "match_rule", "confidence", "evidence",
     "source_blocks", "run_id", "created_utc",
-    "ml_match_probability", "ml_classification_tier", "verdict",
+    "ml_match_probability", "ml_classification_tier", "gate_score", "verdict",
 ]
 
 #: The 10 columns `incremental.py`'s `_persist_review_candidates` passes to
@@ -298,8 +299,10 @@ class ParquetIndexBackend:
         new = pd.DataFrame(rows, columns=_REVIEW_CANDIDATE_FS_COLUMNS)
         new["ml_match_probability"] = None
         new["ml_classification_tier"] = None
-        # Incremental scoring runs no gate and no ML matcher, so it has no
-        # verdict to record — NULL, which reads as `needs_review`.
+        # Incremental scoring runs no gate and no ML matcher, so it has
+        # neither a gate score nor a verdict to record — NULL, which reads as
+        # `needs_review`.
+        new["gate_score"] = None
         new["verdict"] = None
         new = new[_SCHEMAS["review_candidate"]]
         combined = pd.concat([self._tables["review_candidate"], new], ignore_index=True)
@@ -654,6 +657,9 @@ class ParquetIndexBackend:
         *,
         confidence_min: float | None = None,
         confidence_max: float | None = None,
+        gate_score_min: float | None = None,
+        gate_score_max: float | None = None,
+        verdict: str | None = None,
         bucket: str | None = None,
         search: str | None = None,
         patid_a: str | None = None,
@@ -665,10 +671,17 @@ class ParquetIndexBackend:
         candidate-grain (one row per pair, not per cluster), bucketed into
         the same four Review Queue sections. `patid_a`/`patid_b` narrow to
         one exact pair, AND-combined with any other filter — see the SQL
-        version's docstring for both."""
+        version's docstring for all of them, including why `gate_score_*` is
+        a separate axis from `confidence_*` and why `gate_score_max` is
+        exclusive where `confidence_max` is inclusive."""
         joined = self._joined_candidates()
 
         sort_conf = joined["confidence"].fillna(joined["ml_match_probability"])
+        gate = (
+            joined["gate_score"]
+            if "gate_score" in joined.columns
+            else pd.Series(pd.NA, index=joined.index, dtype="Float64")
+        )
         mask = pd.Series(True, index=joined.index)
         if patid_a is not None and patid_b is not None:
             mask &= (joined["patid_a"] == patid_a) & (joined["patid_b"] == patid_b)
@@ -676,6 +689,15 @@ class ParquetIndexBackend:
             mask &= sort_conf >= confidence_min
         if confidence_max is not None:
             mask &= sort_conf <= confidence_max
+        # `fillna(False)` so a NULL gate score fails the bound rather than
+        # propagating NA through the mask — matching SQL, where a comparison
+        # against NULL is never true.
+        if gate_score_min is not None:
+            mask &= (gate >= gate_score_min).fillna(False)
+        if gate_score_max is not None:
+            mask &= (gate < gate_score_max).fillna(False)
+        if verdict is not None:
+            mask &= joined["verdict"] == verdict
         tokens = search_tokens(search)
         if tokens:
             # Mirrors sql_backend.list_review_candidates — all tokens on one

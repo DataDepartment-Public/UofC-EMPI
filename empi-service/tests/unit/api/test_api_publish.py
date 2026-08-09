@@ -413,6 +413,96 @@ class TestPublishRun:
         assert sql_backend.get_entity(conn, p7_mid)["entity"]["origin"] == "none"
         assert sql_backend.review_candidates_for_patid(conn, "P6") == []
 
+    def test_publish_carries_the_gate_score_for_dropped_and_passed_pairs(
+        self, conn, backend, fixture_settings
+    ):
+        """The gate's P(plausible) must survive publish for *both* outcomes.
+
+        For a dropped pair it's the only number the row has — no rule fired
+        and Stage 4.5 never scored it — so without it the Auto-rejected
+        section can't be ranked or split at all. For a passed pair it's what
+        explains a near-zero `ml_match_probability` on a row that is
+        nevertheless worth a human's time.
+        """
+        _write_run_with_gate_drop(fixture_settings, "r2")
+        publish.publish_run(backend, "r2", fixture_settings)
+
+        scores = {
+            (r["patid_a"], r["patid_b"]): r["gate_score"]
+            for r in conn.execute(
+                "SELECT patid_a, patid_b, gate_score FROM review_candidate"
+            )
+        }
+        assert scores[("P4", "P5")] == pytest.approx(0.91)
+        assert scores[("P6", "P7")] == pytest.approx(0.001)
+        # P1<->P2 was auto-merged by a rule at stage 3, so the gate never
+        # scored it — NULL, not zero. The difference matters: zero would
+        # sort it to the bottom of the reject bands it never entered.
+        assert scores[("P1", "P2")] is None
+
+    def test_gate_score_filter_is_a_separate_axis_from_confidence(
+        self, conn, backend, fixture_settings
+    ):
+        """`gate_score_*` must not behave like a second `confidence_*`.
+
+        P6<->P7 was dropped by the gate at 0.001 and has no matcher score at
+        all, so it is invisible to any `confidence_*` bound (`NULL >= x` is
+        never true) and reachable only on the gate axis. That asymmetry is
+        the whole reason for the second pair of params.
+        """
+        _write_run_with_gate_drop(fixture_settings, "r2")
+        publish.publish_run(backend, "r2", fixture_settings)
+
+        # Half-open [min, max): the gate-dropped pair sits below 0.20.
+        rows, total = sql_backend.list_review_candidates(
+            conn, gate_score_max=0.2,
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P6", "P7")
+
+        # ...and the passed pair sits above it, on the same axis.
+        rows, total = sql_backend.list_review_candidates(
+            conn, gate_score_min=0.2,
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P4", "P5")
+
+        # A confidence bound can't see the gate-dropped pair at all: it has
+        # no rule confidence and no ML score, so it fails every numeric
+        # bound on that axis, including a floor of zero.
+        conf_rows, _ = sql_backend.list_review_candidates(
+            conn, confidence_min=0.0,
+        )
+        assert ("P6", "P7") not in {
+            (r["patid_a"], r["patid_b"]) for r in conf_rows
+        }
+
+    def test_verdict_filter_reaches_pairs_no_range_can_select(
+        self, conn, backend, fixture_settings
+    ):
+        """A deterministic `reject` is scored by nothing, so no numeric bound
+        selects it. `verdict` is the only filter that can, which is why the
+        dashboard's reject bands need it."""
+        _write_run_with_gate_drop(fixture_settings, "r2")
+        publish.publish_run(backend, "r2", fixture_settings)
+
+        rows, total = sql_backend.list_review_candidates(
+            conn, verdict="gate_dropped",
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P6", "P7")
+
+        rows, total = sql_backend.list_review_candidates(
+            conn, verdict="auto_merge_rule",
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P1", "P2")
+
+        _, none_total = sql_backend.list_review_candidates(
+            conn, verdict="reject",
+        )
+        assert none_total == 0
+
     def test_record_attrs_denormalized(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
         publish.publish_run(backend, "r1", fixture_settings)

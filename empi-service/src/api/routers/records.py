@@ -17,7 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from src.api import jobs
 from src.api.deps import get_backend, get_reviewer_id_optional, get_settings
 from src.api.backends.index_backend import IndexBackend
-from src.api.pair_verdicts import QUEUE_BUCKETS
+from src.api.pair_verdicts import QUEUE_BUCKETS, VERDICTS
 from src.api.schemas import (
     CandidatePatient,
     CleanSsn,
@@ -136,6 +136,7 @@ def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
         fs_classification_tier=rc.get("fs_classification_tier"),
         ml_match_probability=rc.get("ml_match_probability"),
         ml_classification_tier=rc.get("ml_classification_tier"),
+        gate_score=rc.get("gate_score"),
         verdict=rc.get("verdict"),
         bucket=rc["bucket"],
         reviewer_decision=rc.get("reviewer_decision"),
@@ -148,6 +149,9 @@ def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
 def list_review_queue(
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    gate_score_min: float | None = None,
+    gate_score_max: float | None = None,
+    verdict: str | None = None,
     bucket: str | None = None,
     search: str | None = None,
     patid_a: str | None = None,
@@ -168,6 +172,19 @@ def list_review_queue(
     `auto_rejected` (the pipeline declined it). Unset returns every
     candidate; every row carries its own `bucket` either way.
 
+    `confidence_min`/`confidence_max` bound the matcher-side score
+    (`COALESCE(confidence, ml_match_probability)`);
+    `gate_score_min`/`gate_score_max` bound the Stage-4.25 gate's
+    `P(plausible)`. **These are two different axes, not two views of one**
+    — the gate asks whether a pair is worth a human's time, the matcher
+    whether it should merge unattended — and a pair can score near zero on
+    the second while the gate kept it. For a gate-dropped pair the gate
+    score is the only number there is.
+
+    `verdict` filters on `src/api/pair_verdicts.py`'s vocabulary and is the
+    only filter that reaches pairs no model ever scored (a deterministic
+    `reject`), which no numeric bound can select for.
+
     `patid_a`/`patid_b` (either order — canonicalized here) narrow to one
     exact pair: the deep link a cluster's comparison history sends a
     reviewer on knows the pair, not what confidence/search/page would
@@ -180,11 +197,18 @@ def list_review_queue(
             status_code=422,
             detail=f"bucket must be one of {list(QUEUE_BUCKETS)}, got {bucket!r}",
         )
+    if verdict is not None and verdict not in VERDICTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"verdict must be one of {list(VERDICTS)}, got {verdict!r}",
+        )
     page_size = page_size or settings.records_page_size
     if patid_a is not None and patid_b is not None:
         patid_a, patid_b = sorted((patid_a, patid_b))
     rows, total = backend.list_review_candidates(
         confidence_min=confidence_min, confidence_max=confidence_max,
+        gate_score_min=gate_score_min, gate_score_max=gate_score_max,
+        verdict=verdict,
         bucket=bucket, search=search, patid_a=patid_a, patid_b=patid_b,
         page=page, page_size=page_size,
     )

@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     fs_classification_tier TEXT,
     ml_match_probability   REAL,
     ml_classification_tier TEXT,
+    -- The Stage-4.25 gate's P(plausible); the only score a gate-dropped pair
+    -- carries. See `sql_backend.SCHEMA_SQL`.
+    gate_score   REAL,
     -- Which stage decided this pair (`src/api/pair_verdicts.py`); NULL reads
     -- as `needs_review`. See `sql_backend.SCHEMA_SQL`.
     verdict      TEXT,
@@ -222,6 +225,8 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "ml_match_probability": "REAL",
         "ml_classification_tier": "TEXT",
         "verdict": "TEXT",
+        # NULL on an existing database until the run is re-published.
+        "gate_score": "REAL",
     },
     "audit_log": {
         "related_patids": "TEXT",
@@ -436,14 +441,15 @@ _REVIEW_CANDIDATE_INSERT_SQL = """
     INSERT INTO review_candidate
         (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
          run_id, created_utc, ml_match_probability, ml_classification_tier,
-         verdict)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         gate_score, verdict)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
         match_rule=excluded.match_rule, confidence=excluded.confidence,
         evidence=excluded.evidence, source_blocks=excluded.source_blocks,
         created_utc=excluded.created_utc,
         ml_match_probability=excluded.ml_match_probability,
         ml_classification_tier=excluded.ml_classification_tier,
+        gate_score=excluded.gate_score,
         verdict=excluded.verdict
 """
 
@@ -456,7 +462,7 @@ def replace_review_candidates_for_run(
     disappear rather than linger as a stale suggestion. `rows` are
     `(patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
     run_id, created_utc, ml_match_probability, ml_classification_tier,
-    verdict)`. Never touches `reviewer_pair_decision`."""
+    gate_score, verdict)`. Never touches `reviewer_pair_decision`."""
     conn.execute("DELETE FROM review_candidate WHERE run_id = %s", (run_id,))
     _executemany(conn, _REVIEW_CANDIDATE_INSERT_SQL, rows)
 
@@ -529,6 +535,9 @@ def list_review_candidates(
     *,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    gate_score_min: float | None = None,
+    gate_score_max: float | None = None,
+    verdict: str | None = None,
     bucket: str | None = None,
     search: str | None = None,
     patid_a: str | None = None,
@@ -552,6 +561,16 @@ def list_review_candidates(
     if confidence_max is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) <= %s")
         params.append(confidence_max)
+    if gate_score_min is not None:
+        where.append("rc.gate_score >= %s")
+        params.append(gate_score_min)
+    if gate_score_max is not None:
+        # Half-open, matching sql_backend.
+        where.append("rc.gate_score < %s")
+        params.append(gate_score_max)
+    if verdict is not None:
+        where.append("rc.verdict = %s")
+        params.append(verdict)
     tokens = search_tokens(search)
     if tokens:
         # Mirrors sql_backend.list_review_candidates — all tokens on one side.

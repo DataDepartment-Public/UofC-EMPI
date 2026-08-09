@@ -58,6 +58,18 @@ VERDICT_ML_HUMAN_REVIEW = "ml_human_review"
 #: no FS fallback), or a pair that reached `non_matches` with nothing after.
 VERDICT_UNDECIDED = "undecided"
 
+#: Every verdict `verdict_for_pair` can return, in most-decisive-first order.
+#: What `GET /review-queue?verdict=` validates against, so an unknown value
+#: is a 422 rather than a silently empty page.
+VERDICTS: tuple[str, ...] = (
+    VERDICT_AUTO_MERGE_RULE,
+    VERDICT_REJECT,
+    VERDICT_ML_AUTO_MERGE,
+    VERDICT_ML_HUMAN_REVIEW,
+    VERDICT_GATE_DROPPED,
+    VERDICT_UNDECIDED,
+)
+
 #: Verdicts that formed a merge edge feeding `assign_clusters`.
 MERGE_VERDICTS = frozenset({VERDICT_AUTO_MERGE_RULE, VERDICT_ML_AUTO_MERGE})
 #: Verdicts where the pipeline decisively declined to merge. Note these are

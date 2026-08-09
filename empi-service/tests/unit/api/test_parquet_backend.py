@@ -193,7 +193,7 @@ class TestBulkPublishMethods:
             "r1",
             [(
                 "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
-                None, None, "ml_human_review",
+                None, None, None, "ml_human_review",
             )],
         )
         backend.commit()
@@ -208,7 +208,7 @@ class TestBulkPublishMethods:
             "r1",
             [(
                 "P3", "P4", "NAME_DOB_ADDRESS", 0.97, "NAME_DOB_ADDRESS", "B7", "r1", "t1",
-                None, None, "ml_human_review",
+                None, None, None, "ml_human_review",
             )],
         )
         backend.commit()
@@ -222,13 +222,15 @@ class TestBulkPublishMethods:
             "r1",
             [(
                 "P1", "P2", None, None, None, "B3", "r1", "t0",
-                0.24, "human_review", "ml_human_review",
+                0.24, "human_review", 0.81, "ml_human_review",
             )],
         )
         backend.commit()
         df = backend._tables["review_candidate"]
         assert df.iloc[0]["ml_match_probability"] == 0.24
         assert df.iloc[0]["ml_classification_tier"] == "human_review"
+        # Separate axis from the matcher score — see the SQL backend's twin.
+        assert df.iloc[0]["gate_score"] == 0.81
 
     def test_replace_cleaned_attrs_full_rebuild(self, backend):
         backend.begin()

@@ -286,7 +286,8 @@ def _review_candidate_rows(
     pair to exactly one of `matches` / `rejects` / `non_matches`, and the
     later stages only annotate the third. `gate_results` (`None` on a run
     with no gate model — legacy FS-gate fallback or none available) supplies
-    the `gate_dropped` verdict; `ml_features` (`None` when no ML model
+    the `gate_dropped` verdict **and `gate_score`**, the P(plausible) that is
+    the only number a gate-dropped row carries; `ml_features` (`None` when no ML model
     scored the run) supplies `ml_auto_merge` / `ml_human_review` plus the
     `match_probability` the queue sorts and filters on, since most pairs
     have no rule confidence at all (see `sql_backend.list_review_candidates`'s
@@ -326,13 +327,28 @@ def _review_candidate_rows(
         ):
             ml_by_pair[frozenset((a, b))] = (float(proba), tier)
 
-    gate_tier_by_pair: dict[frozenset, str] = {}
+    # The gate's score is kept alongside its tier, not just the tier: for a
+    # pair the gate dropped it is the *only* number the published row
+    # carries (no rule fired, and Stage 4.5 never scored it), so without it
+    # the whole auto-rejected section is unrankable. It also explains an
+    # otherwise baffling queue row — a near-zero `ml_match_probability` on a
+    # pair the gate passed at 70% plausible is ambiguous, not a non-match.
+    gate_by_pair: dict[frozenset, tuple[str, float | None]] = {}
     if gate_results is not None and not gate_results.empty:
-        for a, b, tier in zip(
+        has_score = "score" in gate_results.columns
+        scores = (
+            gate_results["score"]
+            if has_score
+            else pd.Series([None] * len(gate_results), index=gate_results.index)
+        )
+        for a, b, tier, score in zip(
             gate_results[PATID_A], gate_results[PATID_B],
-            gate_results["predicted_tier"],
+            gate_results["predicted_tier"], scores,
         ):
-            gate_tier_by_pair[frozenset((a, b))] = tier
+            # `ClassificationResults.score` is nullable by contract.
+            gate_by_pair[frozenset((a, b))] = (
+                tier, None if pd.isna(score) else float(score)
+            )
 
     rows: list[tuple] = []
     patids: set[str] = set()
@@ -348,17 +364,18 @@ def _review_candidate_rows(
         )
         for a, b, blocks in zip(frame[PATID_A], frame[PATID_B], blocks_col):
             key = frozenset((a, b))
+            gate_tier, gate_score = gate_by_pair.get(key, (None, None))
             verdict = verdict_for_pair(
                 in_matches=pool == "matches",
                 in_rejects=pool == "rejects",
                 ml_tier=ml_by_pair.get(key, (None, None))[1],
-                gate_tier=gate_tier_by_pair.get(key),
+                gate_tier=gate_tier,
             )
             rule, conf, fired = evidence_by_pair.get(key, (None, None, None))
             ml_proba, ml_tier = ml_by_pair.get(key, (None, None))
             rows.append(
                 (a, b, rule, conf, fired, blocks, run_id, now,
-                 ml_proba, ml_tier, verdict)
+                 ml_proba, ml_tier, gate_score, verdict)
             )
             if verdict not in MERGE_VERDICTS and verdict not in REJECT_VERDICTS:
                 patids.add(a)

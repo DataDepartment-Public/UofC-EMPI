@@ -174,6 +174,13 @@ class ReviewQueueItem(BaseModel):
     fs_classification_tier: str | None = None
     ml_match_probability: float | None = None
     ml_classification_tier: str | None = None
+    #: The Stage-4.25 gate's `P(plausible)`. A different axis from
+    #: `ml_match_probability`, not a fallback for it: for a gate-dropped pair
+    #: this is the only score there is, and for a pair the gate passed it is
+    #: what explains why a near-zero match probability still warrants review.
+    #: `None` where the gate never scored the pair (a deterministic reject, an
+    #: ungated run) or the publish predates the column.
+    gate_score: float | None = None
     #: Which pipeline stage decided this pair (`src/api/pair_verdicts.py`).
     #: `None` on rows written by incremental scoring, which runs no model
     #: stage, and on rows from a publish predating the column.

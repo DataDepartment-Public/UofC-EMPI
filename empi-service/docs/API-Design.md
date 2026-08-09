@@ -132,6 +132,16 @@ CREATE TABLE review_candidate (
     fs_classification_tier  TEXT,
     ml_match_probability    REAL,       -- Stage 4.5 score, threaded in at batch publish
     ml_classification_tier  TEXT,
+    gate_score              REAL,       -- Stage 4.25 P(plausible), threaded in at batch
+                                        -- publish. A SEPARATE AXIS from
+                                        -- ml_match_probability, not a fallback for it:
+                                        -- for a gate-dropped pair it is the only score
+                                        -- there is (the matcher never saw the pair),
+                                        -- and for a pair the gate passed it is what
+                                        -- explains a near-zero match probability on a
+                                        -- row that still warrants review. NULL where
+                                        -- the gate never scored the pair (a
+                                        -- deterministic reject, an ungated run).
     verdict                 TEXT        -- which stage decided it: auto_merge_rule |
                                         -- reject | gate_dropped | ml_auto_merge |
                                         -- ml_human_review | undecided. NULL from
@@ -246,12 +256,33 @@ GET /records/{patid}/ssn-clean      → the pipeline-normalized SSN (`cleaned_at
                                        logged as its own `view_ssn_clean` audit action
                                        — the two are not interchangeable and not
                                        logged identically.
-GET /review-queue?confidence_min=&confidence_max=&bucket=&search=&page=&page_size=
+GET /review-queue?confidence_min=&confidence_max=&gate_score_min=&gate_score_max=
+                  &verdict=&bucket=&search=&page=&page_size=
                                      → candidate-grain review queue (one row per
-                                       candidate pair, not per cluster). Sorted/filtered
-                                       on COALESCE(confidence, ml_match_probability) —
+                                       candidate pair, not per cluster). Sorted on
+                                       COALESCE(confidence, ml_match_probability) —
                                        most pairs have no rule confidence, only an ML
                                        score.
+
+                                       Two independent score axes, matching the two
+                                       models:
+                                         confidence_min/max — the matcher side
+                                           (COALESCE(confidence, ml_match_probability)).
+                                           Max is INCLUSIVE.
+                                         gate_score_min/max — the Stage-4.25 gate's
+                                           P(plausible). Max is EXCLUSIVE, so adjacent
+                                           bands can't both claim a boundary value.
+                                       These are not two views of one number: a
+                                       gate-dropped pair has no matcher score at all
+                                       and is invisible to any confidence_* bound
+                                       (NULL >= x is never true), reachable only on the
+                                       gate axis.
+
+                                       `verdict` filters on src/api/pair_verdicts.py's
+                                       vocabulary exactly (422 on anything else). It is
+                                       the only filter that reaches pairs no model
+                                       scored — a deterministic `reject` carries no
+                                       number for any range to match.
 
                                        `bucket` is one of the four reviewer-facing
                                        sections (422 on anything else); unset returns

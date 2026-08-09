@@ -4,7 +4,21 @@ import clsx from "clsx";
 import type { ReviewQueueFilters } from "@/lib/api-client";
 import type { ReviewBucket, ReviewQueueItem } from "@/lib/schemas";
 import { formatRawDate, fullName, maskSsn } from "@/lib/format";
+import {
+  BAND_DEFS,
+  bandDef,
+  bandFilter,
+  bandFromFilters,
+  bandRangeLabel,
+  signalFor,
+  signalTooltip,
+  verdictLabel,
+  type LiveThresholds,
+  type SignalBand,
+} from "@/lib/pair-signal";
+import { useThresholds } from "@/lib/hooks";
 import { PageJumper } from "@/components/shared/PageJumper";
+import { SignalLegend } from "@/components/review/SignalLegend";
 
 /** The four sections, in the order they're shown. The two human sections
  * come first because that's where a reviewer's work is; the two pipeline
@@ -84,6 +98,14 @@ export function ReviewQueueList({
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const section =
     SECTIONS.find((s) => s.bucket === filters.bucket) ?? SECTIONS[0];
+  // Both bars are operator-tunable at runtime, so they're fetched rather
+  // than compiled in — see `SignalLegend`.
+  const t = useThresholds().data;
+  const thresholds: LiveThresholds = {
+    ml: t?.ml_auto_merge_threshold ?? null,
+    gate: t?.gate_threshold ?? null,
+  };
+  const selectedBand = bandFromFilters(filters, thresholds);
 
   return (
     <div className="card flex h-[calc(100vh-220px)] min-h-[520px] flex-col">
@@ -100,7 +122,19 @@ export function ReviewQueueList({
             <SegmentButton
               key={s.bucket}
               active={section.bucket === s.bucket}
-              onClick={() => set({ bucket: s.bucket })}
+              onClick={() =>
+                set({
+                  bucket: s.bucket,
+                  // The mirror of the band select's tab switch: a gate band
+                  // left applied while moving off Auto-rejected would empty
+                  // the list for a reason nothing on screen explains.
+                  ...(selectedBand &&
+                  bandDef(selectedBand).axis === "gate" &&
+                  s.bucket !== "auto_rejected"
+                    ? bandFilter(null, thresholds)
+                    : {}),
+                })
+              }
             >
               {s.label}
               <span className="ml-1 font-mono text-[10px] font-bold opacity-60">
@@ -121,27 +155,45 @@ export function ReviewQueueList({
           className="mb-2.5 w-full rounded-md border border-line px-2.5 py-1.5 text-sm outline-none focus:border-brand-blue"
         />
 
-        <div className="flex items-center gap-2 text-[11px] text-gray-2">
+        {/* `relative` is the positioning context for SignalLegend's panel —
+            see its docstring; it anchors to this row, not to the ⓘ. */}
+        <div className="relative flex items-center gap-2 text-[11px] text-gray-2">
+          {/* The ⓘ sits *beside* the label, not inside it: this span's
+              `uppercase` / `font-bold` / `whitespace-nowrap` would otherwise
+              inherit into the legend panel and stop its text wrapping. */}
           <span className="whitespace-nowrap font-bold uppercase tracking-wide text-gray">
-            Min. conf.
+            Confidence
           </span>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={filters.confidence_min != null ? Math.round(filters.confidence_min * 100) : 0}
+          <SignalLegend thresholds={thresholds} />
+          <select
+            value={selectedBand ?? ""}
             onChange={(e) => {
-              const pct = Number(e.target.value);
-              set({ confidence_min: pct > 0 ? pct / 100 : undefined });
+              const band = (e.target.value || null) as SignalBand | null;
+              // Every filter ANDs, so a gate band under the "Needs review"
+              // tab can never match anything: a pair the gate dropped is in
+              // Auto-rejected by construction (`pair_verdicts.bucket_for`).
+              // Follow the reviewer's intent and move the tab with them,
+              // rather than returning a silently empty list.
+              const axis = band ? bandDef(band).axis : null;
+              set({
+                ...bandFilter(band, thresholds),
+                ...(axis === "gate" ? { bucket: "auto_rejected" as const } : {}),
+              });
             }}
-            className="flex-1 accent-brand-blue"
-          />
-          <span className="w-8 font-mono">
-            {filters.confidence_min != null ? `${Math.round(filters.confidence_min * 100)}%` : "Any"}
-          </span>
+            className="flex-1 rounded-md border border-line bg-card px-2 py-1 text-[11px] outline-none focus:border-brand-blue"
+          >
+            <option value="">Any</option>
+            {BAND_DEFS.map((d) => (
+              <option key={d.band} value={d.band}>
+                {d.label}
+              </option>
+            ))}
+          </select>
         </div>
-        <div className="mt-1.5 text-[10.5px] text-gray">
-          ↓ Sorted by confidence (rule, or ML match score), highest first
+        <div className="mt-1.5 text-[10.5px] leading-snug text-gray">
+          {selectedBand
+            ? bandRangeLabel(selectedBand, thresholds)
+            : "↓ Strongest first — a rule's precision, or the ML matcher's score."}
         </div>
       </div>
 
@@ -224,12 +276,11 @@ function CandidateRow({
   selected: boolean;
   onClick: () => void;
 }) {
-  // No rule fired for most queue pairs (confidence null) — fall back to the
-  // Stage 4.5 ML matcher's score so the list isn't just showing "—" for the
-  // vast majority of rows. Matches the backend's own sort/filter fallback
-  // (sql_backend.list_review_candidates' COALESCE).
-  const displayScore = item.confidence ?? item.ml_match_probability;
-  const confPct = displayScore != null ? Math.round(displayScore * 100) : null;
+  // A band, not a percentage — see `lib/pair-signal.ts` for why a bare
+  // `confidence ?? ml_match_probability` in the merge-green misread as
+  // "1% likely the same person" on pairs the gate had passed as plausible.
+  const { band } = signalFor(item);
+  const def = bandDef(band);
   const inCluster = item.member_count_a > 1 || item.member_count_b > 1;
 
   return (
@@ -258,10 +309,28 @@ function CandidateRow({
             </span>
           )}
         </div>
+        {/* Why this pair is in front of you — the stage that routed it, and
+            the rule that fired if one did. The old row showed only a number,
+            which is what let a 1% ML score read as a verdict of its own. */}
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10.5px] text-gray">
+          <span className="font-semibold">{verdictLabel(item.verdict)}</span>
+          {item.match_rule && (
+            <>
+              <span>·</span>
+              <span className="font-mono">{item.match_rule}</span>
+            </>
+          )}
+        </div>
       </div>
       <div className="flex flex-shrink-0 flex-col items-end gap-1">
-        <span className="text-[13px] font-extrabold tabular-nums text-status-auto">
-          {confPct != null ? `${confPct}%` : "—"}
+        <span
+          title={signalTooltip(item)}
+          className={clsx(
+            "rounded-full px-1.5 py-0.5 text-[9.5px] font-bold uppercase",
+            def.tone,
+          )}
+        >
+          {def.label}
         </span>
         <OutcomeBadge item={item} />
       </div>

@@ -130,6 +130,13 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     fs_classification_tier TEXT,
     ml_match_probability   REAL,
     ml_classification_tier TEXT,
+    -- The Stage-4.25 gate's P(plausible). Recorded for every pair the gate
+    -- scored, dropped ones included -- it is the only number an auto-rejected
+    -- row carries, and the reason a pair with a near-zero
+    -- `ml_match_probability` can still be worth a human's time. NULL where the
+    -- gate never scored the pair (a deterministic reject, an ungated run) and
+    -- on rows from a publish that predates the column.
+    gate_score   REAL,
     -- Which stage decided this pair, from `src/api/pair_verdicts.py`. NULL on
     -- rows written by incremental scoring (no model stage runs there) and on
     -- rows from a publish that predates the column; both read as
@@ -290,6 +297,11 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "ml_match_probability": "REAL",
         "ml_classification_tier": "TEXT",
         "verdict": "TEXT",
+        # All-NULL on an existing `empi.db` until the run is re-published
+        # (`python -m src.api.ingest.publish_local --run-id <run_id>`).
+        # Until then the two gate bands can't be told apart and the queue
+        # shows both as `Implausible` — degraded, not broken.
+        "gate_score": "REAL",
     },
     "audit_log": {
         "related_patids": "TEXT",
@@ -513,14 +525,15 @@ _REVIEW_CANDIDATE_INSERT_SQL = """
     INSERT INTO review_candidate
         (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
          run_id, created_utc, ml_match_probability, ml_classification_tier,
-         verdict)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         gate_score, verdict)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
         match_rule=excluded.match_rule, confidence=excluded.confidence,
         evidence=excluded.evidence, source_blocks=excluded.source_blocks,
         created_utc=excluded.created_utc,
         ml_match_probability=excluded.ml_match_probability,
         ml_classification_tier=excluded.ml_classification_tier,
+        gate_score=excluded.gate_score,
         verdict=excluded.verdict
 """
 
@@ -669,6 +682,9 @@ def list_review_candidates(
     *,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
+    gate_score_min: float | None = None,
+    gate_score_max: float | None = None,
+    verdict: str | None = None,
     bucket: str | None = None,
     search: str | None = None,
     patid_a: str | None = None,
@@ -705,6 +721,19 @@ def list_review_candidates(
     filtering on `rc.confidence` alone would hide the entire ML-scored
     majority (`NULL >= x` is never true in SQL).
 
+    `gate_score_min`/`gate_score_max` bound `rc.gate_score` — the Stage-4.25
+    gate's P(plausible). A separate axis from the confidence bounds above,
+    not a fallback for them: the gate answers "is this worth a human's
+    time?" while the matcher answers "should this merge unattended?", and a
+    pair can score near zero on the second while the gate kept it. These are
+    what the dashboard's two reject bands are built on, since a gate-dropped
+    pair carries no other number.
+
+    `verdict` filters on `src/api/pair_verdicts.py`'s vocabulary exactly —
+    the one filter that reaches the pairs with no score at all (a
+    deterministic `reject` was never scored by any model), which no range
+    bound can select for.
+
     `patid_a`/`patid_b` (the router canonicalizes so `a < b` before calling)
     narrow to one exact pair — a deep link from elsewhere in the UI (e.g. a
     cluster's comparison history) knows which pair it wants and shouldn't
@@ -724,6 +753,20 @@ def list_review_candidates(
     if confidence_max is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) <= ?")
         params.append(confidence_max)
+    if gate_score_min is not None:
+        where.append("rc.gate_score >= ?")
+        params.append(gate_score_min)
+    if gate_score_max is not None:
+        # Half-open `[min, max)`, so the dashboard's adjacent gate bands
+        # can't both claim a score sitting exactly on their shared edge.
+        # `confidence_max` above is inclusive and predates this; its bands
+        # can double-claim an exact boundary value, which for a float coming
+        # out of a model is rare enough not to be worth an API break.
+        where.append("rc.gate_score < ?")
+        params.append(gate_score_max)
+    if verdict is not None:
+        where.append("rc.verdict = ?")
+        params.append(verdict)
     tokens = search_tokens(search)
     if tokens:
         # All tokens must land on one side of the pair, so a query can't be

@@ -246,7 +246,7 @@ class TestReviewCandidate:
             conn, "r1",
             [(
                 "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
-                None, None, "ml_human_review",
+                None, None, None, "ml_human_review",
             )],
         )
         conn.commit()
@@ -260,18 +260,22 @@ class TestReviewCandidate:
             conn, "r1",
             [(
                 "P1", "P2", None, None, None, "B3", "r1", "t0",
-                0.24, "human_review", "ml_human_review",
+                0.24, "human_review", 0.81, "ml_human_review",
             )],
         )
         conn.commit()
         rows = sql_backend.review_candidates_for_patid(conn, "P1")
         assert rows[0]["ml_match_probability"] == 0.24
         assert rows[0]["ml_classification_tier"] == "human_review"
+        # The gate's score rides along on its own axis — a pair can be near
+        # zero on the matcher and still highly plausible to the gate, and
+        # for a gate-dropped pair this is the only score there is.
+        assert rows[0]["gate_score"] == 0.81
 
     def test_replace_clears_stale_rows_for_same_run(self, conn):
         sql_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None)],
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None, None)],
         )
         conn.commit()
         sql_backend.replace_review_candidates_for_run(conn, "r1", [])  # nothing this time
@@ -281,7 +285,7 @@ class TestReviewCandidate:
     def test_patids_with_review_candidates(self, conn):
         sql_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None)],
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None, None)],
         )
         conn.commit()
         assert sql_backend.patids_with_review_candidates(conn) == {"P1", "P2"}

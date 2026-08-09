@@ -116,6 +116,18 @@ class Settings(BaseSettings):
         "src/api/backends/postgres_backend.py authenticates with a token "
         "from DefaultAzureCredential, never a stored secret.",
     )
+    cluster_pairs_max_members: int = Field(
+        default=200,
+        description="Largest cluster GET /clusters/{mid}/pairs will trace "
+        "pairwise. That view enumerates every unordered pair of members and "
+        "then walks the merge graph for the ones that formed no edge of their "
+        "own, so its cost grows faster than n^2: a several-hundred-member hub "
+        "cluster (one common name plus a shared DOB) would spend minutes of "
+        "blocking CPU and return hundreds of MB on a single GET. Above this "
+        "many members the route returns members + external_pairs with "
+        "pairs_truncated=true instead. 200 members is 19,900 pairs, a few MB "
+        "and tens of milliseconds.",
+    )
 
     # ── Defaults ────────────────────────────────────────────────────────────
     raw_input: Path = _DATA / "raw" / "MDM_Population.csv"

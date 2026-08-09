@@ -138,11 +138,12 @@ function ExplainPageContent() {
             Feature contributions (SHAP)
           </h4>
           <p className="mb-4 text-xs text-gray">
-            Exact TreeSHAP contributions from the{" "}
+            How the{" "}
             {explanation.model === "ml_matcher" ? "ML matcher" : "non-match gate"}{" "}
-            model, in log-odds. The dashed line marks the model&apos;s base
-            rate; each bar shows how one feature moved the decision from
-            there.
+            model reached {Math.round(explanation.decision.score * 100)}%
+            confidence. The dashed line is where it starts before looking at
+            this pair; each bar shows how much one field moved the confidence
+            from there.
           </p>
           <ShapWaterfall explanation={explanation} />
         </div>

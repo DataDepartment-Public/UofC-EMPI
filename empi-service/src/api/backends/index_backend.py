@@ -108,6 +108,7 @@ class IndexBackend(Protocol):
         updated_before: str | None = None,
         confidence_min: float | None = None,
         confidence_max: float | None = None,
+        min_members: int | None = None,
         sort: str | None = None,
         page: int = 1,
         page_size: int = 50,
@@ -121,13 +122,23 @@ class IndexBackend(Protocol):
         *,
         confidence_min: float | None = None,
         confidence_max: float | None = None,
-        reviewed: bool | None = None,
+        gate_score_min: float | None = None,
+        gate_score_max: float | None = None,
+        verdict: str | None = None,
+        bucket: str | None = None,
         search: str | None = None,
+        patid_a: str | None = None,
+        patid_b: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[dict], int]: ...
 
+    def review_bucket_counts(self) -> dict[str, int]: ...
+
     # ── Reviewer audit log (src/api/routers/audit.py) ───────────────────────
+    def record_pair_decisions(self, rows: list[tuple]) -> None: ...
+    def clear_pair_decisions_for_audit(self, audit_id: int) -> None: ...
+
     def insert_audit_log(
         self,
         *,
@@ -170,7 +181,16 @@ class SqlIndexBackend:
         self._store = store_module
 
     def begin(self) -> None:
-        self.conn.execute("BEGIN")
+        # Delegated rather than a hardcoded `BEGIN`, because the right
+        # statement is dialect-specific: SQLite needs `BEGIN IMMEDIATE` here
+        # (see `sql_backend.begin` for why a deferred one deadlocks), and
+        # Postgres has no such modifier. Falls back to plain `BEGIN` for a
+        # store module that predates the function.
+        begin = getattr(self._store, "begin", None)
+        if begin is None:
+            self.conn.execute("BEGIN")
+        else:
+            begin(self.conn)
 
     def commit(self) -> None:
         self.conn.commit()
@@ -263,14 +283,15 @@ class SqlIndexBackend:
         *,
         search=None, origin=None, is_merged=None, birth_date=None,
         ssn_last4=None, updated_after=None, updated_before=None,
-        confidence_min=None, confidence_max=None, sort=None,
-        page=1, page_size=50,
+        confidence_min=None, confidence_max=None, min_members=None,
+        sort=None, page=1, page_size=50,
     ) -> tuple[list[dict], int]:
         return self._store.list_entities(
             self.conn, search=search, origin=origin, is_merged=is_merged,
             birth_date=birth_date, ssn_last4=ssn_last4,
             updated_after=updated_after, updated_before=updated_before,
             confidence_min=confidence_min, confidence_max=confidence_max,
+            min_members=min_members,
             sort=sort, page=page, page_size=page_size,
         )
 
@@ -286,13 +307,28 @@ class SqlIndexBackend:
     def list_review_candidates(
         self,
         *,
-        confidence_min=None, confidence_max=None, reviewed=None, search=None,
+        confidence_min=None, confidence_max=None,
+        gate_score_min=None, gate_score_max=None, verdict=None,
+        bucket=None, search=None,
+        patid_a=None, patid_b=None,
         page=1, page_size=50,
     ) -> tuple[list[dict], int]:
         return self._store.list_review_candidates(
             self.conn, confidence_min=confidence_min, confidence_max=confidence_max,
-            reviewed=reviewed, search=search, page=page, page_size=page_size,
+            gate_score_min=gate_score_min, gate_score_max=gate_score_max,
+            verdict=verdict,
+            bucket=bucket, search=search, patid_a=patid_a, patid_b=patid_b,
+            page=page, page_size=page_size,
         )
+
+    def review_bucket_counts(self) -> dict[str, int]:
+        return self._store.review_bucket_counts(self.conn)
+
+    def record_pair_decisions(self, rows: list[tuple]) -> None:
+        self._store.record_pair_decisions(self.conn, rows)
+
+    def clear_pair_decisions_for_audit(self, audit_id: int) -> None:
+        self._store.clear_pair_decisions_for_audit(self.conn, audit_id)
 
     def insert_audit_log(
         self, *, ts_utc, user, action, patids, mid, prev_state, next_state, run_id,

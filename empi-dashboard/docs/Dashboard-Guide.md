@@ -33,17 +33,20 @@ top-level tab.
 | Surface | Purpose |
 |---------|---------|
 | **Dashboard** (tab) | KPIs, summary metric cards, and visual charts **only** — no interactive workflows |
-| **Review Queue** (tab) | Candidate-grain triage of pending review pairs only — two-panel layout (queue left, dynamic explanation right); see §5 |
-| **Patient Registry** (tab, `/dataset` route) | The final, resolved patient list **only** — one row per distinct patient, no in-progress candidates; see §3 |
+| **Review Queue** (tab) | Candidate-grain triage across four sections — the two the reviewer works (needs review, reviewed) and the two the pipeline decided unattended (auto-merged, auto-rejected); two-panel layout (queue left, dynamic explanation right); see §5 |
+| **Patient Registry** (tab, `/dataset` route) | The full patient list, one row per distinct patient — resolved clusters by default, plus (under its "All" toggle) singleton records still pending review, findable but not actionable here; see §3 |
 | **Admin** (tab, `/admin` route) | Live ML decision-threshold tuning — operator configuration, not a reviewer workflow; see §7 |
 | **Model Explanation** (sub-page) | Per-pair "why was this a match?" detail; reached from a Patient Registry row, returns to the reviewer's prior Patient Registry view (search/filter/page), not necessarily that one row |
 
 Patient Registry and Review Queue split the old single Dataset tab's two
 concerns cleanly: Review Queue is where a reviewer decides on a pending
-candidate (merge or dismiss); Patient Registry is where anyone browses the
-settled result. A record only appears in one place at a time — once merged
-or dismissed, it disappears from the Review Queue and (if applicable) shows
-up as a resolved entry in Patient Registry.
+candidate (merge or dismiss); Patient Registry is where anyone browses (and
+searches) the patient list, settled or not. A still-pending singleton is
+findable in both places at once — under Patient Registry's "All" toggle,
+badged **Needs review**, and in the Review Queue's "Needs review" section —
+but only decidable from the Review Queue. Once merged or dismissed, it
+disappears from the Review Queue and shows up as a resolved entry in
+Patient Registry's default view too.
 
 ---
 
@@ -91,20 +94,24 @@ lives on the Patient Registry tab (§3).
 
 ## 3. Patient Registry Page — Final, Resolved Patients Only
 
-The Patient Registry (`/dataset` route) shows **only resolved clusters** —
-automatically matched, manually merged, or standalone with nothing pending
-(`origin` != `review`). Anything still awaiting a match decision lives
-entirely on the Review Queue tab (§5); a data steward browsing the registry
-should never see in-progress work. Merge/dismiss actions on pending
-candidates happen on Review Queue — the only action available here is
-**Unmerge**, for correcting an already-final cluster that turns out to be
-wrong.
+The Patient Registry (`/dataset` route) defaults to **resolved clusters
+only** — automatically matched, manually merged, or standalone with nothing
+pending. Its "2+ records" / "All" toggle (an implementation-level
+`min_members` filter, not an `origin` one) is what actually keeps a
+pending-review candidate out of the default view — every such candidate is
+a singleton, so it's excluded there regardless of origin, and only surfaces
+under "All", badged **Needs review**, so a data steward searching by
+name/DOB/PATID can actually *find* a record even while it's still pending.
+That's the one exception to "resolved only": finding it here is not
+deciding it — merge/dismiss on a pending candidate only ever happens on the
+Review Queue tab (§5). The only action available on an already-final
+cluster here is **Unmerge**, for correcting one that turns out to be wrong.
 
 ### 3.1 Registry view
 
 | ID | Requirement |
 |----|-------------|
-| FR-18 | Display the current, resolved master patient list (not raw source data) — excludes anything still in the Review Queue. |
+| FR-18 | Display the current master patient list (not raw source data). Under the default "2+ records" view, this is exactly the resolved list — automatically matched, manually merged, or standalone with nothing pending; a pending-review candidate is always a singleton so it's excluded here regardless. The "All" toggle additionally surfaces those singleton pending candidates, badged **Needs review**, so they're findable by search — deciding one (merge/dismiss) still only happens on the Review Queue tab. |
 | FR-19 | Include every resolved status: automatically matched, manually merged, and standalone records with no pending candidates. |
 | FR-20 | Render every patient as an expandable row, whether it folds in multiple entries or stands alone. |
 | FR-21 | Expanding a row reveals its constituent entries — the raw records folded into this final patient — for traceability, not pending candidates. |
@@ -175,13 +182,15 @@ could work through top to bottom.
 | ID | Requirement |
 |----|-------------|
 | FR-42 | Two-panel layout: a candidate list on the left, a dynamic detail/explanation panel on the right. Selecting a candidate updates the right panel in place — no page navigation. |
-| FR-43 | The left panel is **candidate-grain**: one row per pending pair (`patid_a`/`patid_b`), not per cluster — the same cluster can surface multiple rows if it has multiple pending candidates. |
+| FR-43 | The left panel is **candidate-grain**: one row per candidate pair (`patid_a`/`patid_b`), not per cluster — the same cluster can surface multiple rows if it has multiple candidates. |
 | FR-44 | Left panel shows, per row: both patients' names, birthdate, masked SSN, a match-confidence percentage (rule confidence, falling back to the ML matcher's score when no rule fired — no separate rule/ML-tier tag), and a "+N in cluster" indicator when either side already belongs to a multi-member cluster. |
-| FR-45 | Left panel supports: a **Needs review** / **Already reviewed** toggle, a confidence-range filter, and a name/DOB search. Default sort is confidence descending, with unconfirmed (no-rule) candidates sorted last. |
-| FR-46 | A candidate counts as "reviewed" once it is either merged (both sides now share a master record) or explicitly dismissed (FR-49). |
-| FR-47 | Right panel shows: both patients' names and de-emphasized IDs, a confidence/rule/predicted-class/cluster-context summary, a **pipeline trail** (FR-48), and the full field-by-field feature comparison (§4's FR-37 table). |
-| FR-48 | The pipeline trail shows the value's path through the pipeline: Raw → Cleaned → Deterministic rule → ML signal (labeled **Non-match gate** or **ML matcher**, whichever actually scored the pair). All four stages show real data. The ML signal stage reads `GET /explanations/{model}/{patid_a}/{patid_b}` and shows the model's score, tier, and run id; a pair the deterministic rules resolved without reaching either model (or that the gate dropped before the ML matcher saw it) shows an honest "Not scored by the ML pipeline" state — never a fabricated score. The Fellegi-Sunter/Splink matcher (Stage 4 in the backend pipeline) is intentionally not part of this trail — it remains an audit-only candidate/feature generator kept in the backend for lineage, not a reviewer-facing decision signal (see `empi-service/docs/FS-Matcher-Production-Guide.md`). |
-| FR-49 | A **"Not a match"** action lets a reviewer explicitly dismiss a candidate as a false positive. Recorded as an audit-log entry (`action=dismiss`); the candidate moves to "Already reviewed" and does not reappear in the default queue. |
+| FR-45 | Left panel supports: **four section tabs** (FR-45a), a confidence-range filter, and a name/DOB search. Default sort is confidence descending, with unconfirmed (no-rule) candidates sorted last. Each tab carries a pair count, taken from the whole index rather than the filtered list so the counts stay stable while you narrow what's under them. |
+| FR-45a | The four sections are **Needs review** (no stage resolved it and no reviewer has ruled), **Reviewed** (a reviewer merged or dismissed this exact pair), **Auto-merged** (the pipeline merged the two records — a deterministic rule, the ML matcher, or clustering transitively), and **Auto-rejected** (the deterministic reject rules or the Stage-4.25 non-match gate declined it). The first two are the reviewer's work; the last two exist so the pipeline's unattended decisions are auditable, and are **overridable** (FR-46a). Served by `GET /review-queue?bucket=`; a pair sits in exactly one. |
+| FR-46 | A candidate counts as **Reviewed** only when a human ruled on that exact pair — never merely because its two records ended up sharing a master record. The pipeline merges most pairs on its own, and those belong in **Auto-merged**; conflating the two was the original defect this split fixes. |
+| FR-46a | Both pipeline sections are overridable in place. On an **Auto-rejected** pair, **"Merge anyway"** merges it (`POST /audit/merge`). On an **Auto-merged** pair, **"Not a match — split them"** actually splits the entity (`POST /audit/dismiss`, which unmerges the B-side first) and reports the new master record in the confirmation toast. Either way the pair moves to **Reviewed** and its original pipeline verdict is preserved and still shown — the reviewer overruled the decision, they didn't erase it. Both are undoable from the audit log. |
+| FR-47 | Right panel shows: both patients' names and de-emphasized IDs, a **reviewed banner** (shown only for a pair a human ruled on, naming their decision and the pipeline verdict it overrode — every other section is fully explained by the trail itself), a confidence/rule/outcome/cluster-context summary, a **pipeline trail** (FR-48), and the full field-by-field feature comparison (§4's FR-37 table). |
+| FR-48 | The pipeline trail shows the value's path through **five** stages: Raw → Cleaned → Deterministic rule → **Non-match gate** → **ML matcher**. All five show real data, for every pair in every section. The two model stages read `GET /explanations/{model}/{patid_a}/{patid_b}` — the models' persisted scores — and are separate columns because they answer different questions on different scales: the gate reports **P(plausible)** and whether it passed the pair on or dropped it; the matcher reports **P(confident match)** and whether that cleared the auto-merge threshold. (They were one "ML signal" column until reviewers couldn't tell which question a percentage answered, and a gate-dropped pair read as merely unscored rather than deliberately discarded with a number attached.) Either stage can legitimately be absent, and the trail says which and why — "the gate dropped this pair", "an auto-merge rule decided this at stage 3" — never a fabricated score. The Fellegi-Sunter/Splink matcher (Stage 4 in the backend pipeline) is intentionally not part of this trail — it remains an audit-only candidate/feature generator kept in the backend for lineage, not a reviewer-facing decision signal (see `empi-service/docs/FS-Matcher-Production-Guide.md`). |
+| FR-49 | A **"Not a match"** action lets a reviewer explicitly dismiss a candidate as a false positive. Recorded as an audit-log entry (`action=dismiss`) plus a per-pair reviewer decision; the candidate moves to **Reviewed** and does not reappear in the default queue. On a pair that is currently merged it also splits the entity (FR-46a). |
 | FR-50 | A **"Search manually for a different record"** action lets a reviewer propose a match blocking never surfaced as a candidate, sharing the same search/compare/merge flow as FR-27. |
 | FR-51 | SSN fields support a reveal-in-place toggle (`SsnReveal.tsx`), sourced from `GET /records/{patid}/ssn-clean` — the pipeline-normalized SSN, a **separate** endpoint from the "View raw data" drawer's `GET /records/{patid}/raw`, preferred specifically so a reviewer sanity-checks against the value the matching engine actually trusted, not raw source-text noise. Every fetch from either endpoint is written to the backend audit log, but as two distinct actions (`view_ssn_clean` vs `view_raw`) for PHI-access accountability; these are compliance records, not reviewer decisions, so they're excluded from the Merge audit log table above (§3.3) and only queryable directly against the database. |
 

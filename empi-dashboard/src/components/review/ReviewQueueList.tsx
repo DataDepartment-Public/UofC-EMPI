@@ -2,19 +2,76 @@
 
 import clsx from "clsx";
 import type { ReviewQueueFilters } from "@/lib/api-client";
-import type { ReviewQueueItem } from "@/lib/schemas";
-import { fullName, maskSsn } from "@/lib/format";
+import type { ReviewBucket, ReviewQueueItem } from "@/lib/schemas";
+import {
+  BAND_DEFS,
+  bandDef,
+  bandFilter,
+  bandFromFilters,
+  bandRangeLabel,
+  bucketBadge,
+  pipelineOutcome,
+  signalFor,
+  signalTooltip,
+  type LiveThresholds,
+  type SignalBand,
+} from "@/lib/pair-signal";
+import { useThresholds } from "@/lib/hooks";
+import { PageJumper } from "@/components/shared/PageJumper";
+import { SignalLegend } from "@/components/review/SignalLegend";
+
+/** The four sections, in the order they're shown. The two human sections
+ * come first because that's where a reviewer's work is; the two pipeline
+ * sections are there to be audited, not worked through.
+ *
+ * `blurb` is the one-line answer to "why is this pair here?", which matters
+ * most for the pipeline sections — nothing else on the row explains that the
+ * system decided it unattended. */
+const SECTIONS: {
+  bucket: ReviewBucket;
+  label: string;
+  empty: string;
+  blurb: string;
+}[] = [
+  {
+    bucket: "needs_review",
+    label: "Needs review",
+    empty: "Nothing needs review right now.",
+    blurb: "Pairs the pipeline couldn't decide. Waiting on you.",
+  },
+  {
+    bucket: "reviewed",
+    label: "Reviewed",
+    empty: "No pairs have been reviewed yet.",
+    blurb: "Pairs you or another reviewer has ruled on.",
+  },
+  {
+    bucket: "auto_merged",
+    label: "Auto-merged",
+    empty: "The pipeline merged nothing on its own.",
+    blurb:
+      "Merged by a deterministic rule or the ML matcher, with no reviewer involved.",
+  },
+  {
+    bucket: "auto_rejected",
+    label: "Auto-rejected",
+    empty: "The pipeline rejected nothing on its own.",
+    blurb:
+      "Discarded by the reject rules or the non-match gate, with no reviewer involved.",
+  },
+];
 
 /** Left panel of the Review Queue's two-panel layout: the candidate-grain
- * list itself (one row per pending pair, not per cluster), plus its own
- * filters/sort/segmented reviewed-state control. Selecting a row never
- * navigates — it just updates the caller's `selectedKey` state, which
- * `ReviewCandidateDetail` re-renders from. */
+ * list itself (one row per candidate pair, not per cluster), plus its
+ * section tabs and filters/sort. Selecting a row never navigates — it just
+ * updates the caller's `selectedKey` state, which `ReviewCandidateDetail`
+ * re-renders from. */
 export function ReviewQueueList({
   filters,
   onFiltersChange,
   items,
   total,
+  bucketCounts,
   isLoading,
   isError,
   selectedKey,
@@ -24,6 +81,10 @@ export function ReviewQueueList({
   onFiltersChange: (next: ReviewQueueFilters) => void;
   items: ReviewQueueItem[];
   total: number;
+  /** Whole-index pair count per section — deliberately not affected by the
+   * search/confidence filters, so the tab counts stay a stable picture of
+   * the queue while you narrow the list under them. */
+  bucketCounts: Record<string, number>;
   isLoading: boolean;
   isError: boolean;
   selectedKey: string | null;
@@ -35,27 +96,56 @@ export function ReviewQueueList({
   const pageSize = filters.page_size ?? 30;
   const page = filters.page ?? 1;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const section =
+    SECTIONS.find((s) => s.bucket === filters.bucket) ?? SECTIONS[0];
+  // Both bars are operator-tunable at runtime, so they're fetched rather
+  // than compiled in — see `SignalLegend`.
+  const t = useThresholds().data;
+  const thresholds: LiveThresholds = {
+    ml: t?.ml_auto_merge_threshold ?? null,
+    gate: t?.gate_threshold ?? null,
+  };
+  const selectedBand = bandFromFilters(filters, thresholds);
 
   return (
     <div className="card flex h-[calc(100vh-220px)] min-h-[520px] flex-col">
       <div className="border-b border-line px-4 pt-3.5 pb-3">
         <div className="mb-2.5 flex items-center justify-between">
-          <h3 className="text-[15px] font-bold text-ink-2">
-            {filters.reviewed ? "Already reviewed" : "Needs review"}
-          </h3>
+          <h3 className="text-[15px] font-bold text-ink-2">{section.label}</h3>
           <span className="rounded-full bg-brand-blue/10 px-2 py-0.5 text-[11px] font-bold text-brand-blue">
             {total.toLocaleString()} pair{total === 1 ? "" : "s"}
           </span>
         </div>
 
-        <div className="mb-2.5 flex rounded-md border border-line bg-bg p-0.5">
-          <SegmentButton active={!filters.reviewed} onClick={() => set({ reviewed: false })}>
-            Needs review
-          </SegmentButton>
-          <SegmentButton active={!!filters.reviewed} onClick={() => set({ reviewed: true })}>
-            Already reviewed
-          </SegmentButton>
+        <div className="mb-1.5 grid grid-cols-2 gap-0.5 rounded-md border border-line bg-bg p-0.5">
+          {SECTIONS.map((s) => (
+            <SegmentButton
+              key={s.bucket}
+              active={section.bucket === s.bucket}
+              onClick={() =>
+                set({
+                  bucket: s.bucket,
+                  // The mirror of the band select's tab switch: a gate band
+                  // left applied while moving off Auto-rejected would empty
+                  // the list for a reason nothing on screen explains.
+                  ...(selectedBand &&
+                  bandDef(selectedBand).axis === "gate" &&
+                  s.bucket !== "auto_rejected"
+                    ? bandFilter(null, thresholds)
+                    : {}),
+                })
+              }
+            >
+              {s.label}
+              <span className="ml-1 font-mono text-[10px] font-bold opacity-60">
+                {(bucketCounts[s.bucket] ?? 0).toLocaleString()}
+              </span>
+            </SegmentButton>
+          ))}
         </div>
+        <p className="mb-2.5 text-[10.5px] leading-snug text-gray">
+          {section.blurb}
+        </p>
 
         <input
           type="text"
@@ -65,27 +155,45 @@ export function ReviewQueueList({
           className="mb-2.5 w-full rounded-md border border-line px-2.5 py-1.5 text-sm outline-none focus:border-brand-blue"
         />
 
-        <div className="flex items-center gap-2 text-[11px] text-gray-2">
+        {/* `relative` is the positioning context for SignalLegend's panel —
+            see its docstring; it anchors to this row, not to the ⓘ. */}
+        <div className="relative flex items-center gap-2 text-[11px] text-gray-2">
+          {/* The ⓘ sits *beside* the label, not inside it: this span's
+              `uppercase` / `font-bold` / `whitespace-nowrap` would otherwise
+              inherit into the legend panel and stop its text wrapping. */}
           <span className="whitespace-nowrap font-bold uppercase tracking-wide text-gray">
-            Min. conf.
+            Confidence
           </span>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={filters.confidence_min != null ? Math.round(filters.confidence_min * 100) : 0}
+          <SignalLegend thresholds={thresholds} />
+          <select
+            value={selectedBand ?? ""}
             onChange={(e) => {
-              const pct = Number(e.target.value);
-              set({ confidence_min: pct > 0 ? pct / 100 : undefined });
+              const band = (e.target.value || null) as SignalBand | null;
+              // Every filter ANDs, so a gate band under the "Needs review"
+              // tab can never match anything: a pair the gate dropped is in
+              // Auto-rejected by construction (`pair_verdicts.bucket_for`).
+              // Follow the reviewer's intent and move the tab with them,
+              // rather than returning a silently empty list.
+              const axis = band ? bandDef(band).axis : null;
+              set({
+                ...bandFilter(band, thresholds),
+                ...(axis === "gate" ? { bucket: "auto_rejected" as const } : {}),
+              });
             }}
-            className="flex-1 accent-brand-blue"
-          />
-          <span className="w-8 font-mono">
-            {filters.confidence_min != null ? `${Math.round(filters.confidence_min * 100)}%` : "Any"}
-          </span>
+            className="flex-1 rounded-md border border-line bg-card px-2 py-1 text-[11px] outline-none focus:border-brand-blue"
+          >
+            <option value="">Any</option>
+            {BAND_DEFS.map((d) => (
+              <option key={d.band} value={d.band}>
+                {d.label}
+              </option>
+            ))}
+          </select>
         </div>
-        <div className="mt-1.5 text-[10.5px] text-gray">
-          ↓ Sorted by confidence (rule, or ML match score), highest first
+        <div className="mt-1.5 text-[10.5px] leading-snug text-gray">
+          {selectedBand
+            ? bandRangeLabel(selectedBand, thresholds)
+            : "↓ Strongest first — a rule's precision, or the ML matcher's score."}
         </div>
       </div>
 
@@ -97,11 +205,7 @@ export function ReviewQueueList({
           </p>
         )}
         {!isLoading && !isError && items.length === 0 && (
-          <p className="p-3 text-xs text-gray">
-            {filters.reviewed
-              ? "No reviewed candidates yet."
-              : "Nothing needs review right now."}
-          </p>
+          <p className="p-3 text-xs text-gray">{section.empty}</p>
         )}
         {items.map((item) => {
           const key = `${item.patid_a}-${item.patid_b}`;
@@ -124,9 +228,11 @@ export function ReviewQueueList({
         >
           ← Prev
         </button>
-        <span className="text-[11px] text-gray">
-          Page {page} of {totalPages}
-        </span>
+        <PageJumper
+          page={page}
+          totalPages={totalPages}
+          onJump={(next) => onFiltersChange({ ...filters, page: next })}
+        />
         <button
           disabled={page >= totalPages}
           onClick={() => onFiltersChange({ ...filters, page: page + 1 })}
@@ -170,49 +276,74 @@ function CandidateRow({
   selected: boolean;
   onClick: () => void;
 }) {
-  // No rule fired for most queue pairs (confidence null) — fall back to the
-  // Stage 4.5 ML matcher's score so the list isn't just showing "—" for the
-  // vast majority of rows. Matches the backend's own sort/filter fallback
-  // (sql_backend.list_review_candidates' COALESCE).
-  const displayScore = item.confidence ?? item.ml_match_probability;
-  const confPct = displayScore != null ? Math.round(displayScore * 100) : null;
-  const inCluster = item.member_count_a > 1 || item.member_count_b > 1;
+  // A band, not a percentage — see `lib/pair-signal.ts` for why a bare
+  // `confidence ?? ml_match_probability` in the merge-green misread as
+  // "1% likely the same person" on pairs the gate had passed as plausible.
+  const { band } = signalFor(item);
+  const def = bandDef(band);
+  const state = bucketBadge(item);
+  const outcome = pipelineOutcome(item);
 
   return (
     <button
       onClick={onClick}
       className={clsx(
-        "mb-1 flex w-full items-start justify-between gap-3 rounded-md border px-3 py-2.5 text-left",
+        "mb-1 flex w-full flex-col gap-1.5 rounded-md border px-3 py-2.5 text-left",
         selected
           ? "border-brand-blue bg-brand-blue/5"
           : "border-transparent hover:bg-bg",
       )}
     >
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[13px] font-bold text-ink-2">
-          {fullName(item.patient_a.first_name, item.patient_a.last_name)}
-          <span className="mx-1 font-medium text-gray">vs</span>
-          {fullName(item.patient_b.first_name, item.patient_b.last_name)}
-        </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-2">
-          <span>{item.patient_a.birth_date ?? "—"}</span>
-          <span>·</span>
-          <span>{maskSsn(item.patient_a.ssn_last4)}</span>
-          {inCluster && (
-            <span className="rounded-full bg-bg px-1.5 py-0.5 text-[9.5px] font-bold text-gray-2">
-              +{Math.max(item.member_count_a, item.member_count_b) - 1} in cluster
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="flex flex-shrink-0 flex-col items-end gap-1">
-        <span className="text-[13px] font-extrabold tabular-nums text-status-auto">
-          {confPct != null ? `${confPct}%` : "—"}
+      {/* Three columns, two rows: each record's name stacks vertically on its
+          own side, with the two badges between them. Reading down a column
+          gives one record; reading across a row pairs first-with-first and
+          last-with-last, which is how a reviewer actually compares two names.
+          The centre column is `auto` so a long name never squeezes a badge. */}
+      <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-2 gap-y-0.5">
+        <span className="truncate text-[13px] font-bold text-ink-2">
+          {item.patient_a.first_name || "—"}
         </span>
-        {item.reviewed && (
-          <span className="rounded-full bg-status-auto/15 px-1.5 py-0.5 text-[9px] font-bold uppercase text-status-auto">
-            {item.mid_a === item.mid_b ? "Merged" : "Dismissed"}
-          </span>
+        <span
+          title={signalTooltip(item)}
+          className={clsx(
+            "justify-self-center rounded-full px-1.5 py-0.5 text-[9.5px] font-bold uppercase",
+            def.tone,
+          )}
+        >
+          {def.label}
+        </span>
+        <span className="truncate text-right text-[13px] font-bold text-ink-2">
+          {item.patient_b.first_name || "—"}
+        </span>
+
+        <span className="truncate text-[13px] font-bold text-ink-2">
+          {item.patient_a.last_name || "—"}
+        </span>
+        <span
+          className={clsx(
+            "justify-self-center rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase",
+            state.tone,
+          )}
+        >
+          {state.label}
+        </span>
+        <span className="truncate text-right text-[13px] font-bold text-ink-2">
+          {item.patient_b.last_name || "—"}
+        </span>
+      </div>
+
+      {/* Why this pair is in front of you — the stage that routed it, named,
+          and the rule that fired if one did. The old row showed only a
+          number, which is what let a 1% ML score read as a verdict of its
+          own. Centred so it reads as a caption under the pair as a whole,
+          not as an attribute of the left-hand record. */}
+      <div className="flex flex-wrap items-center justify-center gap-1.5 text-center text-[10.5px] text-gray">
+        <span className="font-semibold">{outcome.label}</span>
+        {outcome.cluster && (
+          <>
+            <span>·</span>
+            <span>{outcome.cluster}</span>
+          </>
         )}
       </div>
     </button>

@@ -13,6 +13,7 @@ Coverage:
     - Raw fields land in record_raw.
 """
 
+import json
 import sqlite3
 
 import pandas as pd
@@ -70,7 +71,16 @@ def _write_run(settings: Settings, run_id: str):
         "ZipCD_clean_base": ["60601", "60601", None, None, None],
         "AddressLine1_clean": [None, None, None, None, None],
         "SexAtBirthDSC_clean": ["FEMALE", "FEMALE", "MALE", "FEMALE", "FEMALE"],
-        "Phones_set": [set(), set(), set(), set(), set()],
+        # Display-only fields (`publish.MIDDLE_NM_CLEAN` & co) — no stage
+        # matches on them; they exist so the dashboard's comparison table can
+        # show them. P1 carries a second phone the primary column can't hold.
+        "MiddleNM_clean": ["Ann", None, None, None, None],
+        "SuffixNM_clean": ["JR", None, None, None, None],
+        "CityNM_clean": ["Chicago", "Chicago", None, None, None],
+        "PrimaryPhoneNBR_clean": ["3125551234", "3125551234", None, None, None],
+        "Phones_set": [
+            ["3125551234", "7735559999"], ["3125551234"], [], [], [],
+        ],
         "FirstNM_raw": ["JANE", "JANE", "JOHN", "AMY", "AMY"],
         "SSN_raw": ["123-45-6789", "123456789", None, None, None],
         "valid_record": [True, True, True, True, True],
@@ -295,7 +305,9 @@ class TestPublishRun:
         assert counts["entities_upserted"] == 4
         assert counts["members_upserted"] == 5
         assert counts["locked_skipped"] == 0
-        assert counts["review_candidates"] == 1
+        # Every decided candidate pair is published, not just the human
+        # queue: the auto-merged P1<->P2 and the still-open P4<->P5.
+        assert counts["review_candidates"] == 2
 
         matched = sql_backend.get_entity_mid_for_patid(conn, "P1")
         assert matched == sql_backend.get_entity_mid_for_patid(conn, "P2")
@@ -337,23 +349,60 @@ class TestPublishRun:
 
         # The queue list/sort/filter fall back to the ML score when there's
         # no rule confidence (sql_backend.list_review_candidates' COALESCE).
-        rows, total = sql_backend.list_review_candidates(conn, reviewed=False)
+        rows, total = sql_backend.list_review_candidates(
+            conn, bucket="needs_review"
+        )
         assert total == 1
         assert rows[0]["ml_match_probability"] == pytest.approx(0.24)
         filtered_rows, filtered_total = sql_backend.list_review_candidates(
-            conn, reviewed=False, confidence_min=0.2
+            conn, bucket="needs_review", confidence_min=0.2
         )
         assert filtered_total == 1
         assert filtered_rows[0]["patid_a"] == "P4"
+
+    def test_patid_pair_filter_resolves_the_exact_pair(
+        self, conn, backend, fixture_settings
+    ):
+        """A deep link from a cluster's comparison history knows the pair, not
+        the confidence/search that would surface it on the current page —
+        `patid_a`/`patid_b` alone (no other filter) finds it regardless of
+        where it'd otherwise sort or page to."""
+        _write_run_with_ml_scores(fixture_settings, "r-ml")
+        publish.publish_run(backend, "r-ml", fixture_settings)
+
+        rows, total = sql_backend.list_review_candidates(
+            conn, patid_a="P4", patid_b="P5",
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P4", "P5")
+
+        # A pair that was never a review candidate resolves to nothing, not
+        # an error.
+        _, none_total = sql_backend.list_review_candidates(
+            conn, patid_a="P1", patid_b="P4",
+        )
+        assert none_total == 0
+
+        # It still combines with other filters by AND, like everything else
+        # here — a `confidence_min` above the pair's score excludes it too.
+        _, filtered_out_total = sql_backend.list_review_candidates(
+            conn, patid_a="P4", patid_b="P5", confidence_min=0.9,
+        )
+        assert filtered_out_total == 0
 
     def test_gate_dropped_pair_resolves_to_none_not_review(self, conn, backend, fixture_settings):
         _write_run_with_gate_drop(fixture_settings, "r2")
         counts = publish.publish_run(backend, "r2", fixture_settings)
 
-        # Only P4<->P5 (gate tier human_review) becomes a review_candidate
-        # row — P6<->P7 (gate tier no_match) is excluded despite being in
-        # non_matches, since the gate already resolved it confidently.
-        assert counts["review_candidates"] == 1
+        # All three decided pairs are published: P1<->P2 (auto_merge_rule),
+        # P4<->P5 (still open) and P6<->P7 (gate_dropped). The gate drop is
+        # published for the queue's Auto-rejected section but is *not* open
+        # work, which is what the origin assertions below pin.
+        assert counts["review_candidates"] == 3
+        buckets = sql_backend.review_bucket_counts(conn)
+        assert buckets == {
+            "auto_merged": 1, "needs_review": 1, "auto_rejected": 1
+        }
 
         p4_mid = sql_backend.get_entity_mid_for_patid(conn, "P4")
         assert sql_backend.get_entity(conn, p4_mid)["entity"]["origin"] == "review"
@@ -364,6 +413,96 @@ class TestPublishRun:
         assert sql_backend.get_entity(conn, p7_mid)["entity"]["origin"] == "none"
         assert sql_backend.review_candidates_for_patid(conn, "P6") == []
 
+    def test_publish_carries_the_gate_score_for_dropped_and_passed_pairs(
+        self, conn, backend, fixture_settings
+    ):
+        """The gate's P(plausible) must survive publish for *both* outcomes.
+
+        For a dropped pair it's the only number the row has — no rule fired
+        and Stage 4.5 never scored it — so without it the Auto-rejected
+        section can't be ranked or split at all. For a passed pair it's what
+        explains a near-zero `ml_match_probability` on a row that is
+        nevertheless worth a human's time.
+        """
+        _write_run_with_gate_drop(fixture_settings, "r2")
+        publish.publish_run(backend, "r2", fixture_settings)
+
+        scores = {
+            (r["patid_a"], r["patid_b"]): r["gate_score"]
+            for r in conn.execute(
+                "SELECT patid_a, patid_b, gate_score FROM review_candidate"
+            )
+        }
+        assert scores[("P4", "P5")] == pytest.approx(0.91)
+        assert scores[("P6", "P7")] == pytest.approx(0.001)
+        # P1<->P2 was auto-merged by a rule at stage 3, so the gate never
+        # scored it — NULL, not zero. The difference matters: zero would
+        # sort it to the bottom of the reject bands it never entered.
+        assert scores[("P1", "P2")] is None
+
+    def test_gate_score_filter_is_a_separate_axis_from_confidence(
+        self, conn, backend, fixture_settings
+    ):
+        """`gate_score_*` must not behave like a second `confidence_*`.
+
+        P6<->P7 was dropped by the gate at 0.001 and has no matcher score at
+        all, so it is invisible to any `confidence_*` bound (`NULL >= x` is
+        never true) and reachable only on the gate axis. That asymmetry is
+        the whole reason for the second pair of params.
+        """
+        _write_run_with_gate_drop(fixture_settings, "r2")
+        publish.publish_run(backend, "r2", fixture_settings)
+
+        # Half-open [min, max): the gate-dropped pair sits below 0.20.
+        rows, total = sql_backend.list_review_candidates(
+            conn, gate_score_max=0.2,
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P6", "P7")
+
+        # ...and the passed pair sits above it, on the same axis.
+        rows, total = sql_backend.list_review_candidates(
+            conn, gate_score_min=0.2,
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P4", "P5")
+
+        # A confidence bound can't see the gate-dropped pair at all: it has
+        # no rule confidence and no ML score, so it fails every numeric
+        # bound on that axis, including a floor of zero.
+        conf_rows, _ = sql_backend.list_review_candidates(
+            conn, confidence_min=0.0,
+        )
+        assert ("P6", "P7") not in {
+            (r["patid_a"], r["patid_b"]) for r in conf_rows
+        }
+
+    def test_verdict_filter_reaches_pairs_no_range_can_select(
+        self, conn, backend, fixture_settings
+    ):
+        """A deterministic `reject` is scored by nothing, so no numeric bound
+        selects it. `verdict` is the only filter that can, which is why the
+        dashboard's reject bands need it."""
+        _write_run_with_gate_drop(fixture_settings, "r2")
+        publish.publish_run(backend, "r2", fixture_settings)
+
+        rows, total = sql_backend.list_review_candidates(
+            conn, verdict="gate_dropped",
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P6", "P7")
+
+        rows, total = sql_backend.list_review_candidates(
+            conn, verdict="auto_merge_rule",
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P1", "P2")
+
+        _, none_total = sql_backend.list_review_candidates(
+            conn, verdict="reject",
+        )
+        assert none_total == 0
+
     def test_record_attrs_denormalized(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
         publish.publish_run(backend, "r1", fixture_settings)
@@ -373,6 +512,12 @@ class TestPublishRun:
         assert row["first_name"] == "Jane"
         assert row["ssn_last4"] == "6789"
         assert row["birth_date"] == "1990-01-01"
+        assert row["middle_name"] == "Ann"
+        assert row["suffix"] == "JR"
+        assert row["city"] == "Chicago"
+        # The full phone set, not just `phone`'s single primary number.
+        assert row["phone"] == "3125551234"
+        assert json.loads(row["phones"]) == ["3125551234", "7735559999"]
 
     def test_raw_fields_denormalized(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -395,7 +540,7 @@ class TestPublishRun:
         n_candidates = conn.execute(
             "SELECT COUNT(*) AS n FROM review_candidate"
         ).fetchone()["n"]
-        assert n_candidates == 1  # replaced, not duplicated
+        assert n_candidates == 2  # replaced, not duplicated
 
     def test_reviewer_locked_patid_not_repointed(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -457,7 +602,7 @@ class TestPublishAgainstParquetBackend:
         assert counts["entities_upserted"] == 4
         assert counts["members_upserted"] == 5
         assert counts["locked_skipped"] == 0
-        assert counts["review_candidates"] == 1
+        assert counts["review_candidates"] == 2
 
         matched = parquet_backend.get_entity_mid_for_patid("P1")
         assert matched == parquet_backend.get_entity_mid_for_patid("P2")
@@ -496,6 +641,10 @@ class TestPublishAgainstParquetBackend:
         assert row["first_name"] == "Jane"
         assert row["ssn_last4"] == "6789"
         assert row["birth_date"] == "1990-01-01"
+        assert row["middle_name"] == "Ann"
+        assert row["suffix"] == "JR"
+        assert row["city"] == "Chicago"
+        assert json.loads(row["phones"]) == ["3125551234", "7735559999"]
 
     def test_raw_fields_denormalized(self, parquet_backend, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -514,7 +663,7 @@ class TestPublishAgainstParquetBackend:
 
         assert mid_before == mid_after
         assert len(parquet_backend._tables["entity"]) == 4
-        assert len(parquet_backend._tables["review_candidate"]) == 1  # replaced, not duplicated
+        assert len(parquet_backend._tables["review_candidate"]) == 2  # replaced, not duplicated
 
     def test_missing_manifest_raises(self, parquet_backend, fixture_settings):
         with pytest.raises(FileNotFoundError):

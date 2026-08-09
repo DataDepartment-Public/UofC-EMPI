@@ -454,6 +454,62 @@ def test_a_run_with_no_artifacts_left_still_lists_the_pairs(client, test_setting
     assert all(p["verdict"] == "not_compared" for p in body["pairs"])
 
 
+def test_an_unresolvable_entity_run_never_borrows_another_runs_decisions(
+    client, test_settings
+):
+    """The regression: an entity stamped with an incremental-scoring job id
+    (`POST /records/score` writes no manifest and no artifacts) fell through
+    to "the newest run that has clusters". That run knows nothing about these
+    records, so the route reported `artifacts_available: true` and an empty
+    trace — presenting "we looked in the wrong place" as "the pipeline decided
+    nothing", and hiding a live review candidate."""
+    _seed_entity(test_settings)          # entity.run_id = RUN_ID
+    _write_run(test_settings, run_id="20260101T000000Z")  # an unrelated run
+
+    body = client.get(f"/clusters/{MID}/pairs").json()
+
+    assert body["run_id"] is None
+    assert body["unresolved_run_id"] == RUN_ID
+    assert body["artifacts_available"] is False
+    # The members are still listed, with the trace honestly blank.
+    assert len(body["pairs"]) == 15
+    assert all(p["verdict"] == "not_compared" for p in body["pairs"])
+    assert body["external_pairs"] == []
+
+    # An explicitly requested run is still honoured — that's the caller
+    # asking to compare against a different run, not a silent substitution.
+    other = client.get(f"/clusters/{MID}/pairs?run_id=20260101T000000Z").json()
+    assert other["run_id"] == "20260101T000000Z"
+    assert other["unresolved_run_id"] is None
+
+
+def test_an_oversized_cluster_is_bounded_rather_than_traced(client, test_settings):
+    """A hub cluster must not turn one GET into minutes of CPU: `pairs` is
+    quadratic in members and the transitive path walk is worse."""
+    from src.config import settings as live_settings
+
+    members = [f"H{i:04d}" for i in range(12)]
+    _seed_entity(test_settings, members=members)
+    live_settings.cluster_pairs_max_members = 10
+    try:
+        body = client.get(f"/clusters/{MID}/pairs").json()
+    finally:
+        live_settings.cluster_pairs_max_members = 200
+
+    assert body["pairs_truncated"] is True
+    assert body["pairs"] == []
+    assert body["members"] == members  # membership is still the answer to "who"
+
+    # At/below the cap it traces normally.
+    live_settings.cluster_pairs_max_members = 12
+    try:
+        full = client.get(f"/clusters/{MID}/pairs").json()
+    finally:
+        live_settings.cluster_pairs_max_members = 200
+    assert full["pairs_truncated"] is False
+    assert len(full["pairs"]) == 66
+
+
 def test_a_singleton_cluster_has_no_pairs_and_is_not_an_error(client, test_settings):
     _seed_entity(test_settings, members=["A1"])
     _write_run(test_settings)

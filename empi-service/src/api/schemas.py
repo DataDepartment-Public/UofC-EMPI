@@ -262,12 +262,21 @@ class UndoResponse(BaseModel):
     entity at all — a dismiss never did — so both fields stay empty; it just
     retracts the pair decision, returning the pair to whichever section the
     pipeline's verdict puts it in.
+
+    The whole reversal is one transaction: either every patid came back out
+    and the entry is `undone`, or nothing changed and it is still undoable.
     """
 
     audit_id: int
     reversed_action: Literal["merge", "unmerge", "dismiss"]
     entity: Entity | None = None
     new_mids: list[str] = Field(default_factory=list)
+    #: Patids of an undone `merge` that a *later* action had already moved
+    #: out of the merged entity — already where the reversal wanted them, so
+    #: they got no new singleton of their own and appear here instead of in
+    #: `new_mids`. Non-empty means the merge was partly superseded before it
+    #: was undone, which is worth surfacing to the reviewer.
+    already_detached: list[str] = Field(default_factory=list)
 
 
 class MatchStatusCounts(BaseModel):
@@ -569,6 +578,18 @@ class ClusterPairsResponse(BaseModel):
     #: members) but every stage field is null — distinguishable from "the
     #: pipeline genuinely decided nothing about this pair".
     artifacts_available: bool
+    #: Set when the entity names a run that has no readable manifest — an
+    #: incremental-scoring job (`POST /records/score`), which writes no
+    #: artifacts, or a run whose manifest was deleted. The trace comes back
+    #: empty rather than being filled from an unrelated run, and this is the
+    #: id that couldn't be resolved, for the UI to say so.
+    unresolved_run_id: str | None = None
+    #: Set when the cluster has more than `cluster_pairs_max_members`
+    #: members. `pairs` (quadratic in members) and the transitive
+    #: `cluster_path` walk (worse) are then omitted rather than spending
+    #: minutes of CPU and hundreds of MB on one request; `members` and
+    #: `external_pairs` are still complete.
+    pairs_truncated: bool = False
     members: list[str] = Field(default_factory=list)
     #: `gate_threshold` / `ml_auto_merge_threshold`, so the UI can draw the
     #: decision boundary beside a score without a second call to /admin.

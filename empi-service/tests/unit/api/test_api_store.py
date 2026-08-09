@@ -282,6 +282,37 @@ class TestReviewCandidate:
         conn.commit()
         assert sql_backend.review_candidates_for_patid(conn, "P1") == []
 
+    def test_a_pair_surviving_two_publishes_is_listed_once(self, conn):
+        """The read-side dedup invariant, pinned here because it is the one
+        `postgres_backend` has to match — see its counterpart test, which
+        needs a live Postgres and so can't run by default. A pair unresolved
+        across two publishes has two rows (UNIQUE is on `(a, b, run_id)`);
+        only the newest may surface."""
+        sql_backend.upsert_entity(conn, "M-1", "r1", "none", False, None, "t0")
+        sql_backend.upsert_entity_member(conn, "P1", "M-1", True, "pipeline", "t0")
+        sql_backend.upsert_entity(conn, "M-2", "r1", "none", False, None, "t0")
+        sql_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
+        for run_id, ts, conf in (("r1", "t0", 0.40), ("r2", "t1", 0.70)):
+            sql_backend.replace_review_candidates_for_run(
+                conn, run_id,
+                [("P1", "P2", None, conf, None, "B3", run_id, ts,
+                  None, None, None, None)],
+            )
+        conn.commit()
+
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM review_candidate"
+        ).fetchone()["n"] == 2
+
+        rows = sql_backend.review_candidates_for_patid(conn, "P1")
+        assert len(rows) == 1
+        assert rows[0]["run_id"] == "r2"
+        assert rows[0]["confidence"] == 0.70
+
+        listed, total = sql_backend.list_review_candidates(conn)
+        assert total == 1 and len(listed) == 1
+        assert sql_backend.review_bucket_counts(conn) == {"needs_review": 1}
+
     def test_patids_with_review_candidates(self, conn):
         sql_backend.replace_review_candidates_for_run(
             conn, "r1",

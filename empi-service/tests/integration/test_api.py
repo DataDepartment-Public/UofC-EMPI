@@ -23,6 +23,7 @@ from src.api import jobs
 from src.api.backends import sql_backend
 from src.api.backends.index_backend import build_index_backend
 from src.api.main import app
+from src.api.routers import audit as audit_router
 from src.config import Settings, settings as real_settings
 from src.contracts import ArtifactRef, RunManifest
 from src.models import model_cache
@@ -1033,6 +1034,93 @@ class TestAudit:
         audit_rows = client.get("/audit").json()
         merge_row = next(r for r in audit_rows if r["id"] == audit_id)
         assert merge_row["undone"] is True
+
+    def test_undo_merge_partly_superseded_by_a_later_unmerge(
+        self, client, test_settings
+    ):
+        """A patid a *later*, unrelated unmerge already pulled out of the
+        merged entity is skipped, not treated as a failure.
+
+        The regression: the undo used to run one transaction per patid, so
+        this case extracted the earlier patids, then 404'd on the one that
+        had already moved — leaving a half-reversed entity while `undone`
+        went true anyway (it's derived from any row pointing at the entry via
+        `undo_of`). The UI then showed a broken state as cleanly resolved."""
+        _publish_fixture_run(test_settings, "r1")
+        headers = {"X-Reviewer-Id": "reviewer.jclark"}
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        merge_resp = client.post(
+            "/audit/merge",
+            json={"mid": matched_mid, "patids": ["P3", "P4"]},
+            headers=headers,
+        )
+        audit_id = merge_resp.json()["audit_id"]
+
+        # An ordinary, unrelated action moves one of them back out.
+        client.post(
+            "/audit/unmerge",
+            json={"mid": matched_mid, "patid": "P4"},
+            headers=headers,
+        )
+
+        resp = client.post(f"/audit/{audit_id}/undo", headers=headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["already_detached"] == ["P4"]
+        assert len(body["new_mids"]) == 1
+
+        # P3 is out, and the merge really is reversed — no half state.
+        matched = client.get(f"/clusters/{matched_mid}").json()
+        assert {m["patid"] for m in matched["members"]} == {"P1", "P2"}
+
+    def test_a_failed_undo_leaves_the_entry_undoable(
+        self, client, test_settings, monkeypatch
+    ):
+        """If the reversal can't complete, nothing about it may persist —
+        neither a partial extraction nor the `undone` flag."""
+        _publish_fixture_run(test_settings, "r1")
+        headers = {"X-Reviewer-Id": "reviewer.jclark"}
+        matched_mid = next(
+            item["mid"] for item in client.get("/records").json()["items"]
+            if item["is_merged"]
+        )
+        audit_id = client.post(
+            "/audit/merge",
+            json={"mid": matched_mid, "patids": ["P3", "P4"]},
+            headers=headers,
+        ).json()["audit_id"]
+
+        # Fail on the *second* patid, after the first has already mutated.
+        real_ops = audit_router._unmerge_ops
+        calls = {"n": 0}
+
+        def _boom(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("backend blew up mid-undo")
+            return real_ops(*args, **kwargs)
+
+        # Scoped, so restoring `_unmerge_ops` can't also roll back the
+        # `test_settings` patches this test's whole DB lives behind.
+        with monkeypatch.context() as patched:
+            patched.setattr(audit_router, "_unmerge_ops", _boom)
+            with pytest.raises(RuntimeError):
+                client.post(f"/audit/{audit_id}/undo", headers=headers)
+
+        # Entity untouched, and the entry is still undoable for real.
+        matched = client.get(f"/clusters/{matched_mid}").json()
+        assert {m["patid"] for m in matched["members"]} == {"P1", "P2", "P3", "P4"}
+        merge_row = next(
+            r for r in client.get("/audit").json() if r["id"] == audit_id
+        )
+        assert merge_row["undone"] is False
+
+        assert client.post(
+            f"/audit/{audit_id}/undo", headers=headers
+        ).status_code == 200
 
     def test_undo_unmerge_remerges_patid(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")

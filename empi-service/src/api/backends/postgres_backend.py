@@ -481,6 +481,24 @@ _PAIR_ATTR_SELECT = ",\n".join(
 )
 
 
+#: The counterpart of `sql_backend._DEDUPED_REVIEW_CANDIDATE`, and required
+#: for the same reason: the UNIQUE constraint is `(patid_a, patid_b, run_id)`,
+#: so a candidate still unresolved across successive publishes gets a fresh
+#: row per run (`replace_review_candidates_for_run` only clears its OWN
+#: run_id). Reading the table raw therefore lists the same pair once per run
+#: it survived — duplicate queue rows, inflated pagination totals, and
+#: double-counted bucket tallies. Every read below goes through this instead.
+#:
+#: `DISTINCT ON` rather than SQLite's `ROW_NUMBER()` window: same result (the
+#: single most-recently-created row per pair), and it is the idiomatic and
+#: cheaper form here. The ORDER BY must lead with the DISTINCT ON expressions;
+#: the callers' own ordering is applied outside this subquery.
+_DEDUPED_REVIEW_CANDIDATE = """
+    SELECT DISTINCT ON (patid_a, patid_b) *
+    FROM review_candidate
+    ORDER BY patid_a, patid_b, created_utc DESC, id DESC
+"""
+
 #: Pairs no pipeline stage resolved — the counterpart of
 #: `sql_backend._UNRESOLVED_VERDICT`, kept in step with it.
 _UNRESOLVED_VERDICT = (
@@ -516,7 +534,7 @@ def review_candidates_for_patid(conn: PgConnection, patid: str) -> list[dict]:
         f"""
         SELECT rc.*,
 {_PAIR_ATTR_SELECT}
-        FROM review_candidate rc
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
 {_PAIR_DECISION_JOIN}
@@ -594,7 +612,7 @@ def list_review_candidates(
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
     base_from = f"""
-        FROM review_candidate rc
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         JOIN entity_member ema ON ema.patid = rc.patid_a
         JOIN entity_member emb ON emb.patid = rc.patid_b
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
@@ -628,11 +646,12 @@ def list_review_candidates(
 
 
 def review_bucket_counts(conn: PgConnection) -> dict[str, int]:
-    """Counterpart of `sql_backend.review_bucket_counts`."""
+    """Counterpart of `sql_backend.review_bucket_counts` — counts the deduped
+    pairs, so a section tab can't report more pairs than the section lists."""
     rows = conn.execute(
         f"""
         SELECT ({_BUCKET_EXPR}) AS bucket, COUNT(*) AS n
-        FROM review_candidate rc
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         JOIN entity_member ema ON ema.patid = rc.patid_a
         JOIN entity_member emb ON emb.patid = rc.patid_b
 {_PAIR_DECISION_JOIN}

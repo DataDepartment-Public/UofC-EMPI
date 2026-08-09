@@ -121,6 +121,18 @@ export function ClusterComparisons({ entity }: { entity: Entity }) {
       </p>
     );
   }
+  if (data.pairs_truncated) {
+    // The API omits the pairwise enumeration above its cluster-size cap —
+    // it grows quadratically, so a large hub cluster would otherwise cost a
+    // multi-minute request. Say so rather than showing an empty list.
+    return (
+      <p className="rounded-md border border-line bg-bg px-3 py-2 text-sm text-gray">
+        This cluster has {data.members.length} records — too many to trace
+        pair by pair. The comparison history below still lists what its
+        records were checked against outside the cluster.
+      </p>
+    );
+  }
   if (data.pairs.length === 0) {
     return (
       <p className="rounded-md border border-line bg-bg px-3 py-2 text-sm text-gray">
@@ -132,12 +144,25 @@ export function ClusterComparisons({ entity }: { entity: Entity }) {
 
   return (
     <div>
-      {!data.artifacts_available && (
+      {data.unresolved_run_id ? (
+        // Not "the artifacts aged out": this entity was last touched by
+        // incremental scoring, which records no run artifacts at all. The
+        // trace is blank because there is nothing to read — not because the
+        // pipeline decided nothing about these records.
         <p className="mb-3 rounded-md border border-line bg-bg px-3 py-2 text-xs text-gray-2">
-          The pipeline artifacts for run{" "}
-          <span className="font-mono">{data.run_id ?? entity.run_id}</span> are no
-          longer on disk, so no stage detail is available for these pairs.
+          These records were last scored outside a full pipeline run (
+          <span className="font-mono">{data.unresolved_run_id}</span>), which
+          keeps no per-stage artifacts — so no stage detail is available for
+          these pairs.
         </p>
+      ) : (
+        !data.artifacts_available && (
+          <p className="mb-3 rounded-md border border-line bg-bg px-3 py-2 text-xs text-gray-2">
+            The pipeline artifacts for run{" "}
+            <span className="font-mono">{data.run_id ?? entity.run_id}</span> are
+            no longer on disk, so no stage detail is available for these pairs.
+          </p>
+        )
       )}
       <div className="space-y-2">
         {byVerdict(data.pairs).map((pair) => (

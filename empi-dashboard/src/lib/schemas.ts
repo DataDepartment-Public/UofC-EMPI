@@ -270,6 +270,11 @@ export const UndoResponseSchema = z.object({
   reversed_action: z.enum(["merge", "unmerge"]),
   entity: EntitySchema.nullable().optional(),
   new_mids: z.array(z.string()).default([]),
+  // Patids of an undone merge that a later action had already moved out of
+  // the merged entity — reversed already, so they got no new singleton.
+  // Optional rather than defaulted so callers constructing an UndoResponse
+  // (tests, fixtures) aren't forced to name a field they don't care about.
+  already_detached: z.array(z.string()).optional(),
 });
 export type UndoResponse = z.infer<typeof UndoResponseSchema>;
 
@@ -384,6 +389,14 @@ export const ClusterPairsResponseSchema = z.object({
   mid: z.string(),
   run_id: z.string().nullable().optional(),
   artifacts_available: z.boolean(),
+  // Set when the entity's own run has no readable manifest (an incremental
+  // scoring job, which writes no artifacts). The API returns an empty trace
+  // rather than filling it from an unrelated run, so the UI must say which
+  // run went missing instead of "the pipeline decided nothing".
+  unresolved_run_id: z.string().nullable().optional(),
+  // Set when the cluster exceeds the API's `cluster_pairs_max_members`:
+  // `pairs` is omitted (it is quadratic in members), `external_pairs` isn't.
+  pairs_truncated: z.boolean().default(false),
   members: z.array(z.string()).default([]),
   thresholds: z.record(z.string(), z.number()).default({}),
   pairs: z.array(ClusterPairSchema).default([]),

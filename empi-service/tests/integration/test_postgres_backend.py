@@ -23,11 +23,17 @@ Azure-specific auth.
 
 import os
 
-import psycopg
 import pytest
-from psycopg.rows import dict_row
 
-from src.api.backends import postgres_backend
+# `importorskip`, not a plain import: `psycopg` isn't in requirements.txt (it
+# is an Azure-deployment dependency), so importing it at module scope makes
+# `pytest tests/` fail *collection* on any machine without it rather than
+# skipping this file — which is how the rest of the suite ends up reporting
+# green while none of these ever ran.
+psycopg = pytest.importorskip("psycopg")
+dict_row = pytest.importorskip("psycopg.rows").dict_row
+
+from src.api.backends import postgres_backend  # noqa: E402
 
 _DSN = os.environ.get("EMPI_TEST_POSTGRES_DSN")
 pytestmark = pytest.mark.skipif(
@@ -257,7 +263,7 @@ class TestReviewCandidate:
             conn, "r1",
             [(
                 "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
-                None, None, "ml_human_review",
+                None, None, None, "ml_human_review",
             )],
         )
         conn.commit()
@@ -271,7 +277,7 @@ class TestReviewCandidate:
             conn, "r1",
             [(
                 "P1", "P2", None, None, None, "B3", "r1", "t0",
-                0.24, "human_review", "ml_human_review",
+                0.24, "human_review", 0.81, "ml_human_review",
             )],
         )
         conn.commit()
@@ -282,12 +288,46 @@ class TestReviewCandidate:
     def test_replace_clears_stale_rows_for_same_run(self, conn):
         postgres_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None)],
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None, None)],
         )
         conn.commit()
         postgres_backend.replace_review_candidates_for_run(conn, "r1", [])
         conn.commit()
         assert postgres_backend.review_candidates_for_patid(conn, "P1") == []
+
+    def test_a_pair_surviving_two_publishes_is_listed_once(self, conn):
+        """The regression: `review_candidate` is UNIQUE on `(patid_a,
+        patid_b, run_id)`, and `replace_review_candidates_for_run` only
+        clears its *own* run — so an unresolved pair accumulates one row per
+        publish it survives. SQLite has always deduped these on read; this
+        module read the table raw, which meant duplicate queue rows, inflated
+        pagination totals, and double-counted bucket tallies once a second
+        run landed. Only the newest row may win."""
+        postgres_backend.upsert_entity(conn, "M-1", "r1", "none", False, None, "t0")
+        postgres_backend.upsert_entity_member(conn, "P1", "M-1", True, "pipeline", "t0")
+        postgres_backend.upsert_entity(conn, "M-2", "r1", "none", False, None, "t0")
+        postgres_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
+        for run_id, ts, conf in (("r1", "t0", 0.40), ("r2", "t1", 0.70)):
+            postgres_backend.replace_review_candidates_for_run(
+                conn, run_id,
+                [("P1", "P2", None, conf, None, "B3", run_id, ts, None, None, None, None)],
+            )
+        conn.commit()
+
+        # Both rows are really there — this is a read-side invariant.
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM review_candidate"
+        ).fetchone()["n"] == 2
+
+        rows = postgres_backend.review_candidates_for_patid(conn, "P1")
+        assert len(rows) == 1
+        assert rows[0]["run_id"] == "r2"          # newest wins
+        assert rows[0]["confidence"] == 0.70
+
+        listed, total = postgres_backend.list_review_candidates(conn)
+        assert total == 1
+        assert len(listed) == 1
+        assert postgres_backend.review_bucket_counts(conn) == {"needs_review": 1}
 
     def test_list_review_candidates_bucket_filter(self, conn):
         postgres_backend.upsert_entity(conn, "M-1", "r1", "none", False, None, "t0")
@@ -296,7 +336,7 @@ class TestReviewCandidate:
         postgres_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
         postgres_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None, None)],
+            [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None, None, None)],
         )
         conn.commit()
 
@@ -339,7 +379,7 @@ class TestReviewCandidate:
         postgres_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
         postgres_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None, None)],
+            [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None, None, None)],
         )
         conn.commit()
 

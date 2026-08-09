@@ -243,6 +243,30 @@ GET /records?search=&origin=&is_merged=&birth_date=&ssn_last4=
     &updated_after=&updated_before=&page=&page_size=
                                      → paginated master rows + their candidate members
 GET /clusters/{mid}                 → one entity, its members, and field values
+GET /clusters/{mid}/pairs[?run_id=] → the pairwise decision trace behind a cluster,
+                                       read from the run's Parquet artifacts (see
+                                       src/api/routers/cluster_pairs.py). Two guards
+                                       shape the response:
+                                       • the trace comes from the run that produced
+                                         the entity or from NOWHERE — never quietly
+                                         from another run. An entity last touched by
+                                         incremental scoring names a job that writes
+                                         no manifest; that id comes back as
+                                         `unresolved_run_id` with
+                                         `artifacts_available=false`, rather than
+                                         being back-filled from the newest batch run
+                                         (which knows nothing about these records and
+                                         would render as "the pipeline decided
+                                         nothing"). The `latest_run_with` fallback
+                                         applies only when the entity names no run.
+                                       • `pairs` is quadratic in members and the
+                                         transitive path walk is worse, so above
+                                         EMPI_CLUSTER_PAIRS_MAX_MEMBERS (200) both are
+                                         omitted and `pairs_truncated=true`; `members`
+                                         and `external_pairs` are still complete. A
+                                         several-hundred-member hub cluster would
+                                         otherwise cost minutes of blocking CPU and a
+                                         response measured in hundreds of MB.
 GET /records/{patid}/raw            → the un-scrubbed *_raw source fields ("View Raw
                                        Data" drawer) — writes a `view_raw` audit_log
                                        entry on every successful call
@@ -376,12 +400,24 @@ POST /audit/dismiss
 
 POST /audit/{audit_id}/undo
   headers: X-Reviewer-Id: <reviewer>
-  → 200 {audit_id, reversed_action, entity, new_mids}
+  → 200 {audit_id, reversed_action, entity, new_mids, already_detached}
   # reverses a prior merge/unmerge/dismiss by id; marks the original row
   # undone=true, writes a new row with prev_mid/undo_of set, and retracts the
   # reviewer_pair_decision rows that entry wrote. Undoing a dismiss mutates no
   # entity (a dismiss never did) — it only retracts the decision, returning the
   # pair to whichever section its verdict puts it in. 404 if already undone.
+  #
+  # ONE transaction for the WHOLE reversal, retraction included — a merge undo
+  # is N unmerges, and committing them one at a time could leave the entity
+  # half-split while `undone` went true anyway (it is derived: any row pointing
+  # at the entry via undo_of sets it), i.e. an audit trail claiming a clean
+  # reversal that did not happen. Either every patid came back out, or nothing
+  # changed and the entry is still undoable.
+  #
+  # `already_detached` lists patids of an undone merge that a LATER action had
+  # already moved out of the merged entity. They are skipped, not treated as a
+  # failure: they are already where the reversal wants them, and 404-ing over
+  # one would leave the reviewer unable to reverse the rest of the merge.
 
 GET /audit?limit=&since=  → [audit_log rows, newest first]
 ```

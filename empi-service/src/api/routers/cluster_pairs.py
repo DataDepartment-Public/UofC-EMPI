@@ -43,7 +43,7 @@ from src.api.run_artifacts import (
 )
 from src.api.schemas import ClusterExternalPair, ClusterPair, ClusterPairsResponse
 from src.config import Settings
-from src.contracts import PATID_A, PATID_B, TIER_AUTO_MERGE, TIER_NO_MATCH
+from src.contracts import PATID_A, PATID_B, TIER_AUTO_MERGE, TIER_NO_MATCH, RunManifest
 
 logger = logging.getLogger(__name__)
 
@@ -162,29 +162,49 @@ def _build_merge_graph(
     return graph
 
 
-def _shortest_path(graph: dict[str, set[str]], start: str, end: str) -> list[str] | None:
-    """BFS shortest path between two members of the same connected component.
+def _bfs_parents(graph: dict[str, set[str]], start: str) -> dict[str, str | None]:
+    """BFS predecessor map for everything `start` reaches — one traversal per
+    *source*, from which any single path is read back by `_path_between`.
 
-    `graph` never holds a direct `start`-`end` edge for a call site that
-    matters (the caller only asks for pairs that formed no edge of their
-    own), so any path found is genuinely transitive — at least one
-    intermediate member. Returns `None` if the two aren't connected in
-    `graph` at all, which can happen when tracing a run other than the one
-    that produced the cluster's current membership.
+    One BFS per source, not per pair. The caller needs a path for every member
+    pair that formed no edge of its own, which is O(n²) pairs; a fresh BFS
+    each — the shape this replaced — makes the route O(n²·(V+E)), i.e. cubic
+    in cluster size and measurable in *minutes* on a several-hundred-member
+    "common name" hub, all of it blocking CPU inside a request.
+
+    A node absent from the result isn't connected to `start` in `graph` at
+    all, which can happen when tracing a run other than the one that produced
+    the cluster's current membership.
     """
-    if start not in graph or end not in graph:
-        return None
-    visited = {start}
-    queue: deque[list[str]] = deque([[start]])
+    if start not in graph:
+        return {}
+    parents: dict[str, str | None] = {start: None}
+    queue: deque[str] = deque([start])
     while queue:
-        path = queue.popleft()
-        for neighbor in graph[path[-1]]:
-            if neighbor == end:
-                return path + [neighbor]
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append(path + [neighbor])
-    return None
+        node = queue.popleft()
+        for neighbor in graph[node]:
+            if neighbor not in parents:
+                parents[neighbor] = node
+                queue.append(neighbor)
+    return parents
+
+
+def _path_between(parents: dict[str, str | None], end: str) -> list[str] | None:
+    """Walk a `_bfs_parents` map back from `end` to its source.
+
+    Reconstructed per requested pair rather than materialized for every node
+    when the BFS runs: only the pairs with no edge of their own ask for a
+    path, and on a long chain building all n of them per source would put
+    back the cubic term the per-source BFS just removed.
+    """
+    if end not in parents:
+        return None
+    path: list[str] = []
+    cursor: str | None = end
+    while cursor is not None:
+        path.append(cursor)
+        cursor = parents[cursor]
+    return path[::-1]
 
 
 def _counterpart(backend: IndexBackend, patid: str) -> dict:
@@ -211,6 +231,40 @@ def _counterpart(backend: IndexBackend, patid: str) -> dict:
         (m for m in record["members"] if m["patid"] == patid), None
     )
     return {"mid": other_mid, **(member or {})}
+
+
+def _resolve_run(
+    entity_run_id: str | None, requested_run_id: str | None, settings: Settings
+) -> tuple[RunManifest | None, str | None]:
+    """`(manifest, unresolved_run_id)` for the run this trace should read.
+
+    The rule is that a trace either comes from the run that produced the
+    entity or comes from nowhere — **never quietly from a different run**.
+    `POST /records/score` stamps the entity with an incremental-scoring job
+    id, and those jobs write no manifest and no artifacts; falling back to
+    "the newest run that has clusters" for one of them substitutes an
+    unrelated batch run, reports `artifacts_available: true`, and then finds
+    none of this entity's pairs in it — an empty trace that reads as "the
+    pipeline saw nothing here" when what actually happened is that we looked
+    in the wrong place. The pair may be a genuine, live review candidate.
+
+    So the fallback to `latest_run_with` applies only when the entity names
+    no run at all (nothing to be wrong about). When it names one we can't
+    resolve, the second element carries that id back so the response can say
+    which run's evidence is missing.
+    """
+    if requested_run_id is not None:
+        return load_manifest(requested_run_id, settings), None
+    if not entity_run_id:
+        return latest_run_with("clusters", settings), None
+    manifest = load_manifest(entity_run_id, settings)
+    if manifest is not None:
+        return manifest, None
+    logger.info(
+        "Cluster trace: entity's run has no readable manifest; "
+        "serving an empty trace rather than another run's."
+    )
+    return None, entity_run_id
 
 
 @router.get("/clusters/{mid}/pairs", response_model=ClusterPairsResponse)
@@ -245,10 +299,8 @@ def get_cluster_pairs(
         "ml_auto_merge_threshold": float(settings.ml_auto_merge_threshold),
     }
 
-    manifest = (
-        load_manifest(run_id, settings) if run_id is not None
-        else load_manifest(record["entity"]["run_id"], settings)
-        or latest_run_with("clusters", settings)
+    manifest, unresolved_run_id = _resolve_run(
+        record["entity"]["run_id"], run_id, settings
     )
     if run_id is not None and manifest is None:
         raise HTTPException(status_code=404, detail=f"Unknown run_id '{run_id}'.")
@@ -300,8 +352,25 @@ def get_cluster_pairs(
             "ml_tier": ml.get("predicted_tier"),
         }
 
+    # `pairs` is quadratic in members and the path walk below is worse, so
+    # both stop at `cluster_pairs_max_members`. Without a cap a pathological
+    # hub cluster (a few hundred records around a common name) turns one GET
+    # into minutes of blocking single-threaded CPU and a response measured in
+    # hundreds of MB — from an ordinary reviewer click, or from anyone able to
+    # repeat it. `external_pairs` below is bounded by what the artifacts
+    # actually hold rather than by n², so it is still returned in full: for an
+    # over-cap cluster it's the only part of the trace a reviewer gets, and
+    # `pairs_truncated` says so.
+    pairs_truncated = len(members) > settings.cluster_pairs_max_members
+    if pairs_truncated:
+        logger.warning(
+            "Cluster trace: %d members exceeds cluster_pairs_max_members=%d — "
+            "omitting the pairwise enumeration and the transitive path walk.",
+            len(members), settings.cluster_pairs_max_members,
+        )
+
     pairs: list[ClusterPair] = []
-    for a, b in combinations(sorted(members), 2):
+    for a, b in () if pairs_truncated else combinations(sorted(members), 2):
         key = (a, b)  # `sorted` already gives the canonical `PATID_A < PATID_B`
 
         # `added_by` is the per-record answer to "pipeline or reviewer?", so a
@@ -330,17 +399,26 @@ def get_cluster_pairs(
     # is read here rather than via `_ARTIFACTS` (see the comment on that
     # dict) and only when it can actually matter — `fs_feeds_clustering` off
     # (the default) means FS forms no clustering edges at all.
-    fs_edges: dict[tuple[str, str], dict] = {}
-    if settings.fs_feeds_clustering:
-        fs_path = artifact_path(manifest, "matches_model", settings) if manifest else None
-        if fs_path is not None:
-            fs_edges = _pair_index(
-                read_pairs_touching(fs_path, members), ("classification_tier",)
+    if not pairs_truncated:
+        fs_edges: dict[tuple[str, str], dict] = {}
+        if settings.fs_feeds_clustering:
+            fs_path = (
+                artifact_path(manifest, "matches_model", settings) if manifest else None
             )
-    merge_graph = _build_merge_graph(pairs, fs_edges)
-    for pair in pairs:
-        if pair.verdict not in _EDGE_VERDICTS and pair.joined_by != "reviewer":
-            pair.cluster_path = _shortest_path(merge_graph, pair.patid_a, pair.patid_b)
+            if fs_path is not None:
+                fs_edges = _pair_index(
+                    read_pairs_touching(fs_path, members), ("classification_tier",)
+                )
+        merge_graph = _build_merge_graph(pairs, fs_edges)
+        parents_cache: dict[str, dict[str, str | None]] = {}
+        for pair in pairs:
+            if pair.verdict in _EDGE_VERDICTS or pair.joined_by == "reviewer":
+                continue
+            if pair.patid_a not in parents_cache:
+                parents_cache[pair.patid_a] = _bfs_parents(merge_graph, pair.patid_a)
+            pair.cluster_path = _path_between(
+                parents_cache[pair.patid_a], pair.patid_b
+            )
 
     # ── External comparisons ────────────────────────────────────────────────
     # Every pair key any artifact produced that straddles the cluster
@@ -380,6 +458,8 @@ def get_cluster_pairs(
         mid=mid,
         run_id=manifest.run_id if manifest else None,
         artifacts_available=found_any,
+        unresolved_run_id=unresolved_run_id,
+        pairs_truncated=pairs_truncated,
         members=sorted(members),
         thresholds=thresholds,
         pairs=pairs,

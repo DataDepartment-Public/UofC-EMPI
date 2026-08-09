@@ -6,6 +6,7 @@ import { fullName } from "@/lib/format";
 import type { ReviewBucket, ReviewQueueItem } from "@/lib/schemas";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
 import { RawComparisonPanel } from "@/components/shared/RawComparisonPanel";
+import { ClusterLinks } from "./ClusterLinks";
 import { ExplanationPanel } from "./ExplanationPanel";
 import { ManualMatchModal } from "./ManualMatchModal";
 import { PipelineTrail } from "./PipelineTrail";
@@ -92,6 +93,11 @@ export function ReviewCandidateDetail({
       <div className="mb-5">
         <h4 className="mb-1 text-[13px] font-bold text-ink-2">Pipeline trail</h4>
         <PipelineTrail item={item} />
+      </div>
+
+      <div className="mb-5">
+        <h4 className="mb-1.5 text-[13px] font-bold text-ink-2">Clusters</h4>
+        <ClusterLinks item={item} />
       </div>
 
       <div className="mb-5">

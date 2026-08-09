@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { compareRecords } from "@/lib/compare";
 import { fullName } from "@/lib/format";
-import type { ReviewBucket, ReviewQueueItem } from "@/lib/schemas";
+import type { ReviewQueueItem } from "@/lib/schemas";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
 import { RawComparisonPanel } from "@/components/shared/RawComparisonPanel";
 import { ClusterLinks } from "./ClusterLinks";
@@ -73,23 +73,6 @@ export function ReviewCandidateDetail({
 
       <VerdictBanner item={item} />
 
-      <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
-        <MetaCard
-          label="Confidence"
-          value={item.confidence != null ? `${Math.round(item.confidence * 100)}%` : "No rule signal"}
-        />
-        <MetaCard label="Rule fired" value={item.match_rule ?? "None (unconfirmed)"} />
-        <MetaCard label="Outcome" value={OUTCOMES[item.bucket].title} small />
-        <MetaCard
-          label="Cluster context"
-          value={
-            item.member_count_a > 1 || item.member_count_b > 1
-              ? `${Math.max(item.member_count_a, item.member_count_b)} members`
-              : "Standalone pair"
-          }
-        />
-      </div>
-
       <div className="mb-5">
         <h4 className="mb-1 text-[13px] font-bold text-ink-2">Pipeline trail</h4>
         <PipelineTrail item={item} />
@@ -127,24 +110,10 @@ export function ReviewCandidateDetail({
   );
 }
 
-const OUTCOMES: Record<ReviewBucket, { title: string; tone: string }> = {
-  needs_review: {
-    title: "Awaiting review",
-    tone: "border-line bg-bg text-gray-2",
-  },
-  reviewed: {
-    title: "Reviewed",
-    tone: "border-brand-blue/30 bg-brand-blue/5 text-brand-blue",
-  },
-  auto_merged: {
-    title: "Auto-merged",
-    tone: "border-status-auto/30 bg-status-auto/5 text-status-auto",
-  },
-  auto_rejected: {
-    title: "Auto-rejected",
-    tone: "border-status-nomatch/30 bg-status-nomatch/5 text-status-nomatch",
-  },
-};
+/** The reviewed banner's palette. The other buckets used to need one too, for
+ * the "Outcome" meta card; the left-hand queue list already badges the bucket
+ * on every row, so the card was a second copy of it. */
+const REVIEWED_TONE = "border-brand-blue/30 bg-brand-blue/5 text-brand-blue";
 
 /** What the pipeline concluded, in the reviewer's words rather than the
  * stage's. Used only to say what a *human* decision overrode — the pipeline's
@@ -167,9 +136,7 @@ function VerdictBanner({ item }: { item: ReviewQueueItem }) {
   if (item.bucket !== "reviewed") return null;
   const overruled = item.verdict ? VERDICT_TEXT[item.verdict] : null;
   return (
-    <div
-      className={`mb-4 rounded-md border px-3 py-2 text-xs ${OUTCOMES.reviewed.tone}`}
-    >
+    <div className={`mb-4 rounded-md border px-3 py-2 text-xs ${REVIEWED_TONE}`}>
       <span className="font-bold">Reviewed.</span>{" "}
       <span className="opacity-90">
         {item.reviewer_decision === "merged"
@@ -179,25 +146,6 @@ function VerdictBanner({ item }: { item: ReviewQueueItem }) {
       {overruled && (
         <span className="opacity-70"> The pipeline had said {overruled}.</span>
       )}
-    </div>
-  );
-}
-
-function MetaCard({
-  label,
-  value,
-  small = false,
-}: {
-  label: string;
-  value: string;
-  small?: boolean;
-}) {
-  return (
-    <div className="rounded-md border border-line px-3 py-2.5">
-      <div className="text-[10px] font-bold tracking-wide text-gray uppercase">{label}</div>
-      <div className={`mt-1 font-bold text-ink-2 ${small ? "text-xs" : "text-sm"}`}>
-        {value}
-      </div>
     </div>
   );
 }

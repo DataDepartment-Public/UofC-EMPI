@@ -246,7 +246,7 @@ class TestReviewCandidate:
             conn, "r1",
             [(
                 "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
-                None, None,
+                None, None, "ml_human_review",
             )],
         )
         conn.commit()
@@ -258,7 +258,10 @@ class TestReviewCandidate:
     def test_replace_review_candidates_for_run_carries_ml_score(self, conn):
         sql_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", None, None, None, "B3", "r1", "t0", 0.24, "human_review")],
+            [(
+                "P1", "P2", None, None, None, "B3", "r1", "t0",
+                0.24, "human_review", "ml_human_review",
+            )],
         )
         conn.commit()
         rows = sql_backend.review_candidates_for_patid(conn, "P1")
@@ -267,7 +270,8 @@ class TestReviewCandidate:
 
     def test_replace_clears_stale_rows_for_same_run(self, conn):
         sql_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None)]
+            conn, "r1",
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None)],
         )
         conn.commit()
         sql_backend.replace_review_candidates_for_run(conn, "r1", [])  # nothing this time
@@ -276,7 +280,8 @@ class TestReviewCandidate:
 
     def test_patids_with_review_candidates(self, conn):
         sql_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None)]
+            conn, "r1",
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None)],
         )
         conn.commit()
         assert sql_backend.patids_with_review_candidates(conn) == {"P1", "P2"}

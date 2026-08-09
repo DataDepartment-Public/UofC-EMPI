@@ -121,10 +121,27 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     fs_classification_tier TEXT,
     ml_match_probability   REAL,
     ml_classification_tier TEXT,
+    -- Which stage decided this pair (`src/api/pair_verdicts.py`); NULL reads
+    -- as `needs_review`. See `sql_backend.SCHEMA_SQL`.
+    verdict      TEXT,
     UNIQUE(patid_a, patid_b, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_review_candidate_a ON review_candidate(patid_a);
 CREATE INDEX IF NOT EXISTS idx_review_candidate_b ON review_candidate(patid_b);
+
+-- Per-pair record of what a reviewer concluded, kept out of
+-- `review_candidate` so a republish can't erase it. See
+-- `sql_backend.SCHEMA_SQL` for the full rationale.
+CREATE TABLE IF NOT EXISTS reviewer_pair_decision (
+    patid_a      TEXT NOT NULL,
+    patid_b      TEXT NOT NULL,
+    decision     TEXT NOT NULL,
+    audit_id     INTEGER NOT NULL,
+    ts_utc       TEXT NOT NULL,
+    PRIMARY KEY (patid_a, patid_b)
+);
+CREATE INDEX IF NOT EXISTS idx_reviewer_pair_decision_audit
+    ON reviewer_pair_decision(audit_id);
 
 CREATE TABLE IF NOT EXISTS entity_suggestion (
     patid          TEXT PRIMARY KEY,
@@ -204,6 +221,7 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "fs_classification_tier": "TEXT",
         "ml_match_probability": "REAL",
         "ml_classification_tier": "TEXT",
+        "verdict": "TEXT",
     },
     "audit_log": {
         "related_patids": "TEXT",
@@ -417,14 +435,16 @@ def insert_review_candidates(conn: PgConnection, rows: list[tuple]) -> None:
 _REVIEW_CANDIDATE_INSERT_SQL = """
     INSERT INTO review_candidate
         (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
-         run_id, created_utc, ml_match_probability, ml_classification_tier)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         run_id, created_utc, ml_match_probability, ml_classification_tier,
+         verdict)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
         match_rule=excluded.match_rule, confidence=excluded.confidence,
         evidence=excluded.evidence, source_blocks=excluded.source_blocks,
         created_utc=excluded.created_utc,
         ml_match_probability=excluded.ml_match_probability,
-        ml_classification_tier=excluded.ml_classification_tier
+        ml_classification_tier=excluded.ml_classification_tier,
+        verdict=excluded.verdict
 """
 
 
@@ -432,10 +452,11 @@ def replace_review_candidates_for_run(
     conn: PgConnection, run_id: str, rows: list[tuple]
 ) -> None:
     """Replace this run's review-candidate rows wholesale (delete + bulk
-    insert) — a review pair no longer in the latest run's output should
+    insert) — a pair no longer in the latest run's candidate pool should
     disappear rather than linger as a stale suggestion. `rows` are
     `(patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
-    run_id, created_utc, ml_match_probability, ml_classification_tier)`."""
+    run_id, created_utc, ml_match_probability, ml_classification_tier,
+    verdict)`. Never touches `reviewer_pair_decision`."""
     conn.execute("DELETE FROM review_candidate WHERE run_id = %s", (run_id,))
     _executemany(conn, _REVIEW_CANDIDATE_INSERT_SQL, rows)
 
@@ -454,10 +475,37 @@ _PAIR_ATTR_SELECT = ",\n".join(
 )
 
 
+#: Pairs no pipeline stage resolved — the counterpart of
+#: `sql_backend._UNRESOLVED_VERDICT`, kept in step with it.
+_UNRESOLVED_VERDICT = (
+    "(rc.verdict IS NULL OR rc.verdict NOT IN "
+    "('auto_merge_rule', 'ml_auto_merge', 'reject', 'gate_dropped'))"
+)
+
+#: The reviewer's own conclusion about a pair, if any — see
+#: `sql_backend._PAIR_DECISION_JOIN`.
+_PAIR_DECISION_JOIN = """
+        LEFT JOIN reviewer_pair_decision rpd
+               ON rpd.patid_a = rc.patid_a AND rpd.patid_b = rc.patid_b
+"""
+
+#: The four Review Queue sections — the counterpart of
+#: `sql_backend._BUCKET_EXPR`, and identical to it (no dialect differences
+#: apply to a plain CASE). Both mirror `pair_verdicts.bucket_for`.
+_BUCKET_EXPR = """
+    CASE
+        WHEN rpd.decision IS NOT NULL THEN 'reviewed'
+        WHEN ema.mid = emb.mid THEN 'auto_merged'
+        WHEN rc.verdict IN ('reject', 'gate_dropped') THEN 'auto_rejected'
+        ELSE 'needs_review'
+    END
+"""
+
+
 def review_candidates_for_patid(conn: PgConnection, patid: str) -> list[dict]:
-    """Every review-candidate pair touching `patid`, joined to `record_attrs`
-    on *both* sides — the UI needs the other PATID's name/SSN/DOB to render
-    the expanded-row candidate list, not just its ID."""
+    """Every *unresolved* candidate pair touching `patid`, joined to
+    `record_attrs` on both sides — see `sql_backend.review_candidates_for_patid`
+    for why both callers want the open pairs rather than the whole pool."""
     rows = conn.execute(
         f"""
         SELECT rc.*,
@@ -465,7 +513,10 @@ def review_candidates_for_patid(conn: PgConnection, patid: str) -> list[dict]:
         FROM review_candidate rc
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
-        WHERE rc.patid_a = %s OR rc.patid_b = %s
+{_PAIR_DECISION_JOIN}
+        WHERE (rc.patid_a = %s OR rc.patid_b = %s)
+          AND {_UNRESOLVED_VERDICT}
+          AND rpd.decision IS NULL
         ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
         """,
         (patid, patid),
@@ -478,7 +529,7 @@ def list_review_candidates(
     *,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
-    reviewed: bool | None = None,
+    bucket: str | None = None,
     search: str | None = None,
     patid_a: str | None = None,
     patid_b: str | None = None,
@@ -486,9 +537,10 @@ def list_review_candidates(
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
     """Paginated, candidate-grain review queue — see
-    `sql_backend.list_review_candidates` for the full filter semantics this
-    mirrors exactly (case-insensitive `search` is `ILIKE` here, not `LIKE` —
-    Postgres's `LIKE` is case-sensitive, unlike SQLite's)."""
+    `sql_backend.list_review_candidates` for the full filter and bucket
+    semantics this mirrors exactly (case-insensitive `search` is `ILIKE`
+    here, not `LIKE` — Postgres's `LIKE` is case-sensitive, unlike
+    SQLite's)."""
     where = []
     params: list = []
     if patid_a is not None and patid_b is not None:
@@ -517,23 +569,18 @@ def list_review_candidates(
                 like = f"%{token}%"
                 params.extend([like, like, like])
 
-    reviewed_expr = (
-        "(ema.mid = emb.mid OR EXISTS ("
-        "SELECT 1 FROM audit_log al WHERE al.action = 'dismiss' "
-        "AND al.patids = rc.patid_a || ',' || rc.patid_b))"
-    )
-    if reviewed is True:
-        where.append(reviewed_expr)
-    elif reviewed is False:
-        where.append(f"NOT {reviewed_expr}")
+    if bucket is not None:
+        where.append(f"({_BUCKET_EXPR}) = %s")
+        params.append(bucket)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
-    base_from = """
+    base_from = f"""
         FROM review_candidate rc
         JOIN entity_member ema ON ema.patid = rc.patid_a
         JOIN entity_member emb ON emb.patid = rc.patid_b
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
+{_PAIR_DECISION_JOIN}
     """
 
     total_row = conn.execute(
@@ -549,7 +596,8 @@ def list_review_candidates(
 {_PAIR_ATTR_SELECT},
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = ema.mid) AS member_count_a,
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = emb.mid) AS member_count_b,
-               {reviewed_expr} AS reviewed
+               rpd.decision AS reviewer_decision,
+               ({_BUCKET_EXPR}) AS bucket
         {base_from}
         {where_sql}
         ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
@@ -558,6 +606,45 @@ def list_review_candidates(
         [*params, page_size, offset],
     ).fetchall()
     return [dict(r) for r in rows], total
+
+
+def review_bucket_counts(conn: PgConnection) -> dict[str, int]:
+    """Counterpart of `sql_backend.review_bucket_counts`."""
+    rows = conn.execute(
+        f"""
+        SELECT ({_BUCKET_EXPR}) AS bucket, COUNT(*) AS n
+        FROM review_candidate rc
+        JOIN entity_member ema ON ema.patid = rc.patid_a
+        JOIN entity_member emb ON emb.patid = rc.patid_b
+{_PAIR_DECISION_JOIN}
+        GROUP BY 1
+        """
+    ).fetchall()
+    return {row["bucket"]: int(row["n"]) for row in rows}
+
+
+def record_pair_decisions(conn: PgConnection, rows: list[tuple]) -> None:
+    """Counterpart of `sql_backend.record_pair_decisions` — upsert keyed on
+    the pair, last write wins."""
+    _executemany(
+        conn,
+        """
+        INSERT INTO reviewer_pair_decision
+            (patid_a, patid_b, decision, audit_id, ts_utc)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT(patid_a, patid_b) DO UPDATE SET
+            decision=excluded.decision, audit_id=excluded.audit_id,
+            ts_utc=excluded.ts_utc
+        """,
+        rows,
+    )
+
+
+def clear_pair_decisions_for_audit(conn: PgConnection, audit_id: int) -> None:
+    """Counterpart of `sql_backend.clear_pair_decisions_for_audit`."""
+    conn.execute(
+        "DELETE FROM reviewer_pair_decision WHERE audit_id = %s", (audit_id,)
+    )
 
 
 def upsert_suggestion(
@@ -1024,6 +1111,9 @@ __all__ = [
     "replace_review_candidates_for_run",
     "insert_review_candidates",
     "review_candidates_for_patid",
+    "review_bucket_counts",
+    "record_pair_decisions",
+    "clear_pair_decisions_for_audit",
     "all_entity_member_mids",
     "get_entity",
     "list_entities",

@@ -125,6 +125,23 @@ export const RecordsPageSchema = z.object({
 });
 export type RecordsPage = z.infer<typeof RecordsPageSchema>;
 
+/** The Review Queue's four sections — mirrors `QUEUE_BUCKETS` in
+ * `empi-service/src/api/pair_verdicts.py`, which the API validates `?bucket=`
+ * against.
+ *
+ * `needs_review` and `reviewed` are the human ones; `auto_merged` and
+ * `auto_rejected` are what the pipeline decided unattended. A pair sits in
+ * exactly one, and a reviewer decision always moves it to `reviewed`
+ * regardless of what the pipeline concluded. */
+export const REVIEW_BUCKETS = [
+  "needs_review",
+  "reviewed",
+  "auto_merged",
+  "auto_rejected",
+] as const;
+export const ReviewBucketSchema = z.enum(REVIEW_BUCKETS);
+export type ReviewBucket = z.infer<typeof ReviewBucketSchema>;
+
 export const ReviewQueueItemSchema = z.object({
   patid_a: z.string(),
   patid_b: z.string(),
@@ -138,7 +155,12 @@ export const ReviewQueueItemSchema = z.object({
   source_blocks: z.string().nullable(),
   ml_match_probability: z.number().nullable().optional(),
   ml_classification_tier: z.string().nullable().optional(),
-  reviewed: z.boolean(),
+  /** Which pipeline stage decided this pair. Null for pairs written by
+   * incremental scoring, which runs no model stage. */
+  verdict: z.string().nullable().optional(),
+  bucket: ReviewBucketSchema,
+  /** Non-null exactly when `bucket === "reviewed"`. */
+  reviewer_decision: z.enum(["merged", "not_a_match"]).nullable().optional(),
   patient_a: CandidatePatientSchema,
   patient_b: CandidatePatientSchema,
 });
@@ -149,11 +171,17 @@ export const ReviewQueuePageSchema = z.object({
   page: z.number(),
   page_size: z.number(),
   items: z.array(ReviewQueueItemSchema),
+  /** Pair count per section — always the whole-index totals, unaffected by
+   * this response's filters, so the section tabs don't change as you filter. */
+  bucket_counts: z.record(z.string(), z.number()).default({}),
 });
 export type ReviewQueuePage = z.infer<typeof ReviewQueuePageSchema>;
 
 export const DismissResponseSchema = z.object({
   audit_id: z.number(),
+  /** The `mid` the B-side record was moved to, when dismissing a pair the
+   * pipeline had merged. Null for the ordinary "wasn't merged" case. */
+  unmerged_to_mid: z.string().nullable().optional(),
 });
 
 export const RawRecordSchema = z.object({

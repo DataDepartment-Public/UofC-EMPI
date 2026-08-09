@@ -117,7 +117,9 @@ CREATE TABLE entity_member (
     updated_utc  TEXT NOT NULL
 );
 
--- One row per unresolved pair awaiting review (backs GET /review-queue).
+-- One row per candidate pair the run decided -- the WHOLE pool, not just the
+-- human queue (backs GET /review-queue and all four of its sections). See
+-- src/api/pair_verdicts.py.
 CREATE TABLE review_candidate (
     id                      INTEGER PRIMARY KEY,
     patid_a, patid_b        TEXT NOT NULL,
@@ -129,7 +131,24 @@ CREATE TABLE review_candidate (
     fs_match_probability    REAL,       -- incremental scoring only
     fs_classification_tier  TEXT,
     ml_match_probability    REAL,       -- Stage 4.5 score, threaded in at batch publish
-    ml_classification_tier  TEXT
+    ml_classification_tier  TEXT,
+    verdict                 TEXT        -- which stage decided it: auto_merge_rule |
+                                        -- reject | gate_dropped | ml_auto_merge |
+                                        -- ml_human_review | undecided. NULL from
+                                        -- incremental scoring (no model stage runs).
+);
+
+-- What a human concluded about one specific pair. Its own table, not a column
+-- on review_candidate, because publish REPLACES that table per run and a
+-- reviewer's decision must survive any number of republishes -- the same
+-- stickiness locked_patids gives entity membership, at pair grain. Written by
+-- every /audit/* action that rules on a pair; an undo deletes by audit_id.
+CREATE TABLE reviewer_pair_decision (
+    patid_a, patid_b        TEXT NOT NULL,
+    decision                TEXT NOT NULL,   -- 'merged' | 'not_a_match'
+    audit_id                INTEGER NOT NULL,
+    ts_utc                  TEXT NOT NULL,
+    PRIMARY KEY (patid_a, patid_b)
 );
 
 -- Append-only audit trail. Never updated in place except the `undone` flag.
@@ -227,12 +246,29 @@ GET /records/{patid}/ssn-clean      → the pipeline-normalized SSN (`cleaned_at
                                        logged as its own `view_ssn_clean` audit action
                                        — the two are not interchangeable and not
                                        logged identically.
-GET /review-queue?confidence_min=&confidence_max=&reviewed=&search=&page=&page_size=
+GET /review-queue?confidence_min=&confidence_max=&bucket=&search=&page=&page_size=
                                      → candidate-grain review queue (one row per
-                                       pending pair, not per cluster). Sorted/filtered
+                                       candidate pair, not per cluster). Sorted/filtered
                                        on COALESCE(confidence, ml_match_probability) —
                                        most pairs have no rule confidence, only an ML
                                        score.
+
+                                       `bucket` is one of the four reviewer-facing
+                                       sections (422 on anything else); unset returns
+                                       every candidate, and each row carries its own
+                                       `bucket` either way:
+                                         needs_review  — nothing resolved it, nobody ruled
+                                         reviewed      — a reviewer ruled on this exact pair
+                                         auto_merged   — the two records share a mid today
+                                         auto_rejected — the reject rules or the gate
+                                                         declined it
+                                       A reviewer decision always wins over the
+                                       pipeline's verdict. "Merged" is read off the
+                                       index, not the verdict, since the two can
+                                       disagree — see src/api/pair_verdicts.py.
+                                       Every response also carries `bucket_counts`,
+                                       the whole-index total per section (not narrowed
+                                       by this request's filters).
 POST /records/score
 GET /records/score/{run_id}         → incremental single/batch scoring against the
                                        existing published population, no full re-run
@@ -300,14 +336,21 @@ POST /audit/unmerge
 
 POST /audit/dismiss
   headers: X-Reviewer-Id: <reviewer>
-  body: {"patid_a": "P1", "patid_b": "P2"}   # "Not a match" on a review-queue pair
-  → 200 {audit_id}
+  body: {"patid_a": "P1", "patid_b": "P2"}   # "Not a match" on a candidate pair
+  → 200 {audit_id, unmerged_to_mid}
+  # If the two records currently share a mid, this SPLITS them first (an
+  # ordinary unmerge of patid_b, its own audit entry, undoable on its own
+  # terms) and returns the new mid — that's the override for the queue's
+  # Auto-merged section. `unmerged_to_mid` is null when they weren't merged.
 
 POST /audit/{audit_id}/undo
   headers: X-Reviewer-Id: <reviewer>
   → 200 {audit_id, reversed_action, entity, new_mids}
-  # reverses a prior merge/unmerge by id; marks the original row undone=true,
-  # writes a new row with prev_mid/undo_of set. 404 if already undone.
+  # reverses a prior merge/unmerge/dismiss by id; marks the original row
+  # undone=true, writes a new row with prev_mid/undo_of set, and retracts the
+  # reviewer_pair_decision rows that entry wrote. Undoing a dismiss mutates no
+  # entity (a dismiss never did) — it only retracts the decision, returning the
+  # pair to whichever section its verdict puts it in. 404 if already undone.
 
 GET /audit?limit=&since=  → [audit_log rows, newest first]
 ```

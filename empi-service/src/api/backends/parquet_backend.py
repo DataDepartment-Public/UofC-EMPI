@@ -31,6 +31,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.api.backends.search_terms import search_tokens
+from src.api.pair_verdicts import MERGE_VERDICTS, REJECT_VERDICTS, bucket_for
 
 _SCHEMAS: dict[str, list[str]] = {
     "block_key": ["block_id", "key_value", "patid"],
@@ -48,6 +49,10 @@ _SCHEMAS: dict[str, list[str]] = {
         "source_blocks", "run_id", "created_utc",
         "fs_match_probability", "fs_classification_tier",
         "ml_match_probability", "ml_classification_tier",
+        "verdict",
+    ],
+    "reviewer_pair_decision": [
+        "patid_a", "patid_b", "decision", "audit_id", "ts_utc",
     ],
     "entity_suggestion": ["patid", "run_id", "suggested_mid", "created_utc"],
     "record_attrs": [
@@ -63,17 +68,17 @@ _SCHEMAS: dict[str, list[str]] = {
     ],
 }
 
-#: The 10 columns `publish.py`'s batch replace passes to
+#: The 11 columns `publish.py`'s batch replace passes to
 #: `replace_review_candidates_for_run` — no `fs_match_probability` /
 #: `fs_classification_tier` (batch publish never FS-scores a run; only
 #: incremental scoring does, via `insert_review_candidates`'s 10-column FS
-#: rows), but it does carry the Stage 4.5 ML matcher's score. Matches
-#: `sql_backend._REVIEW_CANDIDATE_INSERT_SQL`'s column list (as opposed to
-#: the ``_FULL_SQL`` variant).
+#: rows), but it does carry the Stage 4.5 ML matcher's score and the pair's
+#: pipeline `verdict`. Matches `sql_backend._REVIEW_CANDIDATE_INSERT_SQL`'s
+#: column list (as opposed to the ``_FULL_SQL`` variant).
 _REVIEW_CANDIDATE_BATCH_COLUMNS: list[str] = [
     "patid_a", "patid_b", "match_rule", "confidence", "evidence",
     "source_blocks", "run_id", "created_utc",
-    "ml_match_probability", "ml_classification_tier",
+    "ml_match_probability", "ml_classification_tier", "verdict",
 ]
 
 #: The 10 columns `incremental.py`'s `_persist_review_candidates` passes to
@@ -85,6 +90,10 @@ _REVIEW_CANDIDATE_FS_COLUMNS: list[str] = [
     "source_blocks", "run_id", "created_utc",
     "fs_match_probability", "fs_classification_tier",
 ]
+
+#: The verdicts a pipeline stage decided outright — the complement of
+#: `sql_backend._UNRESOLVED_VERDICT`, which spells the same set out in SQL.
+_RESOLVED_VERDICTS: list[str] = sorted(MERGE_VERDICTS | REJECT_VERDICTS)
 
 #: `record_attrs` columns the dashboard read routes join in for display —
 #: `run_id` deliberately excluded, matching `sql_backend.get_entity`'s SQL SELECT
@@ -289,6 +298,9 @@ class ParquetIndexBackend:
         new = pd.DataFrame(rows, columns=_REVIEW_CANDIDATE_FS_COLUMNS)
         new["ml_match_probability"] = None
         new["ml_classification_tier"] = None
+        # Incremental scoring runs no gate and no ML matcher, so it has no
+        # verdict to record — NULL, which reads as `needs_review`.
+        new["verdict"] = None
         new = new[_SCHEMAS["review_candidate"]]
         combined = pd.concat([self._tables["review_candidate"], new], ignore_index=True)
         self._tables["review_candidate"] = combined.drop_duplicates(
@@ -327,12 +339,15 @@ class ParquetIndexBackend:
 
     def replace_review_candidates_for_run(self, run_id: str, rows: list[tuple]) -> None:
         """Full per-run replace, mirroring `sql_backend.replace_review_candidates_for_run`
-        — a pair no longer in the latest run's `non_matches` disappears rather
-        than lingering. `rows` are the 10-column batch-publish tuples (no FS
-        score columns — batch publish never FS-scores a run, only incremental
-        scoring does via `insert_review_candidates`'s 10-column FS rows); the
-        two FS columns are set to `None` here, matching the `NULL` SQLite
-        leaves for the columns its own batch INSERT omits."""
+        — a pair no longer in the latest run's candidate pool disappears
+        rather than lingering. `rows` are the 11-column batch-publish tuples
+        (no FS score columns — batch publish never FS-scores a run, only
+        incremental scoring does via `insert_review_candidates`'s 10-column
+        FS rows); the two FS columns are set to `None` here, matching the
+        `NULL` SQLite leaves for the columns its own batch INSERT omits.
+
+        Never touches `reviewer_pair_decision` — a reviewer's conclusion must
+        survive any number of republishes."""
         df = self._tables["review_candidate"]
         df = df[df["run_id"] != run_id]
         if rows:
@@ -531,10 +546,26 @@ class ParquetIndexBackend:
             .drop_duplicates(subset=["patid_a", "patid_b"], keep="first")
         )
 
+    def _pair_decision_map(self) -> dict[tuple[str, str], str]:
+        """`{(patid_a, patid_b): decision}` — the pandas stand-in for
+        `sql_backend`'s `LEFT JOIN reviewer_pair_decision`."""
+        rpd = self._tables["reviewer_pair_decision"]
+        return {
+            (row["patid_a"], row["patid_b"]): row["decision"]
+            for _, row in rpd.iterrows()
+        }
+
+    def _unresolved_verdict_mask(self, rc: pd.DataFrame) -> pd.Series:
+        """Mirrors `sql_backend._UNRESOLVED_VERDICT` — pairs no pipeline
+        stage resolved. NaN/None passes, as NULL does in SQL."""
+        return ~rc["verdict"].isin(_RESOLVED_VERDICTS)
+
     def review_candidates_for_patid(self, patid: str) -> list[dict]:
         """Pandas equivalent of `sql_backend.review_candidates_for_patid` — joins
         `record_attrs` on both sides of the pair so the UI has the other
-        PATID's display fields, not just its id. Ordered by
+        PATID's display fields, not just its id, and is likewise restricted
+        to pairs still genuinely open (see the SQL version's docstring for
+        why both callers want that, not the whole candidate pool). Ordered by
         `COALESCE(confidence, ml_match_probability)` DESC (nulls last,
         pandas' default) — most pairs only have an ML score, no rule
         confidence, so sorting on `confidence` alone would leave the
@@ -543,7 +574,13 @@ class ParquetIndexBackend:
         `patid_a`/`patid_b` substitute as the deterministic tiebreak SQL
         gets from `id`."""
         rc = self._deduped_review_candidates()
-        hits = rc[(rc["patid_a"] == patid) | (rc["patid_b"] == patid)]
+        decisions = self._pair_decision_map()
+        touches = (rc["patid_a"] == patid) | (rc["patid_b"] == patid)
+        undecided = ~pd.Series(
+            [(a, b) in decisions for a, b in zip(rc["patid_a"], rc["patid_b"])],
+            index=rc.index,
+        )
+        hits = rc[touches & undecided & self._unresolved_verdict_mask(rc)]
         attrs = self._tables["record_attrs"][_DISPLAY_ATTR_COLUMNS]
         a_attrs = attrs.add_prefix("a_").rename(columns={"a_patid": "patid_a"})
         b_attrs = attrs.add_prefix("b_").rename(columns={"b_patid": "patid_b"})
@@ -561,24 +598,11 @@ class ParquetIndexBackend:
         )
         return [_row_to_dict(row) for _, row in joined.iterrows()]
 
-    def list_review_candidates(
-        self,
-        *,
-        confidence_min: float | None = None,
-        confidence_max: float | None = None,
-        reviewed: bool | None = None,
-        search: str | None = None,
-        patid_a: str | None = None,
-        patid_b: str | None = None,
-        page: int = 1,
-        page_size: int = 50,
-    ) -> tuple[list[dict], int]:
-        """Pandas equivalent of `sql_backend.list_review_candidates` — candidate-grain
-        (one row per pair, not per cluster). "Reviewed" mirrors the SQL
-        version: both sides sharing a `mid` today (merged), or a prior
-        `dismiss` audit_log entry for the exact pair. `patid_a`/`patid_b`
-        narrow to one exact pair, AND-combined with any other filter — see
-        the SQL version's docstring."""
+    def _joined_candidates(self) -> pd.DataFrame:
+        """Every deduped candidate pair joined to both sides' current entity
+        and display attributes, with its `bucket` and `reviewer_decision`
+        resolved — the shared body of `list_review_candidates` and
+        `review_bucket_counts`, which must agree on both."""
         rc = self._deduped_review_candidates()
         members = self._tables["entity_member"][["patid", "mid"]]
         attrs = self._tables["record_attrs"][_DISPLAY_ATTR_COLUMNS]
@@ -599,13 +623,50 @@ class ParquetIndexBackend:
         joined["member_count_a"] = joined["mid_a"].map(member_counts).fillna(0).astype(int)
         joined["member_count_b"] = joined["mid_b"].map(member_counts).fillna(0).astype(int)
 
-        dismissed_pairs = set()
-        audit = self._tables["audit_log"]
-        for _, row in audit.loc[audit["action"] == "dismiss", "patids"].items():
-            dismissed_pairs.add(row)
-        joined["reviewed"] = (joined["mid_a"] == joined["mid_b"]) | (
-            joined["patid_a"] + "," + joined["patid_b"]
-        ).isin(dismissed_pairs)
+        decisions = self._pair_decision_map()
+        joined["reviewer_decision"] = [
+            decisions.get((a, b))
+            for a, b in zip(joined["patid_a"], joined["patid_b"])
+        ]
+        joined["bucket"] = [
+            bucket_for(
+                verdict=verdict if isinstance(verdict, str) else None,
+                reviewer_decision=decision,
+                same_entity=bool(same),
+            )
+            for verdict, decision, same in zip(
+                joined["verdict"],
+                joined["reviewer_decision"],
+                joined["mid_a"] == joined["mid_b"],
+            )
+        ]
+        return joined
+
+    def review_bucket_counts(self) -> dict[str, int]:
+        """Pandas equivalent of `sql_backend.review_bucket_counts`."""
+        joined = self._joined_candidates()
+        if joined.empty:
+            return {}
+        return {k: int(v) for k, v in joined["bucket"].value_counts().items()}
+
+    def list_review_candidates(
+        self,
+        *,
+        confidence_min: float | None = None,
+        confidence_max: float | None = None,
+        bucket: str | None = None,
+        search: str | None = None,
+        patid_a: str | None = None,
+        patid_b: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[list[dict], int]:
+        """Pandas equivalent of `sql_backend.list_review_candidates` —
+        candidate-grain (one row per pair, not per cluster), bucketed into
+        the same four Review Queue sections. `patid_a`/`patid_b` narrow to
+        one exact pair, AND-combined with any other filter — see the SQL
+        version's docstring for both."""
+        joined = self._joined_candidates()
 
         sort_conf = joined["confidence"].fillna(joined["ml_match_probability"])
         mask = pd.Series(True, index=joined.index)
@@ -635,10 +696,8 @@ class ParquetIndexBackend:
                     | joined["patid_b"].str.lower().str.contains(like, na=False, regex=False)
                 )
             mask &= side_a | side_b
-        if reviewed is True:
-            mask &= joined["reviewed"]
-        elif reviewed is False:
-            mask &= ~joined["reviewed"]
+        if bucket is not None:
+            mask &= joined["bucket"] == bucket
 
         filtered = (
             joined[mask]
@@ -683,6 +742,27 @@ class ParquetIndexBackend:
         }], columns=_SCHEMAS["audit_log"])
         self._tables["audit_log"] = pd.concat([df, new], ignore_index=True)
         return next_id
+
+    def record_pair_decisions(self, rows: list[tuple]) -> None:
+        """Pandas equivalent of `sql_backend.record_pair_decisions` — upsert
+        keyed on the pair, last write wins."""
+        if not rows:
+            return
+        cols = _SCHEMAS["reviewer_pair_decision"]
+        new = pd.DataFrame(rows, columns=cols)
+        combined = pd.concat(
+            [self._tables["reviewer_pair_decision"], new], ignore_index=True
+        )
+        self._tables["reviewer_pair_decision"] = combined.drop_duplicates(
+            subset=["patid_a", "patid_b"], keep="last"
+        ).reset_index(drop=True)
+
+    def clear_pair_decisions_for_audit(self, audit_id: int) -> None:
+        """Pandas equivalent of `sql_backend.clear_pair_decisions_for_audit`."""
+        df = self._tables["reviewer_pair_decision"]
+        self._tables["reviewer_pair_decision"] = df[
+            df["audit_id"] != audit_id
+        ].reset_index(drop=True)
 
     def _undone_ids(self) -> set[int]:
         """Every audit_log id some other row's `undo_of` points at — `undone`

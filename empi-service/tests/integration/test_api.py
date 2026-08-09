@@ -78,7 +78,9 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
     /records, /clusters, /audit tests need without running the real pipeline.
 
     P1<->P2 auto-merge (SSN_DOB); P3 true singleton; P4<->P5 review-tier
-    candidate (NAME_DOB_SEX) — exercises the review-queue/raw-data routes too.
+    candidate (NAME_DOB_SEX); P1<->P3 a deterministic reject — one pair per
+    Review Queue section, so `/review-queue?bucket=` has something to find in
+    each. Exercises the review-queue/raw-data routes too.
     """
     from src.api.ingest import publish
 
@@ -129,6 +131,15 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
     review_evidence_path = settings.non_matches_dir / f"review_evidence_{run_id}.parquet"
     review_evidence.to_parquet(review_evidence_path, index=False)
 
+    rejects = pd.DataFrame({
+        "PATID_A": ["P1"], "PATID_B": ["P3"],
+        "source_blocks": ["B3"], "n_blocks": [1],
+        "n_contradictions": [3], "decision": ["no_match"],
+        "reject_rule": ["DOB_CONFLICT"],
+    })
+    rejects_path = settings.no_match_dir / f"rejects_{run_id}.parquet"
+    rejects.to_parquet(rejects_path, index=False)
+
     clusters = pd.DataFrame({
         "PATID": ["P1", "P2", "P3", "P4", "P5"], "cluster_id": [0, 0, 1, 2, 3],
     })
@@ -145,6 +156,7 @@ def _publish_fixture_run(settings: Settings, run_id: str = "r1") -> None:
         raw_input=ref(cleaned_path, 5), cleaned=ref(cleaned_path, 5),
         candidate_pairs=ref(matches_path, 1), matches=ref(matches_path, 1),
         non_matches=ref(non_matches_path, 1),
+        rejects=ref(rejects_path, 1),
         review_evidence=ref(review_evidence_path, 1),
         clusters=ref(clusters_path, 5),
         counts={
@@ -581,6 +593,213 @@ class TestRecordsScore:
         assert "Interrupted" in body["error"]
 
 
+class TestReviewQueueBuckets:
+    """GET /review-queue's four sections, and the two reviewer overrides that
+    move a pair out of a pipeline-decided one — see `src/api/pair_verdicts.py`
+    and `routers/audit.py`'s PAIR DECISIONS note."""
+
+    HEADERS = {"X-Reviewer-Id": "rev@example.org"}
+
+    def _buckets(self, client) -> dict[str, str]:
+        """`{pair -> bucket}` across every candidate, unfiltered."""
+        body = client.get("/review-queue").json()
+        return {
+            f'{i["patid_a"]}-{i["patid_b"]}': i["bucket"] for i in body["items"]
+        }
+
+    def test_each_pool_lands_in_its_own_section(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+
+        body = client.get("/review-queue").json()
+        assert body["total"] == 3
+        assert body["bucket_counts"] == {
+            "needs_review": 1, "reviewed": 0,
+            "auto_merged": 1, "auto_rejected": 1,
+        }
+        assert self._buckets(client) == {
+            "P1-P2": "auto_merged",    # deterministic SSN_DOB
+            "P4-P5": "needs_review",   # review-tier rule only
+            "P1-P3": "auto_rejected",  # >=3 contradictions
+        }
+
+        # Filtering returns exactly that section, and nothing else.
+        for bucket, pair in (
+            ("auto_merged", ("P1", "P2")),
+            ("needs_review", ("P4", "P5")),
+            ("auto_rejected", ("P1", "P3")),
+        ):
+            resp = client.get(f"/review-queue?bucket={bucket}")
+            assert resp.status_code == 200
+            items = resp.json()["items"]
+            assert [(i["patid_a"], i["patid_b"]) for i in items] == [pair]
+            assert items[0]["bucket"] == bucket
+
+    def test_unknown_bucket_is_rejected(self, client, test_settings):
+        _publish_fixture_run(test_settings, "r1")
+        resp = client.get("/review-queue?bucket=merged")
+        assert resp.status_code == 422
+
+    def test_auto_merged_pair_is_not_reported_as_reviewed(
+        self, client, test_settings
+    ):
+        """The bug this split fixes: a pair the pipeline merged used to
+        satisfy the old `mid_a == mid_b` "reviewed" test and show up under
+        "Already reviewed" with no human ever having looked at it."""
+        _publish_fixture_run(test_settings, "r1")
+        item = client.get("/review-queue?bucket=auto_merged").json()["items"][0]
+        assert item["verdict"] == "auto_merge_rule"
+        assert item["reviewer_decision"] is None
+        assert client.get("/review-queue?bucket=reviewed").json()["total"] == 0
+
+    def test_dismissing_an_auto_merged_pair_splits_it(self, client, test_settings):
+        """The Auto-merged override. "Not a match" on a merged pair has to
+        actually take the records apart, not just relabel the row."""
+        _publish_fixture_run(test_settings, "r1")
+        mid_before = client.get("/records?search=P1").json()["items"][0]["mid"]
+
+        resp = client.post(
+            "/audit/dismiss", json={"patid_a": "P1", "patid_b": "P2"},
+            headers=self.HEADERS,
+        )
+        assert resp.status_code == 200
+        new_mid = resp.json()["unmerged_to_mid"]
+        assert new_mid is not None and new_mid != mid_before
+
+        cluster = client.get(f"/clusters/{mid_before}").json()
+        assert [m["patid"] for m in cluster["members"]] == ["P1"]
+
+        assert self._buckets(client)["P1-P2"] == "reviewed"
+        item = client.get("/review-queue?bucket=reviewed").json()["items"][0]
+        assert item["reviewer_decision"] == "not_a_match"
+        # Its pipeline verdict is untouched — the reviewer overruled the
+        # decision, they didn't rewrite what the pipeline concluded.
+        assert item["verdict"] == "auto_merge_rule"
+
+    def test_merging_an_auto_rejected_pair_promotes_it(self, client, test_settings):
+        """The Auto-rejected override — plain `POST /audit/merge`, no new
+        route needed."""
+        _publish_fixture_run(test_settings, "r1")
+        p1_mid = client.get("/records?search=P1").json()["items"][0]["mid"]
+
+        resp = client.post(
+            "/audit/merge", json={"mid": p1_mid, "patids": ["P3"]},
+            headers=self.HEADERS,
+        )
+        assert resp.status_code == 200
+
+        buckets = self._buckets(client)
+        assert buckets["P1-P3"] == "reviewed"
+        item = next(
+            i for i in client.get("/review-queue?bucket=reviewed").json()["items"]
+            if (i["patid_a"], i["patid_b"]) == ("P1", "P3")
+        )
+        assert item["reviewer_decision"] == "merged"
+        assert item["verdict"] == "reject"
+
+    def test_merge_confirms_every_pair_in_the_resulting_entity(
+        self, client, test_settings
+    ):
+        """Merging P3 into {P1, P2} asserts P3 is the same patient as both,
+        so (P1, P3) *and* (P2, P3) become reviewer-confirmed — not only the
+        pair the request happened to name."""
+        _publish_fixture_run(test_settings, "r1")
+        p1_mid = client.get("/records?search=P1").json()["items"][0]["mid"]
+        client.post(
+            "/audit/merge", json={"mid": p1_mid, "patids": ["P3"]},
+            headers=self.HEADERS,
+        )
+        # (P2, P3) was never a candidate pair, so it has no queue row — but
+        # the decision is recorded, which is what stops a later publish from
+        # resurfacing it. (P1, P3) is the one with a row.
+        assert self._buckets(client)["P1-P3"] == "reviewed"
+
+    def test_undo_returns_the_pair_to_its_pipeline_section(
+        self, client, test_settings
+    ):
+        _publish_fixture_run(test_settings, "r1")
+        p1_mid = client.get("/records?search=P1").json()["items"][0]["mid"]
+        audit_id = client.post(
+            "/audit/merge", json={"mid": p1_mid, "patids": ["P3"]},
+            headers=self.HEADERS,
+        ).json()["audit_id"]
+        assert self._buckets(client)["P1-P3"] == "reviewed"
+
+        resp = client.post(f"/audit/{audit_id}/undo", headers=self.HEADERS)
+        assert resp.status_code == 200
+        assert self._buckets(client)["P1-P3"] == "auto_rejected"
+
+    def test_undoing_a_dismiss_returns_the_pair_to_needs_review(
+        self, client, test_settings
+    ):
+        _publish_fixture_run(test_settings, "r1")
+        audit_id = client.post(
+            "/audit/dismiss", json={"patid_a": "P4", "patid_b": "P5"},
+            headers=self.HEADERS,
+        ).json()["audit_id"]
+        assert self._buckets(client)["P4-P5"] == "reviewed"
+
+        resp = client.post(f"/audit/{audit_id}/undo", headers=self.HEADERS)
+        assert resp.status_code == 200
+        assert resp.json()["reversed_action"] == "dismiss"
+        assert self._buckets(client)["P4-P5"] == "needs_review"
+
+        # And it can't be undone twice.
+        assert client.post(
+            f"/audit/{audit_id}/undo", headers=self.HEADERS
+        ).status_code == 400
+
+    def test_undoing_a_split_dismiss_leaves_the_split_to_its_own_entry(
+        self, client, test_settings
+    ):
+        """Dismissing a merged pair writes two entries — an unmerge and a
+        dismiss. Undoing the dismiss retracts only the decision; putting the
+        records back together is the unmerge entry's own undo."""
+        _publish_fixture_run(test_settings, "r1")
+        mid = client.get("/records?search=P1").json()["items"][0]["mid"]
+        dismiss_id = client.post(
+            "/audit/dismiss", json={"patid_a": "P1", "patid_b": "P2"},
+            headers=self.HEADERS,
+        ).json()["audit_id"]
+
+        client.post(f"/audit/{dismiss_id}/undo", headers=self.HEADERS)
+        assert [
+            m["patid"] for m in client.get(f"/clusters/{mid}").json()["members"]
+        ] == ["P1"]
+        assert self._buckets(client)["P1-P2"] == "needs_review"
+
+        # The unmerge entry is still there and still undoable.
+        unmerge = next(
+            r for r in client.get("/audit").json() if r["action"] == "unmerge"
+        )
+        assert client.post(
+            f"/audit/{unmerge['id']}/undo", headers=self.HEADERS
+        ).status_code == 200
+        assert self._buckets(client)["P1-P2"] == "auto_merged"
+
+    def test_republish_preserves_reviewer_decisions(self, client, test_settings):
+        """`replace_review_candidates_for_run` wipes the run's candidate rows
+        — the reason decisions live in their own table."""
+        _publish_fixture_run(test_settings, "r1")
+        client.post(
+            "/audit/dismiss", json={"patid_a": "P4", "patid_b": "P5"},
+            headers=self.HEADERS,
+        )
+        assert self._buckets(client)["P4-P5"] == "reviewed"
+
+        _publish_fixture_run(test_settings, "r1")
+        assert self._buckets(client)["P4-P5"] == "reviewed"
+
+    def test_auto_decided_pairs_do_not_make_a_singleton_need_review(
+        self, client, test_settings
+    ):
+        """P3's only candidate pair is a reject — publishing it for the
+        Auto-rejected section must not turn P3 into open work."""
+        _publish_fixture_run(test_settings, "r1")
+        p3 = client.get("/records?search=P3").json()["items"][0]
+        assert p3["origin"] == "none"
+        assert p3["review_candidates"] == []
+
+
 class TestAudit:
     def test_merge_requires_reviewer_header(self, client, test_settings):
         _publish_fixture_run(test_settings, "r1")
@@ -760,20 +979,27 @@ class TestAudit:
         )
         assert resp.status_code == 404
 
-    def test_undo_dismiss_action_400s(self, client, test_settings):
-        """`dismiss` never mutates entities/members, so there's nothing for
-        `/undo` to reverse — it must reject the action outright, not silently
-        no-op."""
+    def test_undo_a_non_reversible_action_400s(self, client, test_settings):
+        """A PHI-access record isn't a state transition — there is nothing for
+        `/undo` to reverse, so it must be rejected outright rather than
+        silently no-op. (`dismiss` *is* undoable: it retracts the pair
+        decision — see `TestReviewQueueBuckets`.)"""
         _publish_fixture_run(test_settings, "r1")
-        dismiss_resp = client.post(
-            "/audit/dismiss",
-            json={"patid_a": "P4", "patid_b": "P5"},
-            headers={"X-Reviewer-Id": "reviewer.jclark"},
-        )
-        audit_id = dismiss_resp.json()["audit_id"]
-        resp = client.post(
-            f"/audit/{audit_id}/undo", headers={"X-Reviewer-Id": "reviewer.jclark"}
-        )
+        headers = {"X-Reviewer-Id": "reviewer.jclark"}
+        client.get("/records/P1/raw", headers=headers)
+
+        # `GET /audit` filters PHI-access entries out, so read the id from the
+        # log directly.
+        backend = build_index_backend(test_settings)
+        try:
+            view = next(
+                r for r in backend.list_audit_log(limit=100)
+                if r["action"] == "view_raw"
+            )
+        finally:
+            backend.close()
+
+        resp = client.post(f"/audit/{view['id']}/undo", headers=headers)
         assert resp.status_code == 400
 
     def test_undo_merge_unmerges_each_patid(self, client, test_settings):

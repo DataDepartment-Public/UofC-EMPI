@@ -25,6 +25,7 @@ import {
   ReadyResponseSchema,
   RecordsPage,
   RecordsPageSchema,
+  ReviewBucket,
   ReviewQueuePage,
   ReviewQueuePageSchema,
   RunCreateResponse,
@@ -120,7 +121,9 @@ export interface ReviewQueueFilters {
   search?: string;
   confidence_min?: number;
   confidence_max?: number;
-  reviewed?: boolean;
+  /** Which of the four sections to list. Unset returns every candidate; each
+   * item carries its own `bucket` either way. */
+  bucket?: ReviewBucket;
   /** Narrow to one exact pair (either order — the backend canonicalizes),
    * ignoring pagination and every other filter's meaning for that pair.
    * Used to deep-link from elsewhere in the UI (e.g. a cluster's comparison

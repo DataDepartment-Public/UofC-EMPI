@@ -17,6 +17,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from src.api import jobs
 from src.api.deps import get_backend, get_reviewer_id_optional, get_settings
 from src.api.backends.index_backend import IndexBackend
+from src.api.pair_verdicts import QUEUE_BUCKETS
 from src.api.schemas import (
     CandidatePatient,
     CleanSsn,
@@ -135,7 +136,9 @@ def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
         fs_classification_tier=rc.get("fs_classification_tier"),
         ml_match_probability=rc.get("ml_match_probability"),
         ml_classification_tier=rc.get("ml_classification_tier"),
-        reviewed=bool(rc["reviewed"]),
+        verdict=rc.get("verdict"),
+        bucket=rc["bucket"],
+        reviewer_decision=rc.get("reviewer_decision"),
         patient_a=_candidate_patient(rc, "a"),
         patient_b=_candidate_patient(rc, "b"),
     )
@@ -145,7 +148,7 @@ def _to_review_queue_item(rc: dict) -> ReviewQueueItem:
 def list_review_queue(
     confidence_min: float | None = None,
     confidence_max: float | None = None,
-    reviewed: bool | None = None,
+    bucket: str | None = None,
     search: str | None = None,
     patid_a: str | None = None,
     patid_b: str | None = None,
@@ -154,28 +157,45 @@ def list_review_queue(
     backend: IndexBackend = Depends(get_backend),
     settings: Settings = Depends(get_settings),
 ) -> ReviewQueuePage:
-    """Candidate-grain review queue — one row per pending pair, independent
+    """Candidate-grain review queue — one row per candidate pair, independent
     of which cluster it belongs to (docs/Dashboard-Guide.md's Review Queue
-    tab). `reviewed` unset returns every candidate; pass `reviewed=false` for
-    the default "Needs review" queue view, `reviewed=true` for "Already
-    reviewed".
+    tab).
+
+    `bucket` picks one of the queue's four sections and must be one of
+    `src/api/pair_verdicts.py`'s `QUEUE_BUCKETS`: `needs_review` (nothing
+    resolved it and no reviewer has ruled), `reviewed` (a reviewer merged or
+    dismissed this exact pair), `auto_merged` (the pipeline merged it), or
+    `auto_rejected` (the pipeline declined it). Unset returns every
+    candidate; every row carries its own `bucket` either way.
 
     `patid_a`/`patid_b` (either order — canonicalized here) narrow to one
     exact pair: the deep link a cluster's comparison history sends a
     reviewer on knows the pair, not what confidence/search/page would
     currently surface it. They combine with any other filter passed
     alongside them by AND, same as every filter here — a caller resolving a
-    specific pair should pass no other filter."""
+    specific pair should pass no other filter, `bucket` least of all, since
+    the pair's section is exactly what the caller doesn't know yet."""
+    if bucket is not None and bucket not in QUEUE_BUCKETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"bucket must be one of {list(QUEUE_BUCKETS)}, got {bucket!r}",
+        )
     page_size = page_size or settings.records_page_size
     if patid_a is not None and patid_b is not None:
         patid_a, patid_b = sorted((patid_a, patid_b))
     rows, total = backend.list_review_candidates(
         confidence_min=confidence_min, confidence_max=confidence_max,
-        reviewed=reviewed, search=search, patid_a=patid_a, patid_b=patid_b,
+        bucket=bucket, search=search, patid_a=patid_a, patid_b=patid_b,
         page=page, page_size=page_size,
     )
     items = [_to_review_queue_item(row) for row in rows]
-    return ReviewQueuePage(total=total, page=page, page_size=page_size, items=items)
+    counts = backend.review_bucket_counts()
+    return ReviewQueuePage(
+        total=total, page=page, page_size=page_size, items=items,
+        # Absent sections report 0 rather than being missing, so the UI can
+        # render every tab from this dict alone.
+        bucket_counts={b: counts.get(b, 0) for b in QUEUE_BUCKETS},
+    )
 
 
 @router.get("/records", response_model=RecordsPage)

@@ -16,6 +16,21 @@ later undo has somewhere to re-merge it into — `merge` has no equivalent
 single prior mid per patid (each patid could have come from a different
 entity), so undoing a merge always falls back out to N singleton entities
 rather than reconstructing whatever they were before.
+
+PAIR DECISIONS
+--------------
+Every action that rules on a pair also writes `reviewer_pair_decision`
+(`_pair_decision_rows`), which is what moves the pair into the Review
+Queue's "Already reviewed" section and out of whichever pipeline section it
+sat in. `audit_log` alone can't serve that: it is entity-grain and
+action-grain, so answering "has a human ruled on exactly (A, B)?" from it
+means reconstructing past membership per query. Deriving it once at write
+time is both cheaper and the only place the answer is unambiguous.
+
+The two sections the pipeline fills are overridable from the queue, and both
+overrides reuse these same routes rather than adding new ones: promoting an
+auto-rejected pair is `POST /audit/merge`, and rejecting an auto-merged pair
+is `POST /audit/dismiss`, which splits the entity first (see `dismiss`).
 """
 
 from __future__ import annotations
@@ -24,8 +39,11 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from itertools import combinations
+
 from src.api.deps import get_backend, get_reviewer_id
 from src.api.backends.index_backend import IndexBackend
+from src.api.pair_verdicts import DECISION_MERGED, DECISION_NOT_A_MATCH
 from src.api.routers.records import _to_entity
 from src.api.schemas import (
     AuditLogRow,
@@ -43,6 +61,22 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _pair_decision_rows(
+    patids: list[str], decision: str, audit_id: int, ts_utc: str
+) -> list[tuple]:
+    """`reviewer_pair_decision` rows for every distinct pair among `patids`,
+    canonicalized `a < b` to match `review_candidate`'s own ordering.
+
+    A merge is an assertion about the whole resulting set, not just about the
+    records named in the request: merging C into {A, B} says C is the same
+    patient as A *and* as B. Recording only the requested patids would leave
+    (A, C) or (B, C) sitting in the queue as if still undecided."""
+    return [
+        (a, b, decision, audit_id, ts_utc)
+        for a, b in combinations(sorted(set(patids)), 2)
+    ]
 
 
 def _single_member_origin(backend: IndexBackend, patid: str) -> str:
@@ -101,6 +135,18 @@ def _do_merge(
             related_patids=",".join(prior_members) if prior_members else None,
             undo_of=undo_of,
         )
+        # Every pair across the entity's new membership is now reviewer-
+        # confirmed — the same snapshot `related_patids` records, resolved to
+        # pair grain so the Review Queue can act on it directly. Not on the
+        # undo path: restoring an entity a reviewer had split retracts their
+        # earlier "not a match", it doesn't assert the opposite, and `undo`
+        # has already cleared the original entry's rows.
+        if undo_of is None:
+            backend.record_pair_decisions(
+                _pair_decision_rows(
+                    [*prior_members, *patids], DECISION_MERGED, audit_id, now
+                )
+            )
         backend.commit()
     except Exception:
         backend.rollback()
@@ -169,6 +215,17 @@ def _do_unmerge(
             related_patids=",".join(remaining_patids) if remaining_patids else None,
             prev_mid=mid, undo_of=undo_of,
         )
+        # Pulling a record out of an entity says it doesn't belong with the
+        # members left behind — one `not_a_match` per resulting pair. Not on
+        # the undo path, though: undoing a merge is a retraction, not the
+        # opposite assertion, and `undo` clears the original's rows instead.
+        if undo_of is None:
+            backend.record_pair_decisions(
+                [
+                    (*sorted((patid, other)), DECISION_NOT_A_MATCH, audit_id, now)
+                    for other in remaining_patids
+                ]
+            )
         backend.commit()
     except Exception:
         backend.rollback()
@@ -208,7 +265,7 @@ def undo(
     row = backend.get_audit_log_row(audit_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Unknown audit_id: {audit_id}")
-    if row["action"] not in ("merge", "unmerge"):
+    if row["action"] not in ("merge", "unmerge", "dismiss"):
         raise HTTPException(
             status_code=400,
             detail=f"Undo isn't supported for action {row['action']!r}.",
@@ -218,6 +275,40 @@ def undo(
             status_code=400,
             detail=f"Audit entry #{audit_id} has already been undone.",
         )
+
+    # Retract the pair decisions this entry asserted before reversing its
+    # entity mutation. Scoped to `audit_id`, so a pair some *later* action
+    # has since ruled on keeps that newer decision (see
+    # `sql_backend.clear_pair_decisions_for_audit`).
+    backend.begin()
+    try:
+        backend.clear_pair_decisions_for_audit(audit_id)
+        backend.commit()
+    except Exception:
+        backend.rollback()
+        raise
+
+    if row["action"] == "dismiss":
+        # A dismiss mutated no entity, so the retraction above is the entire
+        # reversal — the pair falls back to whichever section its pipeline
+        # verdict puts it in. Note this does *not* re-merge a pair that
+        # `dismiss` split: that split is its own `unmerge` entry, undoable on
+        # its own terms, and silently reversing it from here would undo two
+        # audit entries under one id.
+        now = _now()
+        backend.begin()
+        try:
+            backend.insert_audit_log(
+                ts_utc=now, user=reviewer_id, action="dismiss",
+                patids=row["patids"], mid=row["mid"],
+                prev_state="Dismissed", next_state="Needs review",
+                run_id=None, undo_of=audit_id,
+            )
+            backend.commit()
+        except Exception:
+            backend.rollback()
+            raise
+        return UndoResponse(audit_id=audit_id, reversed_action="dismiss")
 
     if row["action"] == "merge":
         # Each patid could have come from a different prior entity, so there
@@ -261,35 +352,58 @@ def dismiss(
     backend: IndexBackend = Depends(get_backend),
     reviewer_id: str = Depends(get_reviewer_id),
 ) -> DismissResponse:
-    """Mark a review-queue candidate "Not a match" — the reviewer's
-    considered rejection of a false-positive suggestion, distinct from
-    simply leaving it unreviewed. Recorded as an audit_log entry only; no
-    entity/member mutation, since the pair was never merged. The queue query
-    (`sql_backend.list_review_candidates`) excludes any pair with a prior `dismiss`
-    entry from the default "Needs review" view — it moves to "Already
-    reviewed" instead of reappearing indefinitely."""
-    mid = backend.get_entity_mid_for_patid(
-        body.patid_a
-    ) or backend.get_entity_mid_for_patid(body.patid_b)
+    """Mark a candidate pair "Not a match" — the reviewer's considered
+    rejection, distinct from simply leaving it unreviewed. Writes a
+    `reviewer_pair_decision`, which moves the pair into the queue's "Already
+    reviewed" section instead of leaving it to reappear indefinitely.
+
+    **If the two records are currently in the same entity, this splits them
+    first.** That is the override for the Auto-merged section: a reviewer
+    told the pair isn't a match, on a pair the pipeline merged, has to see
+    the records come apart or the decision was cosmetic. `patid_b` is the
+    side that moves out, into a fresh singleton, via the ordinary
+    `_do_unmerge` path — so it lands in the audit log as a real unmerge, is
+    undoable like any other, and leaves `patid_a` where it was.
+
+    Splitting is a separate transaction from the dismiss below it, and the
+    two produce separate audit entries. That is deliberate: they are two
+    facts (the entity changed; a reviewer ruled on a pair), and collapsing
+    them would make the unmerge invisible to `/undo`, which works entry by
+    entry."""
+    mid_a = backend.get_entity_mid_for_patid(body.patid_a)
+    mid_b = backend.get_entity_mid_for_patid(body.patid_b)
+    mid = mid_a or mid_b
     if mid is None:
         raise HTTPException(
             status_code=404,
             detail=f"Neither {body.patid_a} nor {body.patid_b} has a known mid.",
         )
 
+    unmerged_to_mid: str | None = None
+    if mid_a is not None and mid_a == mid_b:
+        unmerged_to_mid = _do_unmerge(
+            backend, mid=mid_a, patid=body.patid_b, reviewer_id=reviewer_id
+        ).new_mid
+
+    a, b = sorted((body.patid_a, body.patid_b))
+    now = _now()
     backend.begin()
     try:
         audit_id = backend.insert_audit_log(
-            ts_utc=_now(), user=reviewer_id, action="dismiss",
+            ts_utc=now, user=reviewer_id, action="dismiss",
             patids=f"{body.patid_a},{body.patid_b}", mid=mid,
-            prev_state="Needs review", next_state="Dismissed",
+            prev_state="Merged" if unmerged_to_mid else "Needs review",
+            next_state="Dismissed",
             run_id=None,
+        )
+        backend.record_pair_decisions(
+            [(a, b, DECISION_NOT_A_MATCH, audit_id, now)]
         )
         backend.commit()
     except Exception:
         backend.rollback()
         raise
-    return DismissResponse(audit_id=audit_id)
+    return DismissResponse(audit_id=audit_id, unmerged_to_mid=unmerged_to_mid)
 
 
 @router.get("", response_model=list[AuditLogRow])

@@ -108,24 +108,54 @@ export function useCleanSsn(patid: string | null) {
  * beside the waterfall came from a known run (the Patient Registry's cluster
  * trace does); omitted, the backend falls back to the newest run that
  * explained that model, which can disagree with what's on screen. */
-export function usePairExplanation(
+function useModelExplanation(
+  model: "nonmatch_gate" | "ml_matcher",
   patidA: string | null,
   patidB: string | null,
   runId?: string,
 ) {
   return useQuery({
-    queryKey: ["explanation", patidA, patidB, runId ?? null],
-    queryFn: async () => {
-      const ml = await api.getExplanation(
-        "ml_matcher", patidA as string, patidB as string, runId,
-      );
-      if (ml) return ml;
-      return api.getExplanation(
-        "nonmatch_gate", patidA as string, patidB as string, runId,
-      );
-    },
+    queryKey: ["explanation", model, patidA, patidB, runId ?? null],
+    queryFn: () =>
+      api.getExplanation(model, patidA as string, patidB as string, runId),
     enabled: patidA !== null && patidB !== null,
   });
+}
+
+/** Both models' persisted explanations for one pair, fetched in parallel and
+ * cached per model.
+ *
+ * The two are separate stages of the pipeline, not alternatives: the
+ * Stage-4.25 gate scores `P(plausible)` and decides whether the Stage-4.5 ML
+ * matcher ever sees the pair. Either can legitimately be absent — the gate
+ * never scores a pair the deterministic rules resolved, and the matcher never
+ * scores one the gate dropped — so the caller has to distinguish "didn't run"
+ * from "scored", which is why this returns both rather than the first hit. */
+export function usePairExplanations(
+  patidA: string | null,
+  patidB: string | null,
+  runId?: string,
+) {
+  const gate = useModelExplanation("nonmatch_gate", patidA, patidB, runId);
+  const ml = useModelExplanation("ml_matcher", patidA, patidB, runId);
+  return { gate, ml, isLoading: gate.isLoading || ml.isLoading };
+}
+
+/** The one explanation that describes the pair's *decisive* model, for views
+ * that show a single waterfall. The ML matcher wins when it ran, since it is
+ * the stage that decided whether an edge formed; otherwise the gate, which is
+ * then where the pair stopped. */
+export function usePairExplanation(
+  patidA: string | null,
+  patidB: string | null,
+  runId?: string,
+) {
+  const { gate, ml, isLoading } = usePairExplanations(patidA, patidB, runId);
+  return {
+    data: ml.data ?? gate.data ?? null,
+    isLoading,
+    isError: gate.isError || ml.isError,
+  };
 }
 
 export function useRuns() {

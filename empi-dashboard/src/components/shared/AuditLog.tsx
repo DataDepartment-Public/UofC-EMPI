@@ -13,7 +13,7 @@ const ACTION_LABEL: Record<string, string> = {
   dismiss: "Dismissed",
 };
 
-const UNDOABLE_ACTIONS = new Set(["merge", "unmerge"]);
+const UNDOABLE_ACTIONS = new Set(["merge", "unmerge", "dismiss"]);
 
 interface Props {
   /** Reuses the host page's own toast/flash mechanism rather than rendering

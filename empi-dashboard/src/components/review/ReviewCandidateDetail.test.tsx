@@ -51,7 +51,9 @@ const item: ReviewQueueItem = {
   confidence: 0.99,
   evidence: "NAME_DOB_EMAIL",
   source_blocks: "B3|B7",
-  reviewed: false,
+  verdict: "ml_human_review",
+  bucket: "needs_review",
+  reviewer_decision: null,
   patient_a: { patid: "P1", first_name: "Jane", last_name: "Doe" },
   patient_b: { patid: "P2", first_name: "Jane", last_name: "Doe" },
 };

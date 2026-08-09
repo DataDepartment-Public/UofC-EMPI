@@ -655,8 +655,13 @@ Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED (same split as
 
 ### 6b — Review & reconciliation
 
-`review_candidate` — an unresolved pair the pipeline routed to human review
-(review-tier rule-confirmed, or uncertain-but-not-rejected).
+`review_candidate` — **every candidate pair the run decided**, one row each,
+stamped with the stage that decided it. Not only the human queue: the
+dashboard's Review Queue splits these rows into four sections (needs review /
+reviewed / auto-merged / auto-rejected), and the two auto sections exist so a
+reviewer can see — and override — what the pipeline did unattended. The pools
+are disjoint by construction (`matches` ∪ `rejects` ∪ `non_matches` partitions
+stage 2's candidate pairs; the later stages only annotate the third).
 
 | Column | Dtype | Nullable | Notes |
 |---|---|---|---|
@@ -672,6 +677,17 @@ Backends: SQLite — IMPLEMENTED. Parquet — IMPLEMENTED (same split as
 | `fs_classification_tier` | string | yes | Stage 4's tier label, same scope as above. |
 | `ml_match_probability` | float64 | yes | Stage 4.5 (ML matcher) `match_probability`, threaded in from `ml_features` at batch-publish time — null when no ML model scored the run, or the pair. |
 | `ml_classification_tier` | string | yes | Stage 4.5's `classification_tier` (`human_review`/`auto_merge`), same scope as above. |
+| `verdict` | string | yes | Which stage decided the pair — `auto_merge_rule`, `reject`, `gate_dropped`, `ml_auto_merge`, `ml_human_review`, `undecided` (`src/api/pair_verdicts.py`). Null on rows from incremental scoring, which runs no model stage, and on rows written before the column existed; both read as needing review, which is what they were. |
+
+The four reviewer-facing **buckets** are derived, never stored:
+`reviewed` if a `reviewer_pair_decision` exists (that always wins), else
+`auto_merged` if the two records share a `mid` **today**, else
+`auto_rejected` if the verdict is `reject`/`gate_dropped`, else
+`needs_review`. Merged-ness is read off the index rather than the verdict
+because the two can disagree in both directions — clustering merges pairs
+transitively that no stage tiered `auto_merge`, and publish never repoints a
+reviewer-locked PATID, so a pipeline merge can fail to apply. See
+`pair_verdicts.bucket_for`, which the SQL backends inline as a CASE.
 
 `list_review_candidates`/`review_candidates_for_patid` sort and filter on
 `COALESCE(confidence, ml_match_probability)` DESC, not `confidence` alone —
@@ -682,12 +698,31 @@ in SQL).
 
 Key / replace semantics: a **batch publish replaces wholesale per `run_id`**
 (`replace_review_candidates_for_run` — a pair no longer in the latest run's
-`non_matches` disappears rather than lingering as a stale suggestion);
+candidate pool disappears rather than lingering as a stale suggestion);
 **incremental scoring appends**, deduped on `(patid_a, patid_b, run_id)`.
 
 Backends: SQLite — IMPLEMENTED (both semantics). Parquet — IMPLEMENTED
 (both semantics: incremental append via `insert_review_candidates`, batch
 replace-per-run via `replace_review_candidates_for_run`).
+
+`reviewer_pair_decision` — what a human concluded about one specific pair.
+
+| Column | Dtype | Nullable | Notes |
+|---|---|---|---|
+| `patid_a`, `patid_b` | string | no (key) | Canonicalized `patid_a < patid_b`, matching `review_candidate`. |
+| `decision` | string | no | `merged` or `not_a_match`. |
+| `audit_id` | int64 | no | The `audit_log` entry that produced it, so an undo retracts exactly its own rows. |
+| `ts_utc` | string (ISO-8601) | no | |
+
+Its own table rather than a column on `review_candidate` **because the
+replace above would erase it** — a reviewer's conclusion has to outlive any
+number of republishes, the same stickiness `locked_patids` gives entity
+membership, at pair grain. Written by every `/audit/*` action that rules on a
+pair: `merge` writes `merged` for every pair across the entity's resulting
+membership (merging C into {A,B} asserts C is A *and* B), `unmerge` and
+`dismiss` write `not_a_match`. Undo paths write nothing — a retraction is not
+the opposite assertion — and delete the original entry's rows by `audit_id`.
+Upsert keyed on the pair, last write wins.
 
 `entity_suggestion` — a reviewer-locked PATID's would-be new grouping,
 recorded but not applied (see the sticky-unmerge invariant above).

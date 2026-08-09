@@ -130,10 +130,35 @@ CREATE TABLE IF NOT EXISTS review_candidate (
     fs_classification_tier TEXT,
     ml_match_probability   REAL,
     ml_classification_tier TEXT,
+    -- Which stage decided this pair, from `src/api/pair_verdicts.py`. NULL on
+    -- rows written by incremental scoring (no model stage runs there) and on
+    -- rows from a publish that predates the column; both read as
+    -- `needs_review`, which is what they were.
+    verdict      TEXT,
     UNIQUE(patid_a, patid_b, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_review_candidate_a ON review_candidate(patid_a);
 CREATE INDEX IF NOT EXISTS idx_review_candidate_b ON review_candidate(patid_b);
+
+-- What a human concluded about one specific pair, written by every
+-- `/audit/*` action that rules on one (`routers/audit.py`). Deliberately its
+-- own table rather than a column on `review_candidate`: publishes replace
+-- that table per run (`replace_review_candidates_for_run`), and a reviewer's
+-- decision must outlive any number of republishes — the same stickiness
+-- `locked_patids` gives entity membership, at pair grain.
+--
+-- `audit_id` is the entry that produced it, so an undo can retract exactly
+-- the decisions its own action wrote (`clear_pair_decisions_for_audit`).
+CREATE TABLE IF NOT EXISTS reviewer_pair_decision (
+    patid_a      TEXT NOT NULL,
+    patid_b      TEXT NOT NULL,
+    decision     TEXT NOT NULL,
+    audit_id     INTEGER NOT NULL,
+    ts_utc       TEXT NOT NULL,
+    PRIMARY KEY (patid_a, patid_b)
+);
+CREATE INDEX IF NOT EXISTS idx_reviewer_pair_decision_audit
+    ON reviewer_pair_decision(audit_id);
 
 CREATE TABLE IF NOT EXISTS entity_suggestion (
     patid          TEXT PRIMARY KEY,
@@ -264,6 +289,7 @@ _COLUMN_MIGRATIONS: dict[str, dict[str, str]] = {
         "fs_classification_tier": "TEXT",
         "ml_match_probability": "REAL",
         "ml_classification_tier": "TEXT",
+        "verdict": "TEXT",
     },
     "audit_log": {
         "related_patids": "TEXT",
@@ -486,14 +512,16 @@ def get_record_raw(conn: sqlite3.Connection, patid: str) -> str | None:
 _REVIEW_CANDIDATE_INSERT_SQL = """
     INSERT INTO review_candidate
         (patid_a, patid_b, match_rule, confidence, evidence, source_blocks,
-         run_id, created_utc, ml_match_probability, ml_classification_tier)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         run_id, created_utc, ml_match_probability, ml_classification_tier,
+         verdict)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(patid_a, patid_b, run_id) DO UPDATE SET
         match_rule=excluded.match_rule, confidence=excluded.confidence,
         evidence=excluded.evidence, source_blocks=excluded.source_blocks,
         created_utc=excluded.created_utc,
         ml_match_probability=excluded.ml_match_probability,
-        ml_classification_tier=excluded.ml_classification_tier
+        ml_classification_tier=excluded.ml_classification_tier,
+        verdict=excluded.verdict
 """
 
 
@@ -501,11 +529,14 @@ def replace_review_candidates_for_run(
     conn: sqlite3.Connection, run_id: str, rows: list[tuple]
 ) -> None:
     """Replace this run's review-candidate rows wholesale (delete + bulk
-    insert) — unlike entities/members, a review pair that's no longer in the
-    latest run's `non_matches` (resolved, or reclassified) should disappear
-    rather than linger as a stale suggestion. `rows` are `(patid_a, patid_b,
+    insert) — unlike entities/members, a pair that's no longer in the latest
+    run's candidate pool (resolved, or reclassified) should disappear rather
+    than linger as a stale suggestion. `rows` are `(patid_a, patid_b,
     match_rule, confidence, evidence, source_blocks, run_id, created_utc,
-    ml_match_probability, ml_classification_tier)`."""
+    ml_match_probability, ml_classification_tier, verdict)`.
+
+    Reviewer decisions live in `reviewer_pair_decision` precisely so this
+    delete can't take them with it."""
     conn.execute("DELETE FROM review_candidate WHERE run_id = ?", (run_id,))
     if rows:
         conn.executemany(_REVIEW_CANDIDATE_INSERT_SQL, rows)
@@ -569,10 +600,38 @@ _PAIR_ATTR_SELECT = ",\n".join(
 )
 
 
+#: `review_candidate` holds the whole candidate pool, not just the human
+#: queue — every pair the pipeline decided, so the dashboard can show its
+#: Auto-merged / Auto-rejected sections. This predicate narrows it back to
+#: the pairs still genuinely awaiting a human: the ones no stage resolved.
+#: NULL passes (incremental-scoring rows and pre-`verdict` publishes, both of
+#: which predate any auto tier).
+_UNRESOLVED_VERDICT = (
+    "(rc.verdict IS NULL OR rc.verdict NOT IN "
+    "('auto_merge_rule', 'ml_auto_merge', 'reject', 'gate_dropped'))"
+)
+
+#: A reviewer's own conclusion about a pair, if any. LEFT JOINed rather than
+#: EXISTS-ed so the queue can report *which* way they ruled, not just that
+#: they did.
+_PAIR_DECISION_JOIN = """
+        LEFT JOIN reviewer_pair_decision rpd
+               ON rpd.patid_a = rc.patid_a AND rpd.patid_b = rc.patid_b
+"""
+
+
 def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[dict]:
-    """Every review-candidate pair touching `patid`, joined to `record_attrs`
-    on *both* sides — the UI needs the other PATID's name/SSN/DOB to render
-    the expanded-row candidate list, not just its ID."""
+    """Every *unresolved* candidate pair touching `patid`, joined to
+    `record_attrs` on both sides — the UI needs the other PATID's
+    name/SSN/DOB to render the expanded-row candidate list, not just its ID.
+
+    "Unresolved" is what both callers mean: `records.py`'s expand-row shows a
+    reviewer what's still open on a record, and `audit.py`'s
+    `_single_member_origin` decides whether a leftover singleton is
+    `origin='review'` or `origin='none'`. A pair the gate dropped or the ML
+    matcher auto-merged is in `review_candidate` for the queue's sake, but it
+    is not open work — hence `_UNRESOLVED_VERDICT` plus the requirement that
+    no reviewer has already ruled."""
     rows = conn.execute(
         f"""
         SELECT rc.*,
@@ -580,7 +639,10 @@ def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[di
         FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
-        WHERE rc.patid_a = ? OR rc.patid_b = ?
+{_PAIR_DECISION_JOIN}
+        WHERE (rc.patid_a = ? OR rc.patid_b = ?)
+          AND {_UNRESOLVED_VERDICT}
+          AND rpd.decision IS NULL
         ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
         """,
         (patid, patid),
@@ -588,34 +650,55 @@ def review_candidates_for_patid(conn: sqlite3.Connection, patid: str) -> list[di
     return [dict(r) for r in rows]
 
 
+#: The four Review Queue sections as one SQL expression, mirroring
+#: `src/api/pair_verdicts.py::bucket_for` clause for clause — keep the two in
+#: step. Referenced by both the WHERE (to filter) and the SELECT (so a row
+#: carries the section it came from), which is why it's a module constant.
+_BUCKET_EXPR = """
+    CASE
+        WHEN rpd.decision IS NOT NULL THEN 'reviewed'
+        WHEN ema.mid = emb.mid THEN 'auto_merged'
+        WHEN rc.verdict IN ('reject', 'gate_dropped') THEN 'auto_rejected'
+        ELSE 'needs_review'
+    END
+"""
+
+
 def list_review_candidates(
     conn: sqlite3.Connection,
     *,
     confidence_min: float | None = None,
     confidence_max: float | None = None,
-    reviewed: bool | None = None,
+    bucket: str | None = None,
     search: str | None = None,
     patid_a: str | None = None,
     patid_b: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
-    """Paginated, candidate-grain review queue — one row per pending pair,
+    """Paginated, candidate-grain review queue — one row per candidate pair,
     not per cluster (docs/Dashboard-Guide.md's Review Queue: the same cluster
     can surface multiple candidates, and each should appear once here).
 
-    A pair counts as "reviewed" if either:
-      * both sides currently share a `mid` (the merge already happened —
-        mirrors the client-side `pendingCandidates` filter in
-        `DatasetRow.tsx`), or
-      * a `dismiss` audit_log entry exists for the exact `(patid_a, patid_b)`
-        pair (the reviewer's "Not a match" action — `POST /audit/dismiss`).
+    `bucket` selects one of the four sections (`src/api/pair_verdicts.py`);
+    unset returns every candidate. Each row carries its own `bucket` and
+    `reviewer_decision` regardless, so a caller listing across sections can
+    still tell them apart:
 
-    `reviewed=False` (the default queue) excludes both; `reviewed=True`
-    surfaces only them ("Already reviewed"). Default order is
-    `COALESCE(confidence, ml_match_probability)` DESC, with pairs that have
-    neither (blocking-only, no rule fired and not ML-scored) last — same
-    convention as `review_candidates_for_patid`.
+      * `needs_review` — no stage resolved it and no reviewer has ruled.
+      * `reviewed` — a reviewer merged or dismissed this exact pair
+        (`reviewer_pair_decision`). Always wins over the pipeline's verdict.
+      * `auto_merged` — a deterministic rule or the Stage-4.5 ML matcher
+        merged it, **or** its two records share a `mid` today. That second
+        clause is not redundant: clustering is transitive, so a pair the
+        matcher left at `human_review` can still have been merged through a
+        path of other pairs, and those records genuinely are together.
+      * `auto_rejected` — the deterministic reject rules or the Stage-4.25
+        gate declined it.
+
+    Default order is `COALESCE(confidence, ml_match_probability)` DESC, with
+    pairs that have neither (blocking-only, no rule fired and not ML-scored)
+    last — same convention as `review_candidates_for_patid`.
 
     `confidence_min`/`confidence_max` filter that same coalesced value —
     most pairs in the queue only have an ML score (no rule fired), so
@@ -659,15 +742,9 @@ def list_review_candidates(
                 like = f"%{token}%"
                 params.extend([like, like, like])
 
-    reviewed_expr = (
-        "(ema.mid = emb.mid OR EXISTS ("
-        "SELECT 1 FROM audit_log al WHERE al.action = 'dismiss' "
-        "AND al.patids = rc.patid_a || ',' || rc.patid_b))"
-    )
-    if reviewed is True:
-        where.append(reviewed_expr)
-    elif reviewed is False:
-        where.append(f"NOT {reviewed_expr}")
+    if bucket is not None:
+        where.append(f"({_BUCKET_EXPR}) = ?")
+        params.append(bucket)
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
 
     base_from = f"""
@@ -676,6 +753,7 @@ def list_review_candidates(
         JOIN entity_member emb ON emb.patid = rc.patid_b
         LEFT JOIN record_attrs ra_a ON ra_a.patid = rc.patid_a
         LEFT JOIN record_attrs ra_b ON ra_b.patid = rc.patid_b
+{_PAIR_DECISION_JOIN}
     """
 
     total = conn.execute(
@@ -689,7 +767,8 @@ def list_review_candidates(
 {_PAIR_ATTR_SELECT},
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = ema.mid) AS member_count_a,
                (SELECT COUNT(*) FROM entity_member em WHERE em.mid = emb.mid) AS member_count_b,
-               {reviewed_expr} AS reviewed
+               rpd.decision AS reviewer_decision,
+               ({_BUCKET_EXPR}) AS bucket
         {base_from}
         {where_sql}
         ORDER BY COALESCE(rc.confidence, rc.ml_match_probability) DESC NULLS LAST, rc.id
@@ -698,6 +777,23 @@ def list_review_candidates(
         [*params, page_size, offset],
     ).fetchall()
     return [dict(r) for r in rows], total
+
+
+def review_bucket_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """How many candidate pairs sit in each of the four sections — one
+    GROUP BY instead of the four COUNT-only round-trips the dashboard would
+    otherwise make to label its section tabs."""
+    rows = conn.execute(
+        f"""
+        SELECT ({_BUCKET_EXPR}) AS bucket, COUNT(*) AS n
+        FROM ({_DEDUPED_REVIEW_CANDIDATE}) rc
+        JOIN entity_member ema ON ema.patid = rc.patid_a
+        JOIN entity_member emb ON emb.patid = rc.patid_b
+{_PAIR_DECISION_JOIN}
+        GROUP BY 1
+        """
+    ).fetchall()
+    return {row["bucket"]: int(row["n"]) for row in rows}
 
 
 def patids_with_review_candidates(conn: sqlite3.Connection) -> set[str]:
@@ -1054,6 +1150,41 @@ def member_count(conn: sqlite3.Connection, mid: str) -> int:
     return int(row["n"])
 
 
+# ── Reviewer pair decisions (src/api/routers/audit.py) ──────────────────────
+
+def record_pair_decisions(conn: sqlite3.Connection, rows: list[tuple]) -> None:
+    """Upsert `(patid_a, patid_b, decision, audit_id, ts_utc)` rows — the
+    per-pair record of what a reviewer concluded. Callers canonicalize the
+    pair (`a < b`) so it matches `review_candidate`'s own ordering.
+
+    Last write wins: a reviewer who dismisses a pair they earlier merged has
+    changed their mind, and the queue should reflect the current conclusion,
+    not the first one. The `audit_log` keeps the full history either way."""
+    if rows:
+        conn.executemany(
+            """
+            INSERT INTO reviewer_pair_decision
+                (patid_a, patid_b, decision, audit_id, ts_utc)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(patid_a, patid_b) DO UPDATE SET
+                decision=excluded.decision, audit_id=excluded.audit_id,
+                ts_utc=excluded.ts_utc
+            """,
+            rows,
+        )
+
+
+def clear_pair_decisions_for_audit(conn: sqlite3.Connection, audit_id: int) -> None:
+    """Retract the pair decisions one audit entry wrote — the undo path.
+
+    Scoped by `audit_id` rather than by pair so undoing an old entry can't
+    silently erase a newer decision about the same pair: the upsert above
+    stamps the newer `audit_id`, and this deletes nothing."""
+    conn.execute(
+        "DELETE FROM reviewer_pair_decision WHERE audit_id = ?", (audit_id,)
+    )
+
+
 # ── Persisted blocking index (`block_key`) ──────────────────────────────────
 
 def replace_block_keys(conn: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> None:
@@ -1220,7 +1351,10 @@ __all__ = [
     "replace_review_candidates_for_run",
     "insert_review_candidates",
     "review_candidates_for_patid",
+    "review_bucket_counts",
     "patids_with_review_candidates",
+    "record_pair_decisions",
+    "clear_pair_decisions_for_audit",
     "all_entity_member_mids",
     "get_entity",
     "list_entities",

@@ -257,7 +257,7 @@ class TestReviewCandidate:
             conn, "r1",
             [(
                 "P1", "P2", "NAME_DOB_SEX", 0.98, "NAME_DOB_SEX", "B3", "r1", "t0",
-                None, None,
+                None, None, "ml_human_review",
             )],
         )
         conn.commit()
@@ -269,7 +269,10 @@ class TestReviewCandidate:
     def test_replace_review_candidates_for_run_carries_ml_score(self, conn):
         postgres_backend.replace_review_candidates_for_run(
             conn, "r1",
-            [("P1", "P2", None, None, None, "B3", "r1", "t0", 0.24, "human_review")],
+            [(
+                "P1", "P2", None, None, None, "B3", "r1", "t0",
+                0.24, "human_review", "ml_human_review",
+            )],
         )
         conn.commit()
         rows = postgres_backend.review_candidates_for_patid(conn, "P1")
@@ -278,26 +281,56 @@ class TestReviewCandidate:
 
     def test_replace_clears_stale_rows_for_same_run(self, conn):
         postgres_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None)]
+            conn, "r1",
+            [("P1", "P2", None, None, None, "B3", "r1", "t0", None, None, None)],
         )
         conn.commit()
         postgres_backend.replace_review_candidates_for_run(conn, "r1", [])
         conn.commit()
         assert postgres_backend.review_candidates_for_patid(conn, "P1") == []
 
-    def test_list_review_candidates_default_excludes_reviewed(self, conn):
+    def test_list_review_candidates_bucket_filter(self, conn):
         postgres_backend.upsert_entity(conn, "M-1", "r1", "none", False, None, "t0")
         postgres_backend.upsert_entity_member(conn, "P1", "M-1", True, "pipeline", "t0")
         postgres_backend.upsert_entity(conn, "M-2", "r1", "none", False, None, "t0")
         postgres_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
         postgres_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None)]
+            conn, "r1",
+            [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None, None)],
         )
         conn.commit()
 
-        rows, total = postgres_backend.list_review_candidates(conn, reviewed=False)
+        rows, total = postgres_backend.list_review_candidates(
+            conn, bucket="needs_review"
+        )
         assert total == 1
         assert rows[0]["patid_a"] == "P1"
+        assert rows[0]["bucket"] == "needs_review"
+        assert rows[0]["reviewer_decision"] is None
+        assert postgres_backend.review_bucket_counts(conn) == {"needs_review": 1}
+
+        # A reviewer decision on the pair moves it out of `needs_review` and
+        # into `reviewed`, whatever the pipeline had concluded.
+        postgres_backend.record_pair_decisions(
+            conn, [("P1", "P2", "not_a_match", 1, "t1")]
+        )
+        conn.commit()
+        _, still_pending = postgres_backend.list_review_candidates(
+            conn, bucket="needs_review"
+        )
+        assert still_pending == 0
+        reviewed_rows, reviewed_total = postgres_backend.list_review_candidates(
+            conn, bucket="reviewed"
+        )
+        assert reviewed_total == 1
+        assert reviewed_rows[0]["reviewer_decision"] == "not_a_match"
+
+        postgres_backend.clear_pair_decisions_for_audit(conn, 1)
+        conn.commit()
+        _, back_to_pending = postgres_backend.list_review_candidates(
+            conn, bucket="needs_review"
+        )
+        assert back_to_pending == 1
 
     def test_list_review_candidates_patid_filter_resolves_the_exact_pair(self, conn):
         postgres_backend.upsert_entity(conn, "M-1", "r1", "none", False, None, "t0")
@@ -305,7 +338,8 @@ class TestReviewCandidate:
         postgres_backend.upsert_entity(conn, "M-2", "r1", "none", False, None, "t0")
         postgres_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
         postgres_backend.replace_review_candidates_for_run(
-            conn, "r1", [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None)]
+            conn, "r1",
+            [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None, None)],
         )
         conn.commit()
 

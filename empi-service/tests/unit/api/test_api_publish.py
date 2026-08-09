@@ -305,7 +305,9 @@ class TestPublishRun:
         assert counts["entities_upserted"] == 4
         assert counts["members_upserted"] == 5
         assert counts["locked_skipped"] == 0
-        assert counts["review_candidates"] == 1
+        # Every decided candidate pair is published, not just the human
+        # queue: the auto-merged P1<->P2 and the still-open P4<->P5.
+        assert counts["review_candidates"] == 2
 
         matched = sql_backend.get_entity_mid_for_patid(conn, "P1")
         assert matched == sql_backend.get_entity_mid_for_patid(conn, "P2")
@@ -347,11 +349,13 @@ class TestPublishRun:
 
         # The queue list/sort/filter fall back to the ML score when there's
         # no rule confidence (sql_backend.list_review_candidates' COALESCE).
-        rows, total = sql_backend.list_review_candidates(conn, reviewed=False)
+        rows, total = sql_backend.list_review_candidates(
+            conn, bucket="needs_review"
+        )
         assert total == 1
         assert rows[0]["ml_match_probability"] == pytest.approx(0.24)
         filtered_rows, filtered_total = sql_backend.list_review_candidates(
-            conn, reviewed=False, confidence_min=0.2
+            conn, bucket="needs_review", confidence_min=0.2
         )
         assert filtered_total == 1
         assert filtered_rows[0]["patid_a"] == "P4"
@@ -390,10 +394,15 @@ class TestPublishRun:
         _write_run_with_gate_drop(fixture_settings, "r2")
         counts = publish.publish_run(backend, "r2", fixture_settings)
 
-        # Only P4<->P5 (gate tier human_review) becomes a review_candidate
-        # row — P6<->P7 (gate tier no_match) is excluded despite being in
-        # non_matches, since the gate already resolved it confidently.
-        assert counts["review_candidates"] == 1
+        # All three decided pairs are published: P1<->P2 (auto_merge_rule),
+        # P4<->P5 (still open) and P6<->P7 (gate_dropped). The gate drop is
+        # published for the queue's Auto-rejected section but is *not* open
+        # work, which is what the origin assertions below pin.
+        assert counts["review_candidates"] == 3
+        buckets = sql_backend.review_bucket_counts(conn)
+        assert buckets == {
+            "auto_merged": 1, "needs_review": 1, "auto_rejected": 1
+        }
 
         p4_mid = sql_backend.get_entity_mid_for_patid(conn, "P4")
         assert sql_backend.get_entity(conn, p4_mid)["entity"]["origin"] == "review"
@@ -441,7 +450,7 @@ class TestPublishRun:
         n_candidates = conn.execute(
             "SELECT COUNT(*) AS n FROM review_candidate"
         ).fetchone()["n"]
-        assert n_candidates == 1  # replaced, not duplicated
+        assert n_candidates == 2  # replaced, not duplicated
 
     def test_reviewer_locked_patid_not_repointed(self, conn, backend, fixture_settings):
         _write_run(fixture_settings, "r1")
@@ -503,7 +512,7 @@ class TestPublishAgainstParquetBackend:
         assert counts["entities_upserted"] == 4
         assert counts["members_upserted"] == 5
         assert counts["locked_skipped"] == 0
-        assert counts["review_candidates"] == 1
+        assert counts["review_candidates"] == 2
 
         matched = parquet_backend.get_entity_mid_for_patid("P1")
         assert matched == parquet_backend.get_entity_mid_for_patid("P2")
@@ -564,7 +573,7 @@ class TestPublishAgainstParquetBackend:
 
         assert mid_before == mid_after
         assert len(parquet_backend._tables["entity"]) == 4
-        assert len(parquet_backend._tables["review_candidate"]) == 1  # replaced, not duplicated
+        assert len(parquet_backend._tables["review_candidate"]) == 2  # replaced, not duplicated
 
     def test_missing_manifest_raises(self, parquet_backend, fixture_settings):
         with pytest.raises(FileNotFoundError):

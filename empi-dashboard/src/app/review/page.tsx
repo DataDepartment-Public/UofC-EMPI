@@ -42,7 +42,7 @@ function ReviewQueuePageContent() {
   const hasDeepLink = deepLinkPatidA !== null && deepLinkPatidB !== null;
 
   const [filters, setFilters] = useState<ReviewQueueFilters>({
-    reviewed: false,
+    bucket: "needs_review",
     page: 1,
     page_size: PAGE_SIZE,
   });
@@ -69,14 +69,14 @@ function ReviewQueuePageContent() {
 
   // Leaving deep-link mode — either the reviewer clicked "back to the full
   // queue" or picked a different candidate from the list. Line the list's
-  // segmented toggle up with where the deep-linked pair actually lives (if
-  // it resolved to one) so the queue doesn't appear to have silently jumped
-  // from "Needs review" to "Already reviewed".
+  // section tabs up with where the deep-linked pair actually lives (if it
+  // resolved to one) so the queue doesn't appear to have silently jumped
+  // between sections.
   const exitDeepLink = (nextSelectedKey: string | null) => {
     setDeepLinkActive(false);
     setSelectedKey(nextSelectedKey);
     if (deepLinkCandidate.data) {
-      setFilters((f) => ({ ...f, reviewed: deepLinkCandidate.data!.reviewed, page: 1 }));
+      setFilters((f) => ({ ...f, bucket: deepLinkCandidate.data!.bucket, page: 1 }));
     }
     router.replace("/review");
   };
@@ -102,7 +102,15 @@ function ReviewQueuePageContent() {
     dismissMutation.mutate(
       { patidA, patidB },
       {
-        onSuccess: () => flash("Marked not a match."),
+        // Dismissing a pair the pipeline had merged splits the entity — say
+        // so, since that's a bigger change than the reviewer just pressed a
+        // button for, and it's undoable from the audit log.
+        onSuccess: (res) =>
+          flash(
+            res.unmerged_to_mid
+              ? `Marked not a match — ${patidB} split out into ${res.unmerged_to_mid}.`
+              : "Marked not a match.",
+          ),
         onError: (err) =>
           flash(err instanceof ApiError ? err.message : "Dismiss failed."),
       },
@@ -121,6 +129,7 @@ function ReviewQueuePageContent() {
           onFiltersChange={setFilters}
           items={items}
           total={data?.total ?? 0}
+          bucketCounts={data?.bucket_counts ?? {}}
           isLoading={isLoading}
           isError={isError}
           selectedKey={

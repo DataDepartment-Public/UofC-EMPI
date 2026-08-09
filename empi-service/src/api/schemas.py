@@ -157,8 +157,8 @@ class RecordsPage(BaseModel):
 
 
 class ReviewQueueItem(BaseModel):
-    """One candidate-grain row of `GET /review-queue` — a pending pair, not a
-    cluster. See `src/api/backends/sql_backend.py` `list_review_candidates`."""
+    """One candidate-grain row of `GET /review-queue` — a candidate pair, not
+    a cluster. See `src/api/backends/sql_backend.py` `list_review_candidates`."""
 
     patid_a: str
     patid_b: str
@@ -174,7 +174,16 @@ class ReviewQueueItem(BaseModel):
     fs_classification_tier: str | None = None
     ml_match_probability: float | None = None
     ml_classification_tier: str | None = None
-    reviewed: bool
+    #: Which pipeline stage decided this pair (`src/api/pair_verdicts.py`).
+    #: `None` on rows written by incremental scoring, which runs no model
+    #: stage, and on rows from a publish predating the column.
+    verdict: str | None = None
+    #: Which of the four Review Queue sections the pair is in — the
+    #: reviewer-facing resolution of `verdict` plus any human decision.
+    bucket: Literal["needs_review", "reviewed", "auto_merged", "auto_rejected"]
+    #: What a reviewer concluded about this exact pair, if anything. Non-null
+    #: exactly when `bucket == "reviewed"`.
+    reviewer_decision: Literal["merged", "not_a_match"] | None = None
     patient_a: CandidatePatient
     patient_b: CandidatePatient
 
@@ -184,6 +193,9 @@ class ReviewQueuePage(BaseModel):
     page: int
     page_size: int
     items: list[ReviewQueueItem]
+    #: Pair count per section, for the queue's section tabs — always the
+    #: totals across the whole index, unaffected by this response's filters.
+    bucket_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class DismissRequest(BaseModel):
@@ -193,6 +205,10 @@ class DismissRequest(BaseModel):
 
 class DismissResponse(BaseModel):
     audit_id: int
+    #: Set when the dismissed pair was merged and had to be split to honour
+    #: the decision — the `mid` `patid_b` was moved to. `None` when the pair
+    #: was never merged, which is the ordinary "Not a match" case.
+    unmerged_to_mid: str | None = None
 
 
 class RawRecord(BaseModel):
@@ -227,18 +243,22 @@ class UnmergeResponse(BaseModel):
 
 
 class UndoResponse(BaseModel):
-    """`POST /audit/{audit_id}/undo` — reverses a `merge` or `unmerge` entry.
+    """`POST /audit/{audit_id}/undo` — reverses a `merge`, `unmerge` or
+    `dismiss` entry.
 
     `reversed_action` is the action that was undone (not the action taken to
     undo it). Undoing a `merge` unmerges every patid back into its own
     singleton entity (no single `entity` to return, hence `new_mids`);
     undoing an `unmerge` re-merges the one patid back into `prev_mid`
     (`entity` is that reconstituted entity, and `new_mids` is just `[mid]`
-    for symmetry with the merge case).
+    for symmetry with the merge case). Undoing a `dismiss` mutates no
+    entity at all — a dismiss never did — so both fields stay empty; it just
+    retracts the pair decision, returning the pair to whichever section the
+    pipeline's verdict puts it in.
     """
 
     audit_id: int
-    reversed_action: Literal["merge", "unmerge"]
+    reversed_action: Literal["merge", "unmerge", "dismiss"]
     entity: Entity | None = None
     new_mids: list[str] = Field(default_factory=list)
 

@@ -148,11 +148,11 @@ lookups — see Data-Contract.md Stage 6 for the full picture.)
 | `GET /health`, `/health/ready` | liveness; readiness (index reachable + dirs writable, last run id) |
 | `POST /runs` | save upload → `run_pipeline` + publish, both via **BackgroundTasks** → `202 {run_id}` |
 | `GET /runs`, `/runs/{id}` | poll status; return `RunManifest` |
-| `GET /review-queue` | candidate-grain pending-pair queue, sorted/filtered on rule confidence falling back to ML score |
+| `GET /review-queue` | candidate-grain queue over the whole decided pair pool, sliced by `?bucket=` into needs-review / reviewed / auto-merged / auto-rejected; sorted/filtered on rule confidence falling back to ML score |
 | `GET /records`, `/clusters/{mid}`, `/records/{patid}/raw`, `/records/{patid}/ssn-clean` | read models + PHI reads for the Patient Registry (raw and SSN-reveal are two separate endpoints, logged as two separate audit actions) |
 | `POST /records/score`, `GET /records/score/{run_id}` | incremental single/few-record scoring, no full re-run |
 | `GET /dashboard/summary` | KPIs for the Dashboard tab |
-| `POST /audit/merge`, `/unmerge`, `/dismiss`, `/{id}/undo` | mutate `entity`/`entity_member`/`review_candidate` + insert audit row, **one transaction** |
+| `POST /audit/merge`, `/unmerge`, `/dismiss`, `/{id}/undo` | mutate `entity`/`entity_member` + write `reviewer_pair_decision` + insert audit row, **one transaction**. `/dismiss` on a pair that's currently merged splits it first — the override for the queue's Auto-merged section |
 | `GET /audit` | audit feed |
 | `GET /explanations/{model}/{a}/{b}` | per-pair SHAP waterfall for the gate's or ML matcher's decision |
 | `GET`/`PUT /admin/thresholds` | live-tunable gate/ML/FS decision thresholds |

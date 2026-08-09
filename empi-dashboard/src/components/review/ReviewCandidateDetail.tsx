@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { compareRecords } from "@/lib/compare";
 import { fullName } from "@/lib/format";
-import type { ReviewQueueItem } from "@/lib/schemas";
+import type { ReviewBucket, ReviewQueueItem } from "@/lib/schemas";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
 import { RawComparisonPanel } from "@/components/shared/RawComparisonPanel";
 import { ShapWaterfall } from "@/components/shared/ShapWaterfall";
@@ -28,9 +28,7 @@ export function ReviewCandidateDetail({
   const [manualMatchOpen, setManualMatchOpen] = useState(false);
   const rows = compareRecords(item.patient_a, item.patient_b);
   const { data: explanation } = usePairExplanation(item.patid_a, item.patid_b);
-  const predictedClass = item.match_rule
-    ? "Confirmed duplicate (rule-matched)"
-    : "Uncertain — pending review";
+  const merged = item.mid_a === item.mid_b;
 
   return (
     <div className="card p-5">
@@ -50,22 +48,31 @@ export function ReviewCandidateDetail({
             )}
           </p>
         </div>
+        {/* Both actions stay available in every section — that's what makes
+            Auto-merged and Auto-rejected overridable rather than read-only.
+            Only the labels change, so the button says what it will actually
+            do: "Merge" on a pair the pipeline already merged would be a
+            no-op, and "Not a match" on one is really a split. */}
         <div className="flex flex-shrink-0 gap-2">
-          <button
-            onClick={() => onMerge(item.mid_a, [item.patid_b])}
-            className="rounded-md bg-status-auto px-3.5 py-1.5 text-xs font-bold text-white hover:opacity-90"
-          >
-            Merge
-          </button>
+          {!merged && (
+            <button
+              onClick={() => onMerge(item.mid_a, [item.patid_b])}
+              className="rounded-md bg-status-auto px-3.5 py-1.5 text-xs font-bold text-white hover:opacity-90"
+            >
+              {item.bucket === "auto_rejected" ? "Merge anyway" : "Merge"}
+            </button>
+          )}
           <button
             disabled={dismissPending}
             onClick={() => onDismiss(item.patid_a, item.patid_b)}
             className="rounded-md border border-status-nomatch px-3.5 py-1.5 text-xs font-bold text-status-nomatch hover:bg-status-nomatch/10 disabled:opacity-50"
           >
-            Not a match
+            {merged ? "Not a match — split them" : "Not a match"}
           </button>
         </div>
       </div>
+
+      <VerdictBanner item={item} />
 
       <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-4">
         <MetaCard
@@ -73,7 +80,7 @@ export function ReviewCandidateDetail({
           value={item.confidence != null ? `${Math.round(item.confidence * 100)}%` : "No rule signal"}
         />
         <MetaCard label="Rule fired" value={item.match_rule ?? "None (unconfirmed)"} />
-        <MetaCard label="Predicted class" value={predictedClass} small />
+        <MetaCard label="Outcome" value={OUTCOMES[item.bucket].title} small />
         <MetaCard
           label="Cluster context"
           value={
@@ -118,6 +125,62 @@ export function ReviewCandidateDetail({
           onMerge={onMerge}
           onClose={() => setManualMatchOpen(false)}
         />
+      )}
+    </div>
+  );
+}
+
+const OUTCOMES: Record<ReviewBucket, { title: string; tone: string }> = {
+  needs_review: {
+    title: "Awaiting review",
+    tone: "border-line bg-bg text-gray-2",
+  },
+  reviewed: {
+    title: "Reviewed",
+    tone: "border-brand-blue/30 bg-brand-blue/5 text-brand-blue",
+  },
+  auto_merged: {
+    title: "Auto-merged",
+    tone: "border-status-auto/30 bg-status-auto/5 text-status-auto",
+  },
+  auto_rejected: {
+    title: "Auto-rejected",
+    tone: "border-status-nomatch/30 bg-status-nomatch/5 text-status-nomatch",
+  },
+};
+
+/** What the pipeline concluded, in the reviewer's words rather than the
+ * stage's. Used only to say what a *human* decision overrode — the pipeline's
+ * own story is told stage by stage, with real scores, by the pipeline trail
+ * below, so restating it in prose above the trail would just be a vaguer
+ * second copy. */
+const VERDICT_TEXT: Record<string, string> = {
+  auto_merge_rule: "a deterministic rule had merged it",
+  ml_auto_merge: "the ML matcher had merged it",
+  ml_human_review: "the ML matcher had left it for a human",
+  reject: "the reject rules had discarded it",
+  gate_dropped: "the non-match gate had discarded it",
+  undecided: "no model stage scored it",
+};
+
+/** Only rendered for a pair a human ruled on — that's the one thing the
+ * pipeline trail can't show, since a reviewer decision isn't a pipeline
+ * stage. Every other bucket is fully explained by the trail. */
+function VerdictBanner({ item }: { item: ReviewQueueItem }) {
+  if (item.bucket !== "reviewed") return null;
+  const overruled = item.verdict ? VERDICT_TEXT[item.verdict] : null;
+  return (
+    <div
+      className={`mb-4 rounded-md border px-3 py-2 text-xs ${OUTCOMES.reviewed.tone}`}
+    >
+      <span className="font-bold">Reviewed.</span>{" "}
+      <span className="opacity-90">
+        {item.reviewer_decision === "merged"
+          ? "A reviewer merged these records."
+          : "A reviewer marked this pair not a match."}
+      </span>
+      {overruled && (
+        <span className="opacity-70"> The pipeline had said {overruled}.</span>
       )}
     </div>
   );

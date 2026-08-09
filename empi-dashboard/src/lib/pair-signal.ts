@@ -82,8 +82,15 @@ export interface BandDef {
    * unbounded; the confident band's floor is the live threshold instead. */
   min: number | null;
   max: number | null;
-  /** Tailwind text+bg tone. Per `globals.css`'s FR-13 note, display badges
-   * use the `*-display` variants rather than the gold/red action colors. */
+  /** Tailwind text+bg tone.
+   *
+   * These six are a scale, not six independent status colors, so they're
+   * literal hex rather than the `globals.css` status tokens: the palette runs
+   * green → lime → amber → gray → orange → red so that a reviewer reads
+   * position on the scale from the color alone. FR-13's `*-display` rule is
+   * about the match-status vocabulary (auto/review/no-match) and doesn't
+   * cover this axis. Every pair is a fixed light bg / dark fg with ≥4.5:1
+   * contrast; the app has no dark theme, so no variant is needed. */
   tone: string;
 }
 
@@ -97,7 +104,7 @@ export const BAND_DEFS: BandDef[] = [
     axis: "match",
     min: null, // the live ml_auto_merge_threshold — see bandFilter
     max: null,
-    tone: "text-status-auto bg-status-auto/15",
+    tone: "bg-[#E6F4EA] text-[#137333]",
   },
   {
     band: "leans",
@@ -108,7 +115,7 @@ export const BAND_DEFS: BandDef[] = [
     // higher bar than today's. Capping this would leave it in no band.
     min: 0.4,
     max: null,
-    tone: "text-status-review-display bg-status-review-display/15",
+    tone: "bg-[#F1F8E9] text-[#33691E]",
   },
   {
     band: "uncertain",
@@ -116,7 +123,7 @@ export const BAND_DEFS: BandDef[] = [
     axis: "match",
     min: 0.2,
     max: 0.4,
-    tone: "text-status-nomatch-display bg-status-nomatch-display/15",
+    tone: "bg-[#FEF7E0] text-[#B06000]",
   },
   {
     band: "ambiguous",
@@ -124,7 +131,7 @@ export const BAND_DEFS: BandDef[] = [
     axis: "match",
     min: null,
     max: 0.2,
-    tone: "text-gray-2 bg-bg",
+    tone: "bg-[#F1F3F4] text-[#5F6368]",
   },
   {
     band: "unlikely",
@@ -132,7 +139,7 @@ export const BAND_DEFS: BandDef[] = [
     axis: "gate",
     min: IMPLAUSIBLE_CEILING,
     max: null, // the live gate_threshold — see bandFilter
-    tone: "text-status-nomatch bg-status-nomatch/10",
+    tone: "bg-[#FFEFE6] text-[#C45100]",
   },
   {
     band: "implausible",
@@ -140,7 +147,7 @@ export const BAND_DEFS: BandDef[] = [
     axis: "gate",
     min: null,
     max: IMPLAUSIBLE_CEILING,
-    tone: "text-status-nomatch bg-status-nomatch/10",
+    tone: "bg-[#FCE8E6] text-[#C5221F]",
   },
 ];
 

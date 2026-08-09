@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import clsx from "clsx";
 import { compareRecords } from "@/lib/compare";
 import { fullName } from "@/lib/format";
+import { bandDef, bucketBadge, signalFor, signalTooltip } from "@/lib/pair-signal";
 import type { ReviewQueueItem } from "@/lib/schemas";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
 import { RawComparisonPanel } from "@/components/shared/RawComparisonPanel";
@@ -52,7 +54,29 @@ export function ReviewCandidateDetail({
             Only the labels change, so the button says what it will actually
             do: "Merge" on a pair the pipeline already merged would be a
             no-op, and "Not a match" on one is really a split. */}
-        <div className="flex flex-shrink-0 gap-2">
+        <div className="flex flex-shrink-0 items-center gap-2">
+          {/* Where the pair stands, right where the decision gets made — the
+              band's strength and the section it's in. Both were only visible
+              in the list before, so a reviewer working from this panel had
+              to look away to see whether they were overriding the pipeline
+              or resolving open work. */}
+          <span
+            title={signalTooltip(item)}
+            className={clsx(
+              "rounded-full px-2 py-1 text-[9.5px] font-bold uppercase",
+              bandDef(signalFor(item).band).tone,
+            )}
+          >
+            {bandDef(signalFor(item).band).label}
+          </span>
+          <span
+            className={clsx(
+              "rounded-full px-2 py-1 text-[9.5px] font-bold uppercase",
+              bucketBadge(item).tone,
+            )}
+          >
+            {bucketBadge(item).label}
+          </span>
           {!merged && (
             <button
               onClick={() => onMerge(item.mid_a, [item.patid_b])}

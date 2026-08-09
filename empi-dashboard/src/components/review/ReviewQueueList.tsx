@@ -10,6 +10,7 @@ import {
   bandFilter,
   bandFromFilters,
   bandRangeLabel,
+  bucketBadge,
   signalFor,
   signalTooltip,
   verdictLabel,
@@ -338,36 +339,23 @@ function CandidateRow({
   );
 }
 
-/** What happened to this pair, in one word. Reads `reviewer_decision` rather
- * than inferring from `mid_a === mid_b`: a pair can share a mid because the
- * pipeline merged it, because clustering merged it transitively, or because
- * a reviewer merged it, and only the third is a review outcome. Inferring
- * was the bug that put auto-merges under "Already reviewed". */
+/** What happened to this pair, in one word — the same `bucketBadge` the
+ * detail header shows, so a row and the panel beside it can't disagree.
+ *
+ * Suppressed for `needs_review`: every row under that tab would carry the
+ * same badge, which is noise. The detail header does show it, because there
+ * the reviewer is about to act and "this is still open work" is the point. */
 function OutcomeBadge({ item }: { item: ReviewQueueItem }) {
-  const outcome =
-    item.bucket === "reviewed"
-      ? {
-          text: item.reviewer_decision === "merged" ? "Merged" : "Not a match",
-          tone: "text-status-auto bg-status-auto/15",
-        }
-      : item.bucket === "auto_merged"
-        ? { text: "Auto-merged", tone: "text-status-auto bg-status-auto/15" }
-        : item.bucket === "auto_rejected"
-          ? {
-              text: "Auto-rejected",
-              tone: "text-status-nomatch bg-status-nomatch/15",
-            }
-          : null;
-
-  if (!outcome) return null;
+  if (item.bucket === "needs_review") return null;
+  const { label, tone } = bucketBadge(item);
   return (
     <span
       className={clsx(
         "rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase",
-        outcome.tone,
+        tone,
       )}
     >
-      {outcome.text}
+      {label}
     </span>
   );
 }

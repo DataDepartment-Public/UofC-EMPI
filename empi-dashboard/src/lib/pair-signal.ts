@@ -318,6 +318,38 @@ export function bandFromFilters(
   return null;
 }
 
+/** Where the pair stands: which of the queue's four sections it's in, and
+ * for a reviewed one, what the human concluded.
+ *
+ * Shared by the list rows and the detail header so the badge can never
+ * disagree with the section tab the reviewer clicked to get there. Reads
+ * `bucket` (and `reviewer_decision`) rather than inferring from
+ * `mid_a === mid_b`: a pair can share a mid because the pipeline merged it,
+ * because clustering unioned it transitively, or because a reviewer merged
+ * it, and only the third is a review outcome. */
+export function bucketBadge(item: {
+  bucket: string;
+  reviewer_decision?: string | null;
+}): { label: string; tone: string } {
+  switch (item.bucket) {
+    case "reviewed":
+      return {
+        // A reviewer has ruled either way, so both read as resolved.
+        label: item.reviewer_decision === "merged" ? "Merged" : "Not a match",
+        tone: "text-status-auto bg-status-auto/15",
+      };
+    case "auto_merged":
+      return { label: "Auto-merged", tone: "text-status-auto bg-status-auto/15" };
+    case "auto_rejected":
+      return {
+        label: "Auto-rejected",
+        tone: "text-status-nomatch bg-status-nomatch/15",
+      };
+    default:
+      return { label: "Needs review", tone: "text-brand-blue bg-brand-blue/10" };
+  }
+}
+
 /** Which stage decided this pair, in the row's own words.
  *
  * `verdict` is the pipeline's own vocabulary (`src/api/pair_verdicts.py`),

@@ -4,6 +4,7 @@ import {
   bandFilter,
   bandFromFilters,
   bandRangeLabel,
+  bucketBadge,
   signalFor,
   signalTooltip,
   verdictLabel,
@@ -223,6 +224,36 @@ describe("signalTooltip", () => {
     const tip = signalTooltip({ confidence: 0.67, verdict: "ml_human_review" });
     expect(tip).toContain("67.0%");
     expect(tip).toContain("not of this pair");
+  });
+});
+
+describe("bucketBadge", () => {
+  it("names all four sections, matching the queue's own tab labels", () => {
+    expect(bucketBadge({ bucket: "needs_review" }).label).toBe("Needs review");
+    expect(bucketBadge({ bucket: "auto_merged" }).label).toBe("Auto-merged");
+    expect(bucketBadge({ bucket: "auto_rejected" }).label).toBe("Auto-rejected");
+  });
+
+  it("reports what the reviewer concluded on a reviewed pair", () => {
+    expect(
+      bucketBadge({ bucket: "reviewed", reviewer_decision: "merged" }).label,
+    ).toBe("Merged");
+    expect(
+      bucketBadge({ bucket: "reviewed", reviewer_decision: "not_a_match" })
+        .label,
+    ).toBe("Not a match");
+  });
+
+  it("distinguishes a reviewer merge from a pipeline merge", () => {
+    // Both end with the records together, but only one is a review outcome
+    // — conflating them is what once filed auto-merges under "reviewed".
+    expect(
+      bucketBadge({ bucket: "reviewed", reviewer_decision: "merged" }).label,
+    ).not.toBe(bucketBadge({ bucket: "auto_merged" }).label);
+  });
+
+  it("falls back to open work on an unknown bucket rather than blanking", () => {
+    expect(bucketBadge({ bucket: "something_new" }).label).toBe("Needs review");
   });
 });
 

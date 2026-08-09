@@ -7,6 +7,7 @@ import {
   bucketBadge,
   signalFor,
   signalTooltip,
+  pipelineOutcome,
   verdictLabel,
   type LiveThresholds,
 } from "./pair-signal";
@@ -271,5 +272,54 @@ describe("verdictLabel", () => {
     // Null means the row came from `POST /records/score`, which runs no
     // model stage at all — a different thing from a stage declining to act.
     expect(verdictLabel(null)).toBe("Scored incrementally");
+  });
+});
+
+describe("pipelineOutcome", () => {
+  it("names the stage that decided, and the rule when one fired", () => {
+    expect(
+      pipelineOutcome({ verdict: "auto_merge_rule", match_rule: "SSN_DOB" })
+        .label,
+    ).toBe("Deterministic rule: SSN_DOB");
+    expect(pipelineOutcome({ verdict: "gate_dropped" }).label).toBe(
+      "Gate: not a match",
+    );
+    expect(pipelineOutcome({ verdict: "ml_auto_merge" }).label).toBe(
+      "Matcher: confident match",
+    );
+    expect(pipelineOutcome({ verdict: "ml_human_review" }).label).toBe(
+      "Matcher: ambiguous",
+    );
+    expect(pipelineOutcome({ verdict: "reject" }).label).toBe(
+      "Deterministic rules: not a match",
+    );
+  });
+
+  it("flags a transitive join only when no merge verdict explains the cluster", () => {
+    // Same mid, but nothing about this pair merged it — clustering unioned
+    // it through some other record, which is the surprising case.
+    expect(
+      pipelineOutcome({ verdict: "ml_human_review", mid_a: "M1", mid_b: "M1" })
+        .cluster,
+    ).toBe("Cluster: joined transitively");
+    // Its own edge formed the cluster: `label` already says so.
+    expect(
+      pipelineOutcome({ verdict: "ml_auto_merge", mid_a: "M1", mid_b: "M1" })
+        .cluster,
+    ).toBeNull();
+    // A reviewer's merge is a human outcome, not a transitive one, and the
+    // candidate row can't tell them apart — so it claims neither.
+    expect(
+      pipelineOutcome({
+        verdict: "ml_human_review",
+        bucket: "reviewed",
+        mid_a: "M1",
+        mid_b: "M1",
+      }).cluster,
+    ).toBeNull();
+    expect(
+      pipelineOutcome({ verdict: "ml_human_review", mid_a: "M1", mid_b: "M2" })
+        .cluster,
+    ).toBeNull();
   });
 });

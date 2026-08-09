@@ -3,7 +3,6 @@
 import clsx from "clsx";
 import type { ReviewQueueFilters } from "@/lib/api-client";
 import type { ReviewBucket, ReviewQueueItem } from "@/lib/schemas";
-import { formatRawDate, fullName, maskSsn } from "@/lib/format";
 import {
   BAND_DEFS,
   bandDef,
@@ -11,9 +10,9 @@ import {
   bandFromFilters,
   bandRangeLabel,
   bucketBadge,
+  pipelineOutcome,
   signalFor,
   signalTooltip,
-  verdictLabel,
   type LiveThresholds,
   type SignalBand,
 } from "@/lib/pair-signal";
@@ -282,80 +281,71 @@ function CandidateRow({
   // "1% likely the same person" on pairs the gate had passed as plausible.
   const { band } = signalFor(item);
   const def = bandDef(band);
-  const inCluster = item.member_count_a > 1 || item.member_count_b > 1;
+  const state = bucketBadge(item);
+  const outcome = pipelineOutcome(item);
 
   return (
     <button
       onClick={onClick}
       className={clsx(
-        "mb-1 flex w-full items-start justify-between gap-3 rounded-md border px-3 py-2.5 text-left",
+        "mb-1 flex w-full flex-col gap-1.5 rounded-md border px-3 py-2.5 text-left",
         selected
           ? "border-brand-blue bg-brand-blue/5"
           : "border-transparent hover:bg-bg",
       )}
     >
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-[13px] font-bold text-ink-2">
-          {fullName(item.patient_a.first_name, item.patient_a.last_name)}
-          <span className="mx-1 font-medium text-gray">vs</span>
-          {fullName(item.patient_b.first_name, item.patient_b.last_name)}
-        </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-2">
-          <span>{formatRawDate(item.patient_a.birth_date)}</span>
-          <span>·</span>
-          <span>{maskSsn(item.patient_a.ssn_last4)}</span>
-          {inCluster && (
-            <span className="rounded-full bg-bg px-1.5 py-0.5 text-[9.5px] font-bold text-gray-2">
-              +{Math.max(item.member_count_a, item.member_count_b) - 1} in cluster
-            </span>
-          )}
-        </div>
-        {/* Why this pair is in front of you — the stage that routed it, and
-            the rule that fired if one did. The old row showed only a number,
-            which is what let a 1% ML score read as a verdict of its own. */}
-        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10.5px] text-gray">
-          <span className="font-semibold">{verdictLabel(item.verdict)}</span>
-          {item.match_rule && (
-            <>
-              <span>·</span>
-              <span className="font-mono">{item.match_rule}</span>
-            </>
-          )}
-        </div>
-      </div>
-      <div className="flex flex-shrink-0 flex-col items-end gap-1">
+      {/* Three columns, two rows: each record's name stacks vertically on its
+          own side, with the two badges between them. Reading down a column
+          gives one record; reading across a row pairs first-with-first and
+          last-with-last, which is how a reviewer actually compares two names.
+          The centre column is `auto` so a long name never squeezes a badge. */}
+      <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-x-2 gap-y-0.5">
+        <span className="truncate text-[13px] font-bold text-ink-2">
+          {item.patient_a.first_name || "—"}
+        </span>
         <span
           title={signalTooltip(item)}
           className={clsx(
-            "rounded-full px-1.5 py-0.5 text-[9.5px] font-bold uppercase",
+            "justify-self-center rounded-full px-1.5 py-0.5 text-[9.5px] font-bold uppercase",
             def.tone,
           )}
         >
           {def.label}
         </span>
-        <OutcomeBadge item={item} />
+        <span className="truncate text-right text-[13px] font-bold text-ink-2">
+          {item.patient_b.first_name || "—"}
+        </span>
+
+        <span className="truncate text-[13px] font-bold text-ink-2">
+          {item.patient_a.last_name || "—"}
+        </span>
+        <span
+          className={clsx(
+            "justify-self-center rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase",
+            state.tone,
+          )}
+        >
+          {state.label}
+        </span>
+        <span className="truncate text-right text-[13px] font-bold text-ink-2">
+          {item.patient_b.last_name || "—"}
+        </span>
+      </div>
+
+      {/* Why this pair is in front of you — the stage that routed it, named,
+          and the rule that fired if one did. The old row showed only a
+          number, which is what let a 1% ML score read as a verdict of its
+          own. Centred so it reads as a caption under the pair as a whole,
+          not as an attribute of the left-hand record. */}
+      <div className="flex flex-wrap items-center justify-center gap-1.5 text-center text-[10.5px] text-gray">
+        <span className="font-semibold">{outcome.label}</span>
+        {outcome.cluster && (
+          <>
+            <span>·</span>
+            <span>{outcome.cluster}</span>
+          </>
+        )}
       </div>
     </button>
-  );
-}
-
-/** What happened to this pair, in one word — the same `bucketBadge` the
- * detail header shows, so a row and the panel beside it can't disagree.
- *
- * Suppressed for `needs_review`: every row under that tab would carry the
- * same badge, which is noise. The detail header does show it, because there
- * the reviewer is about to act and "this is still open work" is the point. */
-function OutcomeBadge({ item }: { item: ReviewQueueItem }) {
-  if (item.bucket === "needs_review") return null;
-  const { label, tone } = bucketBadge(item);
-  return (
-    <span
-      className={clsx(
-        "rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase",
-        tone,
-      )}
-    >
-      {label}
-    </span>
   );
 }

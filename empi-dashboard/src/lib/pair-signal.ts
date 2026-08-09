@@ -346,7 +346,11 @@ export function bucketBadge(item: {
         tone: "text-status-nomatch bg-status-nomatch/15",
       };
     default:
-      return { label: "Needs review", tone: "text-brand-blue bg-brand-blue/10" };
+      // Deliberately the gold `--status-review` rather than FR-13's
+      // `*-display` variant: open work is the one state a reviewer should be
+      // able to pick out of a list at a glance, and blue read as inert
+      // beside the green/red resolved states.
+      return { label: "Needs review", tone: "text-status-review bg-status-review/15" };
   }
 }
 
@@ -375,4 +379,62 @@ export function verdictLabel(verdict: string | null | undefined): string {
       // which runs no model stage (see `ReviewQueueItemSchema`).
       return "Scored incrementally";
   }
+}
+
+/** The one-line "what the pipeline did with this pair", named by the stage
+ * that did it — `Deterministic rule: SSN_DOB`, `Gate: not a match`,
+ * `Matcher: confident match`.
+ *
+ * This is `verdictLabel` plus the two things a reviewer needs alongside it:
+ * the rule that fired (a rule verdict without its rule name says nothing
+ * about *why*), and whether clustering put the two records together anyway.
+ *
+ * `cluster` is non-null only when the pair shares a `mid` without its own
+ * merge verdict — i.e. clustering unioned it through some other record. A
+ * pair that merged on its own edge already says so in `label`, so repeating
+ * "same cluster" there would be noise. The Review Queue's candidate row
+ * can't distinguish a transitive join from a reviewer's merge, so a reviewed
+ * pair is left to its state badge rather than guessed at. */
+export function pipelineOutcome(item: {
+  verdict?: string | null;
+  match_rule?: string | null;
+  mid_a?: string | null;
+  mid_b?: string | null;
+  bucket?: string;
+}): { label: string; cluster: string | null } {
+  const rule = item.match_rule ?? null;
+  const verdict = item.verdict ?? null;
+
+  let label: string;
+  switch (verdict) {
+    case "auto_merge_rule":
+      label = rule ? `Deterministic rule: ${rule}` : "Deterministic rule: merged";
+      break;
+    case "reject":
+      label = "Deterministic rules: not a match";
+      break;
+    case "gate_dropped":
+      label = "Gate: not a match";
+      break;
+    case "ml_auto_merge":
+      label = "Matcher: confident match";
+      break;
+    case "ml_human_review":
+      label = rule ? `Matcher: ambiguous · rule ${rule}` : "Matcher: ambiguous";
+      break;
+    case "undecided":
+      label = "No stage decided";
+      break;
+    default:
+      label = "Scored incrementally";
+  }
+
+  const sameCluster =
+    item.mid_a != null && item.mid_b != null && item.mid_a === item.mid_b;
+  const cluster =
+    sameCluster && !MERGE_VERDICTS.has(verdict ?? "") && item.bucket !== "reviewed"
+      ? "Cluster: joined transitively"
+      : null;
+
+  return { label, cluster };
 }

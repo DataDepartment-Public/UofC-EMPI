@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Claude
+.claude/settings.local.json
+CLAUDE.local.md
+
+# mlflow local tracking store (created automatically when no remote
+# tracking URI is configured, e.g. running a job locally outside Azure ML)
+mlruns/
+
+# Local scratch copies of PHI training inputs / model artifacts -- these
+# move via the explicit steps in docs/data-movement.md, never committed.
+data/
+models/
+outputs/
+

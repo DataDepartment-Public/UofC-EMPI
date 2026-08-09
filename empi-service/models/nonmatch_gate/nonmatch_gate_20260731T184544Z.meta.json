@@ -1,0 +1,41 @@
+{
+  "model_name": "nonmatch_gate",
+  "holdout_spec": {
+    "method": "sha256_bucket",
+    "salt": "empi-holdout-v1",
+    "fraction": 0.2,
+    "version": 1
+  },
+  "model_file": "nonmatch_gate_20260731T184544Z.pkl",
+  "created_utc": "2026-07-31T18:45:44.984789+00:00",
+  "notes": "LightGBM non-match gate \u2014 the pipeline Stage-4.25 gate (src/models/nonmatch_gate/), NOT the Stage-4.5 ml_matcher. score = predict_proba[:, 1] = P(plausible) = P(match or ambiguous). High score -> keep pair; low score -> confident not-match (discard).",
+  "feature_cols": [
+    "sound_first",
+    "sound_last",
+    "cmp_street_num",
+    "sim_jw_first",
+    "sim_jw_last",
+    "sim_jw_middle",
+    "sim_lev_email",
+    "sim_lev_address1",
+    "addr_token_jaccard",
+    "ssn_digit_frac",
+    "sim_dob",
+    "sim_phones"
+  ],
+  "gate_threshold": 0.3,
+  "test_metrics": {
+    "n_test": 40849,
+    "roc_auc": 0.9997,
+    "pr_auc": 0.9993,
+    "gate_at_threshold": {
+      "threshold": 0.3,
+      "plausible_precision": 0.962,
+      "plausible_recall": 0.9992,
+      "tp": 12423,
+      "fp": 491,
+      "fn": 10,
+      "tn": 27925
+    }
+  }
+}

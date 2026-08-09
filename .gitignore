@@ -1,61 +1,28 @@
-# Environment
-.env
-.venv/
-venv/
-env/
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-
-# Data files (keep structure, ignore data)
-data/raw/*
-data/processed/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-*.csv
-*.parquet
-*.pkl
-*.pickle
-*.xlsx
-*.xls
-
-# Logs
-logs/*
-!logs/.gitkeep
-*.log
-
-# Model artifacts
-models/artifacts/*
-models/experiments/*
-!models/artifacts/.gitkeep
-!models/experiments/.gitkeep
-*.joblib
-*.h5
-*.pkl
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
 # OS
 .DS_Store
 Thumbs.db
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+CLAUDE.md
+
+# data/ — handled by empi-service/.gitignore (per-subdirectory rules; a bare
+# "empi-service/data/" here would prune the whole subtree from git's
+# ignore-check traversal, which breaks that file's per-directory
+# !data/<dir>/SCHEMA.md negations — see the git docs on excluded parent dirs).
+
+# Terraform
+# (.terraform.lock.hcl is intentionally NOT ignored — commit it so CI and
+# local applies resolve the same provider versions.)
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/terraform.tfvars
+terraform/backend.hcl
+terraform/crash.log
+

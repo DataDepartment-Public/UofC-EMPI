@@ -1,0 +1,164 @@
+# Promotes an Azure ML registered model version to "champion" -- the human
+# approval gate for empi-model-training (to-do.md Track B4). Split into two
+# jobs so the metrics a reviewer needs are visible *before* they approve:
+# `show-metrics` runs unconditionally and prints the candidate version's
+# metadata/metrics into the run summary; `promote` is gated by the
+# `production` GitHub Environment (add required reviewers there for a real
+# approval gate, same as terraform-apply.yml) and only runs after a human
+# reviews that summary and approves.
+#
+# Uses the same GitHub Actions OIDC identity as every other workflow here
+# (github_oidc.tf) -- no new app registration needed, since federated
+# credential trust is scoped to the repo/ref, not per-workflow. That
+# identity's explicit "AzureML Data Scientist" role (ml_workspace.tf) is
+# what lets it read/tag models here.
+#
+# Tagging "champion" in the AML registry is NOT the same as the running
+# backend serving that model. Two more things have to happen, in order:
+#   1. Copy the champion artifact into the `empi-models` Azure Files share
+#      -- still a manual, VNet-connected step (see the warning step below),
+#      since that share has no public ingress (terraform/networking.tf).
+#   2. Call POST /admin/models/reload so the backend actually drops its
+#      cached model and picks up the newly-copied artifact -- this job DOES
+#      attempt that call for real (see the last step). Same network
+#      constraint as step 1: it only succeeds from a runner with VNet
+#      connectivity, and fails loudly (not silently) on the default
+#      GitHub-hosted runner, which is the correct behavior -- it tells you
+#      the promotion did NOT take effect rather than claiming success while
+#      the old model stays live.
+name: Promote model to champion
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_name:
+        description: "AML registered model name"
+        required: true
+        type: choice
+        options:
+          - empi-fs-matcher
+          - empi-ml-matcher
+          - empi-nonmatch-gate
+      model_version:
+        description: "Version to promote"
+        required: true
+        type: string
+
+permissions:
+  id-token: write # required for azure/login OIDC
+  contents: read
+
+jobs:
+  show-metrics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install az ml extension
+        run: az extension add -n ml -y
+
+      - name: Show candidate model metadata + linked run metrics
+        run: |
+          set -euo pipefail
+          echo "## Candidate: ${{ inputs.model_name }}:${{ inputs.model_version }}" >> "$GITHUB_STEP_SUMMARY"
+
+          model_json=$(az ml model show \
+            --name "${{ inputs.model_name }}" \
+            --version "${{ inputs.model_version }}" \
+            --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+            --workspace-name "${{ vars.ML_WORKSPACE_NAME }}")
+
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          echo "$model_json" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          job_name=$(echo "$model_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("job_name") or "")')
+          if [ -n "$job_name" ]; then
+            echo "### Linked run: $job_name" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            az ml job show --name "$job_name" \
+              --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+              --workspace-name "${{ vars.ML_WORKSPACE_NAME }}" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_No linked run found on this model version -- review the metadata above only._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  promote:
+    needs: show-metrics
+    runs-on: ubuntu-latest
+    environment: production # add required reviewers on this GitHub Environment for a real approval gate
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install az ml extension
+        run: az extension add -n ml -y
+
+      - name: Clear champion tag from any previous version
+        run: |
+          set -euo pipefail
+          versions=$(az ml model list \
+            --name "${{ inputs.model_name }}" \
+            --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+            --workspace-name "${{ vars.ML_WORKSPACE_NAME }}" \
+            --query "[?tags.stage=='champion'].version" -o tsv)
+          for v in $versions; do
+            echo "Clearing champion tag from version $v"
+            az ml model update \
+              --name "${{ inputs.model_name }}" --version "$v" \
+              --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+              --workspace-name "${{ vars.ML_WORKSPACE_NAME }}" \
+              --remove tags.stage || true
+          done
+
+      - name: Tag the approved version as champion
+        run: |
+          az ml model update \
+            --name "${{ inputs.model_name }}" --version "${{ inputs.model_version }}" \
+            --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+            --workspace-name "${{ vars.ML_WORKSPACE_NAME }}" \
+            --set tags.stage=champion
+
+      - name: Sync champion artifact to the serving share
+        run: |
+          echo "::warning::Tagging 'champion' in the AML registry does NOT" \
+            "update what the backend actually serves. Copying the artifact" \
+            "into the empi-models Azure Files share requires network" \
+            "connectivity this GitHub-hosted runner does not have (that" \
+            "share has no public ingress -- terraform/networking.tf). Do" \
+            "this manually via the VNet-connectivity workaround documented" \
+            "in terraform/README.md's 'Bootstrap the FS matcher model' /" \
+            "network-isolation sections, or add a self-hosted runner with" \
+            "VNet access and replace this step -- BEFORE the next step" \
+            "runs, so there's a newly-copied artifact for it to pick up."
+
+      - name: Put the promoted model live (POST /admin/models/reload)
+        run: |
+          set -euo pipefail
+          echo "Calling POST ${{ vars.BACKEND_URL }}/admin/models/reload ..."
+          response=$(curl --fail --show-error --silent --request POST \
+            "${{ vars.BACKEND_URL }}/admin/models/reload")
+          echo "### Reload response" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          echo "$response" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # No auth on this route -- protected the same way every backend
+        # route is, by having no public ingress at all (terraform/
+        # networking.tf), not an application-layer check. That's also
+        # exactly why `curl --fail` above will fail on the default
+        # GitHub-hosted runner: it genuinely cannot reach the backend's
+        # hostname. This only succeeds from a runner with VNet
+        # connectivity (self-hosted in the VNet, or equivalent) -- same
+        # requirement as the artifact-copy step above. Failing loudly here
+        # is correct, not a bug to silence: it means the promotion did NOT
+        # take effect, and the old model is still what's live.

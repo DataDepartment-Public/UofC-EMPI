@@ -3,15 +3,23 @@
 import { useState } from "react";
 import Link from "next/link";
 import clsx from "clsx";
-import { useClusterPairs, usePairExplanation } from "@/lib/hooks";
+import { useClusterPairs } from "@/lib/hooks";
 import type {
   ClusterExternalPair,
   ClusterPair,
   ClusterPairVerdict,
   Entity,
 } from "@/lib/schemas";
-import { formatRawDate, fullName, maskSsn } from "@/lib/format";
-import { ShapWaterfall } from "@/components/shared/ShapWaterfall";
+import { fullName } from "@/lib/format";
+import {
+  BlockingStage,
+  ClusteringStage,
+  GateStage,
+  MatcherStage,
+  RulesStage,
+  StageStrip,
+  skipReason,
+} from "@/components/shared/PipelineStages";
 
 /** How each verdict reads to a reviewer, and which of the three status
  * colors it wears. Order matters twice over: it is the backend's
@@ -139,7 +147,6 @@ export function ClusterComparisons({ entity }: { entity: Entity }) {
             nameA={nameOf(pair.patid_a)}
             nameB={nameOf(pair.patid_b)}
             nameOf={nameOf}
-            runId={data.run_id ?? undefined}
             thresholds={data.thresholds}
           />
         ))}
@@ -217,7 +224,6 @@ export function ClusterComparisonHistory({ entity }: { entity: Entity }) {
             key={`${pair.patid_a}-${pair.patid_b}`}
             pair={pair}
             memberName={nameOfMember(entity, pair.member_patid)}
-            runId={data.run_id ?? undefined}
             thresholds={data.thresholds}
           />
         ))}
@@ -243,12 +249,10 @@ function byVerdict<T extends { verdict: ClusterPairVerdict }>(pairs: T[]): T[] {
 function ExternalPairCard({
   pair,
   memberName,
-  runId,
   thresholds,
 }: {
   pair: ClusterExternalPair;
   memberName: string;
-  runId?: string;
   thresholds: Record<string, number>;
 }) {
   const [open, setOpen] = useState(false);
@@ -270,8 +274,13 @@ function ExternalPairCard({
             <span className="mx-1.5 text-gray">↔</span>
             <span className="font-bold text-ink-2">{otherName}</span>
           </span>
+          {/* Both PATIDs, same as the internal cards. Naming only the
+              counterpart made several rows of this list identical on screen
+              whenever two members of this cluster were each compared against
+              the same outside record — and each of those rows links to a
+              different pair. */}
           <span className="shrink-0 font-mono text-[10px] text-gray">
-            {pair.other_patid}
+            {pair.member_patid} · {pair.other_patid}
             {pair.other_mid && ` · ${pair.other_mid}`}
           </span>
         </span>
@@ -282,63 +291,64 @@ function ExternalPairCard({
         <div className="border-t border-line px-3.5 py-3">
           <div className="mb-3 flex items-start justify-between gap-3">
             <p className="text-xs text-gray-2">{verdict.blurb}</p>
-            {isAwaitingReview(pair.verdict) && (
-              <Link
-                href={`/review?patid_a=${encodeURIComponent(pair.patid_a)}&patid_b=${encodeURIComponent(pair.patid_b)}`}
-                className="shrink-0 whitespace-nowrap text-[11px] font-bold text-brand-blue hover:underline"
-              >
-                Open in Review Queue →
-              </Link>
-            )}
+            <ReviewQueueLink pair={pair} resolvable={pair.other_mid != null} />
           </div>
-          <OtherRecordSummary pair={pair} />
-          <StageStrip pair={pair} thresholds={thresholds} internal={false} />
-          <Waterfall pair={pair} runId={runId} />
+          <PairStages pair={pair} thresholds={thresholds} internal={false} />
         </div>
       )}
     </div>
   );
 }
 
-/** Whether a pair's verdict is exactly the set the Review Queue's "Needs
- * review" tab would surface for it — see `ClusterComparisonHistory`'s
- * `pending` count, which uses this same pair. Not `reject`/`gate_dropped`
- * (a confident automated non-match, never queued) and not the merge
- * verdicts (already resolved). */
+/** Whether a pair's verdict is the set the Review Queue's "Needs review"
+ * section would surface for it — see `ClusterComparisonHistory`'s `pending`
+ * count. Not `reject`/`gate_dropped` (those land in "Auto-rejected") and not
+ * the merge verdicts ("Auto-merged"). Used for the wording of the counts
+ * only: every one of those pairs is still linkable — see `hasQueueRow`. */
 function isAwaitingReview(verdict: ClusterPairVerdict): boolean {
   return verdict === "ml_human_review" || verdict === "blocked_undecided";
 }
 
-/** Enough of the declined record to judge the decision without leaving the
- * page. Deliberately not a full comparison table — that record belongs to
- * another cluster, and the link is there for a reviewer who wants the whole
- * picture. */
-function OtherRecordSummary({ pair }: { pair: ClusterExternalPair }) {
+/** Whether the Review Queue holds a row for this pair, and so whether a deep
+ * link to it resolves.
+ *
+ * Publish writes a `review_candidate` row for **every** candidate pair the
+ * run decided, not just the ones still awaiting a reviewer — the queue's four
+ * sections then split them into needs-review / reviewed / auto-merged /
+ * auto-rejected. So a rejected, gate-dropped or auto-merged pair is just as
+ * addressable as an ambiguous one, and every card here should link out.
+ *
+ * The single exception is `not_compared`: those two records were never
+ * blocked together, no stage ever looked at them, and no queue row exists.
+ * That pair shares a cluster only by transitivity — the clustering stage of
+ * its strip is the explanation, and a link would resolve to nothing. */
+function hasQueueRow(verdict: ClusterPairVerdict): boolean {
+  return verdict !== "not_compared";
+}
+
+/** The deep link into the Review Queue for one pair. The queue canonicalizes
+ * the two PATIDs itself, so the order sent here doesn't matter; it resolves
+ * the pair independently of whatever section or page the queue happens to be
+ * showing (`useReviewCandidate`).
+ *
+ * `resolvable` is the caller's extra precondition — the external list uses it
+ * to drop the link for a counterpart that isn't in the index, since the
+ * queue joins both sides to `entity_member` and would return nothing. */
+function ReviewQueueLink({
+  pair,
+  resolvable = true,
+}: {
+  pair: ClusterPair;
+  resolvable?: boolean;
+}) {
+  if (!resolvable || !hasQueueRow(pair.verdict)) return null;
   return (
-    <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md bg-bg px-3 py-2 text-[11px] text-gray-2">
-      <span>
-        <span className="text-gray">Compared against </span>
-        <span className="font-bold text-ink-2">
-          {fullName(pair.other_first_name, pair.other_last_name)}
-        </span>
-      </span>
-      <span>
-        <span className="text-gray">DOB </span>
-        {formatRawDate(pair.other_birth_date) || "—"}
-      </span>
-      <span>
-        <span className="text-gray">SSN </span>
-        {maskSsn(pair.other_ssn_last4)}
-      </span>
-      {pair.other_mid && (
-        <Link
-          href={`/dataset?mid=${encodeURIComponent(pair.other_mid)}`}
-          className="font-bold text-brand-blue hover:underline"
-        >
-          Open {pair.other_mid} →
-        </Link>
-      )}
-    </div>
+    <Link
+      href={`/review?patid_a=${encodeURIComponent(pair.patid_a)}&patid_b=${encodeURIComponent(pair.patid_b)}`}
+      className="shrink-0 whitespace-nowrap text-[11px] font-bold text-brand-blue hover:underline"
+    >
+      Open in Review Queue →
+    </Link>
   );
 }
 
@@ -347,14 +357,12 @@ function PairCard({
   nameA,
   nameB,
   nameOf,
-  runId,
   thresholds,
 }: {
   pair: ClusterPair;
   nameA: string;
   nameB: string;
   nameOf: (patid: string) => string;
-  runId?: string;
   thresholds: Record<string, number>;
 }) {
   const [open, setOpen] = useState(false);
@@ -387,20 +395,28 @@ function PairCard({
 
       {open && (
         <div className="border-t border-line px-3.5 py-3">
-          <p className="mb-3 text-xs text-gray-2">{verdict.blurb}</p>
-          <StageStrip pair={pair} thresholds={thresholds} nameOf={nameOf} internal />
-          <Waterfall pair={pair} runId={runId} />
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <p className="text-xs text-gray-2">{verdict.blurb}</p>
+            <ReviewQueueLink pair={pair} />
+          </div>
+          <PairStages pair={pair} thresholds={thresholds} nameOf={nameOf} internal />
         </div>
       )}
     </div>
   );
 }
 
-/** Blocking -> rules -> gate -> matcher -> clustering for one pair, in the
- * same joined-cards language as the Review Queue's `PipelineTrail`. Reads
- * entirely from the pair payload — no fetch — so the strip renders
- * instantly on expand and the (slower) waterfall below fills in after. */
-function StageStrip({
+/** One pair's journey through the five shared stages
+ * (`components/shared/PipelineStages`) — the same strip, in the same order
+ * and wording, that the Review Queue's `PipelineTrail` renders.
+ *
+ * The difference is the source, not the shape: here everything comes from the
+ * run's immutable artifacts, already in the `/clusters/{mid}/pairs` payload,
+ * so the strip renders on expand with no further fetch. The Review Queue
+ * reads the two model stages from the persisted per-pair explanations, which
+ * is also where its thresholds come from; this side takes them from the
+ * run's settings, returned alongside the pairs. */
+function PairStages({
   pair,
   thresholds,
   nameOf = (patid) => patid,
@@ -419,164 +435,43 @@ function StageStrip({
    * definition. */
   internal?: boolean;
 }) {
-  const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
-  const isDirectEdge =
-    pair.verdict === "auto_merge_rule" ||
-    pair.verdict === "ml_auto_merge" ||
-    pair.joined_by === "reviewer";
-
   return (
-    <div className="overflow-x-auto pb-1">
-      <div className="flex min-w-[700px]">
-        <Stage num={1} label="Blocking">
-          {pair.blocked ? (
-            <>
-              <Row ok>Same candidate set</Row>
-              <Row>{pair.source_blocks ?? "—"}</Row>
-            </>
-          ) : (
-            <Row muted>Never blocked together</Row>
-          )}
-        </Stage>
+    <StageStrip>
+      <BlockingStage blocked={pair.blocked} sourceBlocks={pair.source_blocks} />
 
-        <Stage num={2} label="Rules">
-          {pair.match_rule ? (
-            <>
-              <Row ok>{pair.match_rule} fired</Row>
-              <Row>
-                {pair.rules_fired && pair.rules_fired !== pair.match_rule
-                  ? `All: ${pair.rules_fired}`
-                  : `Confidence ${
-                      pair.confidence != null ? pct(pair.confidence) : "—"
-                    }`}
-              </Row>
-            </>
-          ) : pair.reject_rule ? (
-            <>
-              <Row bad>{pair.reject_rule}</Row>
-              <Row>{pair.n_contradictions} strong contradictions</Row>
-            </>
-          ) : (
-            <Row muted>No rule confirmed or rejected</Row>
-          )}
-        </Stage>
+      <RulesStage
+        matchRule={pair.match_rule}
+        rulesFired={pair.rules_fired}
+        confidence={pair.confidence}
+        rejectRule={pair.reject_rule}
+        nContradictions={pair.n_contradictions}
+      />
 
-        <Stage num={3} label="Non-match gate">
-          {pair.gate_score != null ? (
-            <>
-              <Row bad={pair.gate_tier === "no_match"} ok={pair.gate_tier !== "no_match"}>
-                {pct(pair.gate_score)} plausible
-              </Row>
-              <Row>
-                {pair.gate_tier === "no_match" ? "Dropped" : "Passed"} · threshold{" "}
-                {thresholds.gate_threshold != null
-                  ? pct(thresholds.gate_threshold)
-                  : "—"}
-              </Row>
-            </>
-          ) : (
-            <Row muted>Not scored by the gate</Row>
-          )}
-        </Stage>
+      <GateStage
+        score={pair.gate_score}
+        tier={pair.gate_tier}
+        threshold={thresholds.gate_threshold}
+        skipReason={skipReason(pair.verdict, "gate")}
+      />
 
-        <Stage num={4} label="ML matcher">
-          {pair.ml_score != null ? (
-            <>
-              <Row ok={pair.ml_tier === "auto_merge"}>{pct(pair.ml_score)} match</Row>
-              <Row>
-                {pair.ml_tier} · threshold{" "}
-                {thresholds.ml_auto_merge_threshold != null
-                  ? pct(thresholds.ml_auto_merge_threshold)
-                  : "—"}
-              </Row>
-            </>
-          ) : (
-            <Row muted>Not scored by the matcher</Row>
-          )}
-        </Stage>
+      <MatcherStage
+        score={pair.ml_score}
+        tier={pair.ml_tier}
+        threshold={thresholds.ml_auto_merge_threshold}
+        skipReason={skipReason(pair.verdict, "matcher")}
+      />
 
-        <Stage num={5} label="Clustering">
-          {!internal ? (
-            <Row muted>Different clusters — not applicable</Row>
-          ) : isDirectEdge ? (
-            <Row ok>This pair&apos;s own match formed the merge edge</Row>
-          ) : pair.cluster_path && pair.cluster_path.length > 1 ? (
-            <>
-              <Row ok>
-                Joined transitively ({pair.cluster_path.length - 1} hop
-                {pair.cluster_path.length - 1 === 1 ? "" : "s"})
-              </Row>
-              <PathChain path={pair.cluster_path} nameOf={nameOf} />
-            </>
-          ) : (
-            <Row muted>No merge path found for this run</Row>
-          )}
-        </Stage>
-      </div>
-    </div>
-  );
-}
-
-/** The chain of members whose own confirmed merges connected two records
- * that formed no edge of their own — the "record ids that determined the
- * merge" a reviewer needs to trace a surprising grouping back to its
- * source. Patids lead (they're what a reviewer looks records up by); the
- * name rides along as a tooltip. */
-function PathChain({
-  path,
-  nameOf,
-}: {
-  path: string[];
-  nameOf: (patid: string) => string;
-}) {
-  return (
-    <div className="mt-0.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
-      {path.map((patid, i) => (
-        <span key={`${patid}-${i}`} className="flex items-center gap-1">
-          {i > 0 && <span className="text-[10px] text-gray">→</span>}
-          <span
-            className="font-mono text-[10px] text-gray-2"
-            title={nameOf(patid)}
-          >
-            {patid}
-          </span>
-        </span>
-      ))}
-    </div>
-  );
-}
-
-/** The SHAP waterfall, fetched only when a pair is expanded and only for the
- * verdicts a model actually produced. A deterministic auto-merge or a
- * transitive pair has no model decision to explain — its provenance is the
- * rule name in the strip above — so asking would just 404. */
-function Waterfall({ pair, runId }: { pair: ClusterPair; runId?: string }) {
-  const scored =
-    pair.verdict === "ml_auto_merge" ||
-    pair.verdict === "ml_human_review" ||
-    pair.verdict === "gate_dropped";
-
-  const { data, isLoading } = usePairExplanation(
-    scored ? pair.patid_a : null,
-    scored ? pair.patid_b : null,
-    runId,
-  );
-
-  if (!scored) return null;
-
-  return (
-    <div className="mt-4">
-      <h4 className="mb-2 text-[11px] font-bold tracking-wide text-gray uppercase">
-        Feature contributions (SHAP)
-      </h4>
-      {isLoading && <p className="text-sm text-gray">Loading explanation…</p>}
-      {!isLoading && !data && (
-        <p className="text-xs text-gray">
-          No stored explanation for this pair in this run.
-        </p>
-      )}
-      {data && <ShapWaterfall explanation={data} />}
-    </div>
+      <ClusteringStage
+        sameCluster={internal}
+        directEdge={
+          pair.verdict === "auto_merge_rule" || pair.verdict === "ml_auto_merge"
+        }
+        byReviewer={pair.joined_by === "reviewer"}
+        path={pair.cluster_path}
+        tracksPath
+        nameOf={nameOf}
+      />
+    </StageStrip>
   );
 }
 
@@ -596,55 +491,5 @@ function Badge({
     >
       {children}
     </span>
-  );
-}
-
-function Stage({
-  num,
-  label,
-  children,
-}: {
-  num: number;
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={clsx(
-        "min-w-0 flex-1 basis-0 border border-line px-3 py-2.5",
-        "first:rounded-l-md last:rounded-r-md [&:not(:last-child)]:border-r-0",
-      )}
-    >
-      <div className="mb-1.5 text-[10px] font-bold tracking-wide text-gray uppercase">
-        {num} · {label}
-      </div>
-      <div className="space-y-0.5">{children}</div>
-    </div>
-  );
-}
-
-function Row({
-  ok = false,
-  bad = false,
-  muted = false,
-  children,
-}: {
-  ok?: boolean;
-  bad?: boolean;
-  muted?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      className={clsx(
-        "text-[11px]",
-        bad && "font-bold text-status-nomatch",
-        ok && !bad && "font-bold text-status-auto",
-        muted && "text-gray italic",
-        !ok && !bad && !muted && "text-gray-2",
-      )}
-    >
-      {children}
-    </div>
   );
 }

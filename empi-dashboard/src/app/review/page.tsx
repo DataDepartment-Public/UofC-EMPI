@@ -9,7 +9,7 @@ import {
   useReviewCandidate,
   useReviewQueue,
 } from "@/lib/hooks";
-import type { ReviewQueueItem } from "@/lib/schemas";
+import type { ReviewBucket, ReviewQueueItem } from "@/lib/schemas";
 import { MergeModal } from "@/components/review/MergeModal";
 import { ReviewCandidateDetail } from "@/components/review/ReviewCandidateDetail";
 import { ReviewQueueList } from "@/components/review/ReviewQueueList";
@@ -67,17 +67,32 @@ function ReviewQueuePageContent() {
     setTimeout(() => setToast(null), 3200);
   };
 
+  // A deep link can land on any of the four sections, not just "Needs review"
+  // — the registry links out from auto-merged, rejected and gate-dropped
+  // comparisons too. Line the list's tabs up with where the pair actually
+  // lives as soon as it resolves, so the reviewer sees it in its section
+  // (and highlighted) rather than a "Needs review" list the linked pair isn't
+  // in. Runs while the deep link is active; leaving it then keeps the section
+  // rather than jumping back.
+  //
+  // Adjusted during render rather than in an effect (the React-sanctioned
+  // "state derived from a change" pattern): `syncedBucket` records the
+  // section we've already snapped to, so this fires once per resolved deep
+  // link and a reviewer who then picks a different tab isn't dragged back.
+  const deepLinkBucket = deepLinkCandidate.data?.bucket;
+  const [syncedBucket, setSyncedBucket] = useState<ReviewBucket | null>(null);
+  if (deepLinkActive && deepLinkBucket && deepLinkBucket !== syncedBucket) {
+    setSyncedBucket(deepLinkBucket);
+    setFilters((f) =>
+      f.bucket === deepLinkBucket ? f : { ...f, bucket: deepLinkBucket, page: 1 },
+    );
+  }
+
   // Leaving deep-link mode — either the reviewer clicked "back to the full
-  // queue" or picked a different candidate from the list. Line the list's
-  // section tabs up with where the deep-linked pair actually lives (if it
-  // resolved to one) so the queue doesn't appear to have silently jumped
-  // between sections.
+  // queue" or picked a different candidate from the list.
   const exitDeepLink = (nextSelectedKey: string | null) => {
     setDeepLinkActive(false);
     setSelectedKey(nextSelectedKey);
-    if (deepLinkCandidate.data) {
-      setFilters((f) => ({ ...f, bucket: deepLinkCandidate.data!.bucket, page: 1 }));
-    }
     router.replace("/review");
   };
 

@@ -6,8 +6,7 @@ import { fullName } from "@/lib/format";
 import type { ReviewBucket, ReviewQueueItem } from "@/lib/schemas";
 import { FeatureComparisonTable } from "@/components/shared/FeatureComparisonTable";
 import { RawComparisonPanel } from "@/components/shared/RawComparisonPanel";
-import { ShapWaterfall } from "@/components/shared/ShapWaterfall";
-import { usePairExplanation } from "@/lib/hooks";
+import { ExplanationPanel } from "./ExplanationPanel";
 import { ManualMatchModal } from "./ManualMatchModal";
 import { PipelineTrail } from "./PipelineTrail";
 
@@ -27,7 +26,6 @@ export function ReviewCandidateDetail({
 }) {
   const [manualMatchOpen, setManualMatchOpen] = useState(false);
   const rows = compareRecords(item.patient_a, item.patient_b);
-  const { data: explanation } = usePairExplanation(item.patid_a, item.patid_b);
   const merged = item.mid_a === item.mid_b;
 
   return (
@@ -102,14 +100,7 @@ export function ReviewCandidateDetail({
         <RawComparisonPanel patidA={item.patid_a} patidB={item.patid_b} />
       </div>
 
-      {explanation && (
-        <div className="mb-5">
-          <h4 className="mb-1 text-[13px] font-bold text-ink-2">
-            Feature contributions (SHAP)
-          </h4>
-          <ShapWaterfall explanation={explanation} />
-        </div>
-      )}
+      <ExplanationPanel item={item} />
 
       <button
         onClick={() => setManualMatchOpen(true)}

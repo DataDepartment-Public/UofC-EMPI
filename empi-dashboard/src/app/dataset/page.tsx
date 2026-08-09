@@ -15,12 +15,11 @@ const PAGE_SIZE = 25;
 // Every origin — auto-matched, manually merged, standalone with nothing
 // pending, and standalone-but-pending-review. A record only ever exists as
 // `origin: "review"` when it's a singleton (see `publish.py`'s per-cluster
-// loop), so it surfaces here purely under the "All" toggle below —
-// `multiOnly`'s `min_members: 2` already excludes every singleton,
-// regardless of origin, from the default view. Deciding it (merge/dismiss)
-// still only happens on the Review Queue tab; this just makes sure a
-// pending record isn't invisible to someone browsing/searching the
-// registry who doesn't know to look there.
+// loop). The registry lists every cluster, singletons included, so such a
+// record is reachable here. Deciding it (merge/dismiss) still only happens
+// on the Review Queue tab; this just makes sure a pending record isn't
+// invisible to someone browsing/searching the registry who doesn't know to
+// look there.
 const ALL_ORIGINS = "deterministic,merge,none,review";
 
 /** Filters *and* the selected cluster live in the URL so a reviewer can link
@@ -31,7 +30,6 @@ const ALL_ORIGINS = "deterministic,merge,none,review";
 interface UrlState {
   filters: RecordsFilters;
   mid: string | null;
-  multiOnly: boolean;
 }
 
 function stateFromSearchParams(searchParams: URLSearchParams): UrlState {
@@ -46,20 +44,16 @@ function stateFromSearchParams(searchParams: URLSearchParams): UrlState {
       sort: sort === "confidence" || sort === "name" ? sort : undefined,
     },
     mid: searchParams.get("mid"),
-    // Multi-record-only is the default: a singleton cluster has nothing to
-    // compare, and singletons are ~90% of the index.
-    multiOnly: searchParams.get("all") !== "1",
   };
 }
 
-function stateToSearch({ filters, mid, multiOnly }: UrlState): string {
+function stateToSearch({ filters, mid }: UrlState): string {
   const params = new URLSearchParams();
   if (filters.search) params.set("search", filters.search);
   if (filters.birth_date) params.set("birth_date", filters.birth_date);
   if (filters.ssn_last4) params.set("ssn_last4", filters.ssn_last4);
   if (filters.sort) params.set("sort", filters.sort);
   if (filters.page && filters.page !== 1) params.set("page", String(filters.page));
-  if (!multiOnly) params.set("all", "1");
   if (mid) params.set("mid", mid);
   return params.toString();
 }
@@ -99,10 +93,6 @@ function DatasetPageContent() {
   const { data, isLoading, isError } = useRecords({
     ...state.filters,
     origin: ALL_ORIGINS,
-    // `min_members`, not `is_merged`: the latter counts *unlocked* members at
-    // publish time, so it hides any multi-record cluster a reviewer has
-    // already touched — 168 of 762 in the current index.
-    min_members: state.multiOnly ? 2 : undefined,
   });
   const unmergeMutation = useUnmergeMutation();
 
@@ -166,15 +156,6 @@ function DatasetPageContent() {
           isError={isError}
           selectedMid={selected?.mid ?? null}
           onSelect={(mid) => setState((s) => ({ ...s, mid }))}
-          multiOnly={state.multiOnly}
-          onMultiOnlyChange={(multiOnly) =>
-            setState((s) => ({
-              ...s,
-              multiOnly,
-              mid: null,
-              filters: { ...s.filters, page: 1 },
-            }))
-          }
         />
 
         {selected ? (

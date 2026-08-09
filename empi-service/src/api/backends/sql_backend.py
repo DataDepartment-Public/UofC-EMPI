@@ -878,11 +878,10 @@ def list_entities(
       * `search` — case-insensitive substring against PATID/mid/first/last name.
       * `origin` — match status ('deterministic' | 'review' | 'merge' | 'none'),
         or a comma-separated list of any of those. The Patient Registry passes
-        all four (its "All" toggle) or, under its default "2+ records" toggle,
-        relies on `min_members` alone to exclude every singleton — including
-        `origin='review'` ones — rather than filtering `origin` itself, so a
-        pending-review record stays *findable* by search there even though
-        deciding it (merge/dismiss) still only happens on the Review Queue.
+        all four and no `min_members`, so it lists every cluster — singletons
+        included, `origin='review'` ones among them — which keeps a
+        pending-review record *findable* by search there even though deciding
+        it (merge/dismiss) still only happens on the Review Queue.
       * `is_merged` — merge status, independent of origin (a reviewer-merge is
         `origin='merge'` AND `is_merged=1`; this lets a caller ask for "any
         merged entity" without caring how it got there).

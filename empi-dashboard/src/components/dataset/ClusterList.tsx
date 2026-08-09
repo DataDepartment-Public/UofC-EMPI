@@ -16,9 +16,6 @@ interface Props {
   isError: boolean;
   selectedMid: string | null;
   onSelect: (mid: string) => void;
-  /** True when the list is restricted to clusters holding 2+ records. */
-  multiOnly: boolean;
-  onMultiOnlyChange: (next: boolean) => void;
 }
 
 /** Left pane of the Patient Registry: the cluster list a reviewer picks from.
@@ -36,8 +33,6 @@ export function ClusterList({
   isError,
   selectedMid,
   onSelect,
-  multiOnly,
-  onMultiOnlyChange,
 }: Props) {
   // Every filter edit resets to page 1; paging does not (it *is* the page
   // edit). Same split the Review Queue's list makes.
@@ -52,36 +47,17 @@ export function ClusterList({
     <div className="card flex h-[calc(100vh-220px)] min-h-[520px] flex-col">
       <div className="border-b border-line px-4 pt-3.5 pb-3">
         <div className="mb-2.5 flex items-center justify-between">
-          <span className="text-[13px] font-bold text-ink-2">
-            {multiOnly ? "Multi-record clusters" : "All clusters"}
-          </span>
+          <span className="text-[13px] font-bold text-ink-2">All clusters</span>
           <span className="rounded-full bg-bg px-2 py-0.5 text-[11px] font-bold text-gray">
             {total.toLocaleString()}
           </span>
         </div>
 
-        <div className="mb-2.5 flex rounded-md bg-bg p-0.5">
-          <SegmentButton
-            active={multiOnly}
-            onClick={() => onMultiOnlyChange(true)}
-          >
-            2+ records
-          </SegmentButton>
-          <SegmentButton
-            active={!multiOnly}
-            onClick={() => onMultiOnlyChange(false)}
-          >
-            All
-          </SegmentButton>
+        <div className="mb-2 text-[10.5px] text-gray">
+          Includes standalone records still pending review (badged{" "}
+          <span className="font-semibold text-[#0a7a78]">Needs review</span>) —
+          decide those from the Review Queue tab.
         </div>
-
-        {!multiOnly && (
-          <div className="mb-2 text-[10.5px] text-gray">
-            Includes standalone records still pending review (badged{" "}
-            <span className="font-semibold text-[#0a7a78]">Needs review</span>
-            ) — decide those from the Review Queue tab.
-          </div>
-        )}
 
         <input
           type="text"
@@ -226,29 +202,6 @@ function ClusterRow({
       <div className="mt-1.5">
         <StatusBadge origin={entity.origin} />
       </div>
-    </button>
-  );
-}
-
-function SegmentButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={clsx(
-        "flex-1 rounded px-2 py-1 text-xs font-bold",
-        active ? "bg-white text-brand-blue shadow-sm" : "text-gray",
-      )}
-    >
-      {children}
     </button>
   );
 }

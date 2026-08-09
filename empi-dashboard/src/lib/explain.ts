@@ -1,0 +1,186 @@
+import type { PairExplanation, RecordAttrs } from "./schemas";
+
+/**
+ * The Model Explanation page (FR-31..FR-38) needs both compared records'
+ * full display fields plus the deterministic rule's evidence. The Dataset
+ * page already has all of this in hand (from `Entity`/`ReviewCandidate`) —
+ * rather than adding a new backend "compare two arbitrary PATIDs" endpoint,
+ * we pass it through the URL as one compact payload. That also means the
+ * explanation page works correctly on a hard refresh or direct link, with
+ * no extra fetch/loading state.
+ */
+export interface ExplainPatient extends RecordAttrs {
+  patid: string;
+}
+
+/** `EntityMember` -> `ExplainPatient`: the same attribute fields, with the
+ * membership metadata (`is_primary`, `added_by`, `updated_utc`) dropped and
+ * every `undefined` normalized to `null`. The comparison builders in
+ * `lib/compare.ts` distinguish "absent" from "empty string" and nothing
+ * else, so the two spellings of absent have to collapse to one here. */
+export function memberToExplainPatient(m: RecordAttrs & { patid: string }): ExplainPatient {
+  return {
+    patid: m.patid,
+    first_name: m.first_name ?? null,
+    middle_name: m.middle_name ?? null,
+    last_name: m.last_name ?? null,
+    suffix: m.suffix ?? null,
+    birth_date: m.birth_date ?? null,
+    ssn_last4: m.ssn_last4 ?? null,
+    email: m.email ?? null,
+    zip_code: m.zip_code ?? null,
+    city: m.city ?? null,
+    address1: m.address1 ?? null,
+    sex: m.sex ?? null,
+    phone: m.phone ?? null,
+    phones: m.phones ?? null,
+  };
+}
+
+export interface ExplainPayload {
+  mid: string;
+  patientA: ExplainPatient;
+  patientB: ExplainPatient;
+  rule: string | null;
+  confidence: number | null;
+  evidence: string | null;
+  updated: string | null;
+}
+
+export function encodeExplainPayload(payload: ExplainPayload): string {
+  return encodeURIComponent(JSON.stringify(payload));
+}
+
+export function decodeExplainPayload(raw: string | null): ExplainPayload | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(decodeURIComponent(raw)) as ExplainPayload;
+  } catch {
+    return null;
+  }
+}
+
+/** One bar of the waterfall, positioned on a 0–100 confidence axis. */
+export interface WaterfallBar {
+  label: string;
+  /** Confidence this bar starts from, in percent. */
+  start: number;
+  /** Confidence it ends at — below `start` when the feature lowered it. */
+  end: number;
+  /**
+   * `[lo, hi]` — the same span as `start`/`end` but always ascending, which
+   * is what recharts is given.
+   *
+   * Recharts anchors a range bar at the *first* element and extends it
+   * rightward by the absolute difference, so a descending `[96, 87]` is
+   * drawn from 96 to 105 — mirrored onto the wrong side of its own start,
+   * breaking the chain for that bar and every bar after it. Handing it an
+   * ascending pair positions the bar correctly; travel direction is carried
+   * by `deltaPct` instead, and the arrow head is drawn from that.
+   */
+  range: [number, number];
+  direction: "positive" | "negative";
+  /** Signed width in percentage points: `end - start`. */
+  deltaPct: number;
+  displayValue: string;
+  /** True for the collapsed "N other features" bar. */
+  isRemainder: boolean;
+}
+
+export interface ProbabilityWaterfall {
+  bars: WaterfallBar[];
+  /** The model's starting confidence before any feature, in percent. */
+  basePct: number;
+  /** The final confidence — equals `decision.score * 100`. */
+  finalPct: number;
+  /** Padded [min, max] for the axis, in percent, clamped to [0, 100]. */
+  domain: [number, number];
+}
+
+const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
+
+/**
+ * Lay the explanation out on a confidence axis instead of the model's raw
+ * log-odds margin.
+ *
+ * Reviewers read the x-axis as "how sure is it", and a log-odds scale
+ * ("-3.4 to -0.1") answers a question nobody asked. The backend already
+ * anticipates this: it ships `cumulative_prob` per step precisely so a
+ * probability axis can be drawn — see `Explanations-Guide.md` §2, which also
+ * warns not to reach the same place by adding `shap` values as if they were
+ * probabilities. They are log-odds; summing them yields a number that is not
+ * any probability. So each bar is drawn between two *converted* cumulative
+ * points, never by converting a bar's width on its own.
+ *
+ * One consequence worth knowing: bar widths here are path-dependent. In
+ * log-odds a feature's contribution is the same wherever it sits in the
+ * order; after the sigmoid, an identical contribution is wide in the middle
+ * of the curve and narrow out at the saturated ends. The order is the
+ * backend's (|shap| descending), so the picture is stable and reproducible —
+ * but a bar's width is "how much this feature moved the confidence, given
+ * everything ahead of it", not a standalone property of the feature.
+ *
+ * Features past `maxFeatures` are collapsed into one remainder bar rather
+ * than dropped, so the waterfall lands exactly on the confidence shown in
+ * the header. Truncating instead would leave a chart whose bars visibly stop
+ * short of the stated score, which on a percentage axis reads as a bug.
+ */
+export function toProbabilityWaterfall(
+  explanation: PairExplanation,
+  maxFeatures = 8,
+): ProbabilityWaterfall {
+  const basePct = sigmoid(explanation.base_value) * 100;
+  const finalPct = explanation.decision.score * 100;
+
+  const shown = explanation.features.slice(0, maxFeatures);
+  const hidden = explanation.features.length - shown.length;
+
+  const bars: WaterfallBar[] = [];
+  let cursor = basePct;
+
+  const ascending = (a: number, b: number): [number, number] =>
+    a <= b ? [a, b] : [b, a];
+
+  for (const f of shown) {
+    const end = f.cumulative_prob * 100;
+    bars.push({
+      label: f.label,
+      start: cursor,
+      end,
+      range: ascending(cursor, end),
+      direction: f.direction,
+      deltaPct: end - cursor,
+      displayValue: f.display_value ?? (f.value != null ? String(f.value) : "—"),
+      isRemainder: false,
+    });
+    cursor = end;
+  }
+
+  if (hidden > 0) {
+    bars.push({
+      label: `${hidden} other feature${hidden === 1 ? "" : "s"}`,
+      start: cursor,
+      end: finalPct,
+      range: ascending(cursor, finalPct),
+      direction: finalPct >= cursor ? "positive" : "negative",
+      deltaPct: finalPct - cursor,
+      displayValue: "—",
+      isRemainder: true,
+    });
+  }
+
+  const points = [basePct, finalPct, ...bars.flatMap((b) => b.range)];
+  const lo = Math.min(...points);
+  const hi = Math.max(...points);
+  // Pad so the extreme bars aren't flush against the frame. A confident pair
+  // can span a fraction of a percent, so the pad is proportional with a
+  // floor rather than a fixed slice of the full 0-100 range.
+  const pad = Math.max(0.5, (hi - lo) * 0.08);
+
+  return {
+    bars,
+    basePct,
+    finalPct,
+    domain: [Math.max(0, lo - pad), Math.min(100, hi + pad)],
+  };
+}

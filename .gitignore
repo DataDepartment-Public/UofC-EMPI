@@ -1,0 +1,27 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+CLAUDE.md
+
+# data/ — handled by empi-service/.gitignore (per-subdirectory rules; a bare
+# "empi-service/data/" here would prune the whole subtree from git's
+# ignore-check traversal, which breaks that file's per-directory
+# !data/<dir>/SCHEMA.md negations — see the git docs on excluded parent dirs).
+
+# Terraform
+# (.terraform.lock.hcl is intentionally NOT ignored — commit it so CI and
+# local applies resolve the same provider versions.)
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/terraform.tfvars
+terraform/backend.hcl
+terraform/crash.log

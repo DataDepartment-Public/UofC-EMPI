@@ -1,0 +1,91 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "empi-service/**"
+      - ".github/workflows/deploy-backend.yml"
+  workflow_dispatch: {}
+
+# One deploy at a time, and never cancel one mid-flight — the backend is a
+# single-replica service (empi-service/src/api/jobs.py's in-process job
+# registry doesn't support concurrent instances), so overlapping deploys could
+# leave it on a half-applied container config.
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # required for azure/login OIDC
+  contents: read
+
+env:
+  IMAGE_NAME: empi-service
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        run: az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+        env:
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+
+      - name: Build and push image
+        working-directory: empi-service
+        env:
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+          image="$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
+          latest="$ACR_LOGIN_SERVER/$IMAGE_NAME:latest"
+          docker build -t "$image" -t "$latest" .
+          docker push "$image"
+          docker push "$latest"
+
+      - name: Point App Service at the new image
+        env:
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+        run: |
+          az webapp config container set \
+            --name "${{ vars.BACKEND_APP_NAME }}" \
+            --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+            --container-image-name "$ACR_LOGIN_SERVER/$IMAGE_NAME:${{ github.sha }}"
+          az webapp restart \
+            --name "${{ vars.BACKEND_APP_NAME }}" \
+            --resource-group "${{ vars.RESOURCE_GROUP_NAME }}"
+
+      # The backend has no public ingress as of terraform/to-do.md A4 (private
+      # endpoint only) -- this GitHub-hosted runner has no VNet connectivity,
+      # so it can no longer curl /health directly. This falls back to the ARM
+      # control-plane "is the site running" state, which is a weaker signal
+      # (confirms the platform brought it up, not that requests are actually
+      # succeeding) but works regardless of network placement. If self-hosted
+      # runners with VNet connectivity get added later, restore a real
+      # curl-based /health check as a stronger check alongside/instead of this.
+      - name: Wait for running state
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            state=$(az webapp show \
+              --name "${{ vars.BACKEND_APP_NAME }}" \
+              --resource-group "${{ vars.RESOURCE_GROUP_NAME }}" \
+              --query state -o tsv)
+            if [ "$state" = "Running" ]; then
+              echo "Running after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Backend did not reach Running state within the timeout." >&2
+          exit 1

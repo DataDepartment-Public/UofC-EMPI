@@ -1,0 +1,7 @@
+# Copy to backend.hcl (gitignored) after running the bootstrap commands in
+# terraform/README.md, then: terraform init -backend-config=backend.hcl
+#
+# resource_group_name  = "rg-empi-tfstate"
+# storage_account_name = "stempitfstate<random>"
+# container_name        = "tfstate"
+# key                    = "empi-prod.tfstate"

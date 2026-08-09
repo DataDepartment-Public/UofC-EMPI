@@ -1,0 +1,43 @@
+pandas
+pyarrow
+pandera>=0.20
+pydantic>=2
+pydantic-settings>=2
+matplotlib
+numpy
+openpyxl
+unidecode
+# `postal` is the Python binding for libpostal; it requires the native libpostal
+# library installed on the system (e.g. `brew install libpostal` on macOS, or
+# build from https://github.com/openvenues/libpostal). If libpostal is not
+# installed the cleaning pipeline still runs — `Address_normalized` stays NaN.
+# postal
+jellyfish
+phonetics
+# python-stdnum: structural US SSN validation (area/group/serial + known-bogus
+# advertising SSNs) used by src/preprocessing/transformations.clean_ssn.
+python-stdnum
+# scikit-learn: char-n-gram TF-IDF vectorizer + sparse cosine for the q-gram
+# blocking pass (src/preprocessing/qgram_blocking.py), part of the stacked blocker.
+scikit-learn
+# Splink: the Fellegi-Sunter probabilistic matcher (Stage 4, src/models/fs_matcher/)
+# and its training CLI. Uses Splink's DuckDB backend (splink.DuckDBAPI) — duckdb is
+# pulled in transitively, so it is deliberately NOT pinned separately here.
+splink>=4.0.16,<5.0.0
+# LightGBM: the pluggable ML matcher (Stage 4.5, src/models/ml_matcher/) serves the
+# v3 pair classifier. joblib (transitive via scikit-learn) is pinned explicitly
+# because registry.load_model_artifact calls it directly to load the .pkl artifact.
+lightgbm
+joblib
+# FastAPI service (src/api/) — docs/API-Design.md. SQLite (empi.db) is stdlib.
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+# src/api/backends/postgres_backend.py — EMPI_INDEX_BACKEND=postgres (Azure
+# deployment only; SQLite/Parquet need neither). psycopg[binary] bundles libpq,
+# no system Postgres client library needed. azure-identity provides
+# DefaultAzureCredential for the AAD-token auth that backend uses instead of a
+# stored password.
+psycopg[binary]
+azure-identity

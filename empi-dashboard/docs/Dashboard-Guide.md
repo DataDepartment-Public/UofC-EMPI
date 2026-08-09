@@ -34,16 +34,19 @@ top-level tab.
 |---------|---------|
 | **Dashboard** (tab) | KPIs, summary metric cards, and visual charts **only** — no interactive workflows |
 | **Review Queue** (tab) | Candidate-grain triage of pending review pairs only — two-panel layout (queue left, dynamic explanation right); see §5 |
-| **Patient Registry** (tab, `/dataset` route) | The final, resolved patient list **only** — one row per distinct patient, no in-progress candidates; see §3 |
+| **Patient Registry** (tab, `/dataset` route) | The full patient list, one row per distinct patient — resolved clusters by default, plus (under its "All" toggle) singleton records still pending review, findable but not actionable here; see §3 |
 | **Admin** (tab, `/admin` route) | Live ML decision-threshold tuning — operator configuration, not a reviewer workflow; see §7 |
 | **Model Explanation** (sub-page) | Per-pair "why was this a match?" detail; reached from a Patient Registry row, returns to the reviewer's prior Patient Registry view (search/filter/page), not necessarily that one row |
 
 Patient Registry and Review Queue split the old single Dataset tab's two
 concerns cleanly: Review Queue is where a reviewer decides on a pending
-candidate (merge or dismiss); Patient Registry is where anyone browses the
-settled result. A record only appears in one place at a time — once merged
-or dismissed, it disappears from the Review Queue and (if applicable) shows
-up as a resolved entry in Patient Registry.
+candidate (merge or dismiss); Patient Registry is where anyone browses (and
+searches) the patient list, settled or not. A still-pending singleton is
+findable in both places at once — under Patient Registry's "All" toggle,
+badged **Needs review**, and in the Review Queue's "Needs review" list —
+but only decidable from the Review Queue. Once merged or dismissed, it
+disappears from the Review Queue and shows up as a resolved entry in
+Patient Registry's default view too.
 
 ---
 
@@ -91,20 +94,24 @@ lives on the Patient Registry tab (§3).
 
 ## 3. Patient Registry Page — Final, Resolved Patients Only
 
-The Patient Registry (`/dataset` route) shows **only resolved clusters** —
-automatically matched, manually merged, or standalone with nothing pending
-(`origin` != `review`). Anything still awaiting a match decision lives
-entirely on the Review Queue tab (§5); a data steward browsing the registry
-should never see in-progress work. Merge/dismiss actions on pending
-candidates happen on Review Queue — the only action available here is
-**Unmerge**, for correcting an already-final cluster that turns out to be
-wrong.
+The Patient Registry (`/dataset` route) defaults to **resolved clusters
+only** — automatically matched, manually merged, or standalone with nothing
+pending. Its "2+ records" / "All" toggle (an implementation-level
+`min_members` filter, not an `origin` one) is what actually keeps a
+pending-review candidate out of the default view — every such candidate is
+a singleton, so it's excluded there regardless of origin, and only surfaces
+under "All", badged **Needs review**, so a data steward searching by
+name/DOB/PATID can actually *find* a record even while it's still pending.
+That's the one exception to "resolved only": finding it here is not
+deciding it — merge/dismiss on a pending candidate only ever happens on the
+Review Queue tab (§5). The only action available on an already-final
+cluster here is **Unmerge**, for correcting one that turns out to be wrong.
 
 ### 3.1 Registry view
 
 | ID | Requirement |
 |----|-------------|
-| FR-18 | Display the current, resolved master patient list (not raw source data) — excludes anything still in the Review Queue. |
+| FR-18 | Display the current master patient list (not raw source data). Under the default "2+ records" view, this is exactly the resolved list — automatically matched, manually merged, or standalone with nothing pending; a pending-review candidate is always a singleton so it's excluded here regardless. The "All" toggle additionally surfaces those singleton pending candidates, badged **Needs review**, so they're findable by search — deciding one (merge/dismiss) still only happens on the Review Queue tab. |
 | FR-19 | Include every resolved status: automatically matched, manually merged, and standalone records with no pending candidates. |
 | FR-20 | Render every patient as an expandable row, whether it folds in multiple entries or stands alone. |
 | FR-21 | Expanding a row reveals its constituent entries — the raw records folded into this final patient — for traceability, not pending candidates. |

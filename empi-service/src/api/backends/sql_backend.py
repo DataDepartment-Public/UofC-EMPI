@@ -595,6 +595,8 @@ def list_review_candidates(
     confidence_max: float | None = None,
     reviewed: bool | None = None,
     search: str | None = None,
+    patid_a: str | None = None,
+    patid_b: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
@@ -619,9 +621,20 @@ def list_review_candidates(
     most pairs in the queue only have an ML score (no rule fired), so
     filtering on `rc.confidence` alone would hide the entire ML-scored
     majority (`NULL >= x` is never true in SQL).
+
+    `patid_a`/`patid_b` (the router canonicalizes so `a < b` before calling)
+    narrow to one exact pair — a deep link from elsewhere in the UI (e.g. a
+    cluster's comparison history) knows which pair it wants and shouldn't
+    have to guess the confidence/search filter that would surface it on the
+    current page. Combines with the other filters by AND like everything
+    else here, so a caller resolving a specific pair should pass no other
+    filter alongside it.
     """
     where = []
     params: list = []
+    if patid_a is not None and patid_b is not None:
+        where.append("rc.patid_a = ? AND rc.patid_b = ?")
+        params.extend([patid_a, patid_b])
     if confidence_min is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) >= ?")
         params.append(confidence_min)
@@ -768,10 +781,12 @@ def list_entities(
     last-updated date):
       * `search` — case-insensitive substring against PATID/mid/first/last name.
       * `origin` — match status ('deterministic' | 'review' | 'merge' | 'none'),
-        or a comma-separated list of any of those (e.g. the Patient Registry
-        view's "final clusters only" = "deterministic,merge,none", excluding
-        'review' — still-pending candidates belong in the Review Queue, not
-        the resolved registry).
+        or a comma-separated list of any of those. The Patient Registry passes
+        all four (its "All" toggle) or, under its default "2+ records" toggle,
+        relies on `min_members` alone to exclude every singleton — including
+        `origin='review'` ones — rather than filtering `origin` itself, so a
+        pending-review record stays *findable* by search there even though
+        deciding it (merge/dismiss) still only happens on the Review Queue.
       * `is_merged` — merge status, independent of origin (a reviewer-merge is
         `origin='merge'` AND `is_merged=1`; this lets a caller ask for "any
         merged entity" without caring how it got there).

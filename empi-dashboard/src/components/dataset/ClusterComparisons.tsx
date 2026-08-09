@@ -138,6 +138,7 @@ export function ClusterComparisons({ entity }: { entity: Entity }) {
             pair={pair}
             nameA={nameOf(pair.patid_a)}
             nameB={nameOf(pair.patid_b)}
+            nameOf={nameOf}
             runId={data.run_id ?? undefined}
             thresholds={data.thresholds}
           />
@@ -185,9 +186,7 @@ export function ClusterComparisonHistory({ entity }: { entity: Entity }) {
   }
 
   const pairs = byVerdict(data.external_pairs);
-  const pending = pairs.filter(
-    (p) => p.verdict === "ml_human_review" || p.verdict === "blocked_undecided",
-  ).length;
+  const pending = pairs.filter((p) => isAwaitingReview(p.verdict)).length;
   const declined = pairs.filter(
     (p) => p.verdict === "reject" || p.verdict === "gate_dropped",
   ).length;
@@ -281,14 +280,33 @@ function ExternalPairCard({
 
       {open && (
         <div className="border-t border-line px-3.5 py-3">
-          <p className="mb-3 text-xs text-gray-2">{verdict.blurb}</p>
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <p className="text-xs text-gray-2">{verdict.blurb}</p>
+            {isAwaitingReview(pair.verdict) && (
+              <Link
+                href={`/review?patid_a=${encodeURIComponent(pair.patid_a)}&patid_b=${encodeURIComponent(pair.patid_b)}`}
+                className="shrink-0 whitespace-nowrap text-[11px] font-bold text-brand-blue hover:underline"
+              >
+                Open in Review Queue →
+              </Link>
+            )}
+          </div>
           <OtherRecordSummary pair={pair} />
-          <StageStrip pair={pair} thresholds={thresholds} />
+          <StageStrip pair={pair} thresholds={thresholds} internal={false} />
           <Waterfall pair={pair} runId={runId} />
         </div>
       )}
     </div>
   );
+}
+
+/** Whether a pair's verdict is exactly the set the Review Queue's "Needs
+ * review" tab would surface for it — see `ClusterComparisonHistory`'s
+ * `pending` count, which uses this same pair. Not `reject`/`gate_dropped`
+ * (a confident automated non-match, never queued) and not the merge
+ * verdicts (already resolved). */
+function isAwaitingReview(verdict: ClusterPairVerdict): boolean {
+  return verdict === "ml_human_review" || verdict === "blocked_undecided";
 }
 
 /** Enough of the declined record to judge the decision without leaving the
@@ -328,12 +346,14 @@ function PairCard({
   pair,
   nameA,
   nameB,
+  nameOf,
   runId,
   thresholds,
 }: {
   pair: ClusterPair;
   nameA: string;
   nameB: string;
+  nameOf: (patid: string) => string;
   runId?: string;
   thresholds: Record<string, number>;
 }) {
@@ -368,7 +388,7 @@ function PairCard({
       {open && (
         <div className="border-t border-line px-3.5 py-3">
           <p className="mb-3 text-xs text-gray-2">{verdict.blurb}</p>
-          <StageStrip pair={pair} thresholds={thresholds} />
+          <StageStrip pair={pair} thresholds={thresholds} nameOf={nameOf} internal />
           <Waterfall pair={pair} runId={runId} />
         </div>
       )}
@@ -376,22 +396,38 @@ function PairCard({
   );
 }
 
-/** Blocking -> rules -> gate -> matcher for one pair, in the same joined-cards
- * language as the Review Queue's `PipelineTrail`. Reads entirely from the
- * pair payload — no fetch — so the strip renders instantly on expand and the
- * (slower) waterfall below fills in after. */
+/** Blocking -> rules -> gate -> matcher -> clustering for one pair, in the
+ * same joined-cards language as the Review Queue's `PipelineTrail`. Reads
+ * entirely from the pair payload — no fetch — so the strip renders
+ * instantly on expand and the (slower) waterfall below fills in after. */
 function StageStrip({
   pair,
   thresholds,
+  nameOf = (patid) => patid,
+  internal = true,
 }: {
   pair: ClusterPair;
   thresholds: Record<string, number>;
+  /** Maps a chain member's patid to a display name, for the clustering
+   * stage's path. Defaults to the identity (bare patid) when the caller has
+   * no name lookup handy — `cluster_path` is never populated in that case
+   * anyway (external comparisons), so it only ever affects rendering. */
+  nameOf?: (patid: string) => string;
+  /** Whether `pair` is an internal (within-cluster) pair, for which the
+   * clustering stage is meaningful, vs. an external comparison, for which
+   * it never is — the two records live in different clusters by
+   * definition. */
+  internal?: boolean;
 }) {
   const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const isDirectEdge =
+    pair.verdict === "auto_merge_rule" ||
+    pair.verdict === "ml_auto_merge" ||
+    pair.joined_by === "reviewer";
 
   return (
     <div className="overflow-x-auto pb-1">
-      <div className="flex min-w-[560px]">
+      <div className="flex min-w-[700px]">
         <Stage num={1} label="Blocking">
           {pair.blocked ? (
             <>
@@ -458,7 +494,54 @@ function StageStrip({
             <Row muted>Not scored by the matcher</Row>
           )}
         </Stage>
+
+        <Stage num={5} label="Clustering">
+          {!internal ? (
+            <Row muted>Different clusters — not applicable</Row>
+          ) : isDirectEdge ? (
+            <Row ok>This pair&apos;s own match formed the merge edge</Row>
+          ) : pair.cluster_path && pair.cluster_path.length > 1 ? (
+            <>
+              <Row ok>
+                Joined transitively ({pair.cluster_path.length - 1} hop
+                {pair.cluster_path.length - 1 === 1 ? "" : "s"})
+              </Row>
+              <PathChain path={pair.cluster_path} nameOf={nameOf} />
+            </>
+          ) : (
+            <Row muted>No merge path found for this run</Row>
+          )}
+        </Stage>
       </div>
+    </div>
+  );
+}
+
+/** The chain of members whose own confirmed merges connected two records
+ * that formed no edge of their own — the "record ids that determined the
+ * merge" a reviewer needs to trace a surprising grouping back to its
+ * source. Patids lead (they're what a reviewer looks records up by); the
+ * name rides along as a tooltip. */
+function PathChain({
+  path,
+  nameOf,
+}: {
+  path: string[];
+  nameOf: (patid: string) => string;
+}) {
+  return (
+    <div className="mt-0.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
+      {path.map((patid, i) => (
+        <span key={`${patid}-${i}`} className="flex items-center gap-1">
+          {i > 0 && <span className="text-[10px] text-gray">→</span>}
+          <span
+            className="font-mono text-[10px] text-gray-2"
+            title={nameOf(patid)}
+          >
+            {patid}
+          </span>
+        </span>
+      ))}
     </div>
   );
 }

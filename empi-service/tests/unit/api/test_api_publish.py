@@ -356,6 +356,36 @@ class TestPublishRun:
         assert filtered_total == 1
         assert filtered_rows[0]["patid_a"] == "P4"
 
+    def test_patid_pair_filter_resolves_the_exact_pair(
+        self, conn, backend, fixture_settings
+    ):
+        """A deep link from a cluster's comparison history knows the pair, not
+        the confidence/search that would surface it on the current page —
+        `patid_a`/`patid_b` alone (no other filter) finds it regardless of
+        where it'd otherwise sort or page to."""
+        _write_run_with_ml_scores(fixture_settings, "r-ml")
+        publish.publish_run(backend, "r-ml", fixture_settings)
+
+        rows, total = sql_backend.list_review_candidates(
+            conn, patid_a="P4", patid_b="P5",
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P4", "P5")
+
+        # A pair that was never a review candidate resolves to nothing, not
+        # an error.
+        _, none_total = sql_backend.list_review_candidates(
+            conn, patid_a="P1", patid_b="P4",
+        )
+        assert none_total == 0
+
+        # It still combines with other filters by AND, like everything else
+        # here — a `confidence_min` above the pair's score excludes it too.
+        _, filtered_out_total = sql_backend.list_review_candidates(
+            conn, patid_a="P4", patid_b="P5", confidence_min=0.9,
+        )
+        assert filtered_out_total == 0
+
     def test_gate_dropped_pair_resolves_to_none_not_review(self, conn, backend, fixture_settings):
         _write_run_with_gate_drop(fixture_settings, "r2")
         counts = publish.publish_run(backend, "r2", fixture_settings)

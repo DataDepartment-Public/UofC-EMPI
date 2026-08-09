@@ -321,6 +321,12 @@ export const ClusterPairSchema = z.object({
   joined_by: z.enum(["pipeline", "reviewer"]).default("pipeline"),
   reviewer_id: z.string().nullable().optional(),
   reviewer_ts_utc: z.string().nullable().optional(),
+  /** Stage 6 — clustering. Set only for a pair whose own verdict formed no
+   * merge edge (not `auto_merge_rule`/`ml_auto_merge`, and not a reviewer
+   * merge): the chain of members, `[patid_a, ..., patid_b]`, whose own
+   * confirmed edges connected the two ends anyway. `null` when this pair
+   * *is* itself the edge (nothing to explain) or no such chain exists. */
+  cluster_path: z.array(z.string()).nullable().optional(),
 });
 export type ClusterPair = z.infer<typeof ClusterPairSchema>;
 

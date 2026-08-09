@@ -476,6 +476,21 @@ class ClusterPair(BaseModel):
     reviewer_id: str | None = None
     reviewer_ts_utc: str | None = None
 
+    #: Stage 6 — clustering. `assign_clusters` only ever unions the two ends
+    #: of a *confirmed* edge (an auto-merge-tier row, or a reviewer merge);
+    #: it never looks at this pair directly unless this pair *is* one of
+    #: those edges. So a pair whose own verdict never merged anything (an
+    #: ambiguous ML score, a rejection, a gate drop, or one blocking never
+    #: even paired) can still land in the same cluster — because each end
+    #: reached a shared record through its own confirmed edges. This is the
+    #: chain of members (`[patid_a, ..., patid_b]`) that connects them, so a
+    #: reviewer can see exactly which other merges are responsible. `None`
+    #: when this pair *is* itself a merge edge (nothing to explain) or, in
+    #: the rare case the recorded edges don't reconnect them — e.g. tracing
+    #: a different run than the one that actually produced this cluster's
+    #: current membership — when no such chain exists.
+    cluster_path: list[str] | None = None
+
 
 class ClusterExternalPair(ClusterPair):
     """A comparison between one of this cluster's members and a record that

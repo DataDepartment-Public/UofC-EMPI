@@ -124,6 +124,8 @@ class IndexBackend(Protocol):
         confidence_max: float | None = None,
         reviewed: bool | None = None,
         search: str | None = None,
+        patid_a: str | None = None,
+        patid_b: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[dict], int]: ...
@@ -298,11 +300,13 @@ class SqlIndexBackend:
         self,
         *,
         confidence_min=None, confidence_max=None, reviewed=None, search=None,
+        patid_a=None, patid_b=None,
         page=1, page_size=50,
     ) -> tuple[list[dict], int]:
         return self._store.list_review_candidates(
             self.conn, confidence_min=confidence_min, confidence_max=confidence_max,
-            reviewed=reviewed, search=search, page=page, page_size=page_size,
+            reviewed=reviewed, search=search, patid_a=patid_a, patid_b=patid_b,
+            page=page, page_size=page_size,
         )
 
     def insert_audit_log(

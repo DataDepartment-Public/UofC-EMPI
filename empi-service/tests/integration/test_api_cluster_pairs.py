@@ -332,6 +332,61 @@ def test_thresholds_are_served_alongside_the_scores(client, test_settings):
     )
 
 
+# ─── clustering (stage 6, the transitive-join trace) ─────────────────────────
+def test_a_rejected_pair_shows_the_chain_that_merged_it_anyway(client, test_settings):
+    """A1-A3 is `reject` — the rules found strong contradictions — yet both
+    ends are in the cluster because A1-A2 auto-merged and A2-A3 was the ML
+    matcher's confident match. `cluster_path` is the only place that survives
+    for a reviewer to see."""
+    _seed_entity(test_settings)
+    _write_run(test_settings)
+    body = client.get(f"/clusters/{MID}/pairs").json()
+    pair = next(p for p in body["pairs"] if (p["patid_a"], p["patid_b"]) == ("A1", "A3"))
+
+    assert pair["verdict"] == "reject"
+    assert pair["cluster_path"] == ["A1", "A2", "A3"]
+
+
+def test_a_direct_merge_edge_has_no_cluster_path(client, test_settings):
+    """A pair whose own verdict formed the edge needs no transitive
+    explanation — showing one would be circular."""
+    _seed_entity(test_settings)
+    _write_run(test_settings)
+    body = client.get(f"/clusters/{MID}/pairs").json()
+
+    for verdict in ("auto_merge_rule", "ml_auto_merge"):
+        pair = next(p for p in body["pairs"] if p["verdict"] == verdict)
+        assert pair["cluster_path"] is None
+
+
+def test_a_pair_disconnected_in_the_merge_graph_has_no_cluster_path(client, test_settings):
+    """A4 and A6 never appear on either end of a confirmed edge in this run's
+    artifacts (`_write_run`'s A4/A5/A6 rows are all non-merging verdicts), so
+    no chain connects them to anything — an honest `None`, not a fabricated
+    guess."""
+    _seed_entity(test_settings)
+    _write_run(test_settings)
+    body = client.get(f"/clusters/{MID}/pairs").json()
+
+    for a, b in (("A2", "A4"), ("A1", "A6")):
+        pair = next(p for p in body["pairs"] if (p["patid_a"], p["patid_b"]) == (a, b))
+        assert pair["cluster_path"] is None
+
+
+def test_a_reviewer_merge_transitively_connects_other_pairs_too(client, test_settings):
+    """A5 merged in by hand fans out to every other member (see
+    `test_a_reviewer_merged_member_taints_every_pair_it_is_in`), so it also
+    acts as a bridge: A2-A6 shares no artifact row at all, but both now
+    reach A5 directly, so `cluster_path` should route through it."""
+    _seed_entity(test_settings, reviewer_member="A5")
+    _write_run(test_settings)
+    body = client.get(f"/clusters/{MID}/pairs").json()
+    pair = next(p for p in body["pairs"] if (p["patid_a"], p["patid_b"]) == ("A2", "A6"))
+
+    assert pair["verdict"] == "not_compared"
+    assert pair["cluster_path"] == ["A2", "A5", "A6"]
+
+
 # ─── reviewer provenance ──────────────────────────────────────────────────────
 def test_pipeline_placed_members_read_as_pipeline_joined(client, test_settings):
     _seed_entity(test_settings)

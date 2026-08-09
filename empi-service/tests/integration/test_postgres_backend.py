@@ -299,6 +299,27 @@ class TestReviewCandidate:
         assert total == 1
         assert rows[0]["patid_a"] == "P1"
 
+    def test_list_review_candidates_patid_filter_resolves_the_exact_pair(self, conn):
+        postgres_backend.upsert_entity(conn, "M-1", "r1", "none", False, None, "t0")
+        postgres_backend.upsert_entity_member(conn, "P1", "M-1", True, "pipeline", "t0")
+        postgres_backend.upsert_entity(conn, "M-2", "r1", "none", False, None, "t0")
+        postgres_backend.upsert_entity_member(conn, "P2", "M-2", True, "pipeline", "t0")
+        postgres_backend.replace_review_candidates_for_run(
+            conn, "r1", [("P1", "P2", None, 0.7, None, "B3", "r1", "t0", None, None)]
+        )
+        conn.commit()
+
+        rows, total = postgres_backend.list_review_candidates(
+            conn, patid_a="P1", patid_b="P2",
+        )
+        assert total == 1
+        assert (rows[0]["patid_a"], rows[0]["patid_b"]) == ("P1", "P2")
+
+        _, none_total = postgres_backend.list_review_candidates(
+            conn, patid_a="P1", patid_b="P3",
+        )
+        assert none_total == 0
+
 
 class TestDashboardSummary:
     def test_aggregates_reflect_live_state(self, conn):

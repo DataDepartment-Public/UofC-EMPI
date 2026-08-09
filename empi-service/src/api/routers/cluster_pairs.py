@@ -27,6 +27,7 @@ turn a 40-member cluster into 780 waterfalls nobody asked for.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict, deque
 from itertools import combinations
 
 import pandas as pd
@@ -51,6 +52,10 @@ router = APIRouter(tags=["clusters"])
 #: The manifest fields this route reads, and the columns it keeps from each.
 #: Restricting the projection matters: `cleaned`-joined frames like
 #: `ml_features` carry a dozen similarity columns this view has no use for.
+#: `matches_model` (FS) is deliberately *not* here: FS scores the full
+#: pre-gate candidate pool, so folding it into this dict would flood
+#: `external_pairs` with FS-only rows a reviewer gets no other stage detail
+#: for. It's read separately, only for the clustering graph below.
 _ARTIFACTS: dict[str, tuple[str, ...]] = {
     "matches": ("match_rule", "confidence", "rules_fired", "source_blocks", "n_blocks"),
     "rejects": ("reject_rule", "n_contradictions"),
@@ -58,6 +63,10 @@ _ARTIFACTS: dict[str, tuple[str, ...]] = {
     "matches_ml": ("score", "predicted_tier"),
     "candidate_pairs": ("source_blocks", "n_blocks"),
 }
+
+#: A pair's verdict counts as its own merge edge — the reason clustering
+#: unioned its two ends needs no further explanation.
+_EDGE_VERDICTS = frozenset({"auto_merge_rule", "ml_auto_merge"})
 
 #: `entity_member.added_by` for a record the pipeline placed. Anything else is
 #: a reviewer id (`audit.py` writes the `X-Reviewer-Id` value there).
@@ -120,6 +129,62 @@ def _verdict(
     if gate_tier == TIER_NO_MATCH:
         return "gate_dropped"
     return "blocked_undecided" if blocked else "not_compared"
+
+
+def _build_merge_graph(
+    pairs: list[ClusterPair],
+    fs_edges: dict[tuple[str, str], dict],
+) -> dict[str, set[str]]:
+    """The same graph `assign_clusters` unions edges into, restricted to this
+    cluster's members: an adjacency list over every pair that actually
+    *formed* a merge — `verdict` in `_EDGE_VERDICTS`, a reviewer merge
+    (`joined_by == "reviewer"`, which attaches a member to the whole entity
+    rather than to one counterpart, so it fans out to every other member),
+    and any row of `fs_edges` tiered `auto_merge` (the caller passes an
+    empty dict unless `settings.fs_feeds_clustering` was on for this run).
+    Used to find *why* a pair that formed no edge of its own still ended up
+    in the same component.
+    """
+    graph: dict[str, set[str]] = defaultdict(set)
+
+    def _connect(a: str, b: str) -> None:
+        graph[a].add(b)
+        graph[b].add(a)
+
+    for pair in pairs:
+        if pair.verdict in _EDGE_VERDICTS or pair.joined_by == "reviewer":
+            _connect(pair.patid_a, pair.patid_b)
+
+    for (a, b), row in fs_edges.items():
+        if row.get("classification_tier") == TIER_AUTO_MERGE:
+            _connect(a, b)
+
+    return graph
+
+
+def _shortest_path(graph: dict[str, set[str]], start: str, end: str) -> list[str] | None:
+    """BFS shortest path between two members of the same connected component.
+
+    `graph` never holds a direct `start`-`end` edge for a call site that
+    matters (the caller only asks for pairs that formed no edge of their
+    own), so any path found is genuinely transitive — at least one
+    intermediate member. Returns `None` if the two aren't connected in
+    `graph` at all, which can happen when tracing a run other than the one
+    that produced the cluster's current membership.
+    """
+    if start not in graph or end not in graph:
+        return None
+    visited = {start}
+    queue: deque[list[str]] = deque([[start]])
+    while queue:
+        path = queue.popleft()
+        for neighbor in graph[path[-1]]:
+            if neighbor == end:
+                return path + [neighbor]
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append(path + [neighbor])
+    return None
 
 
 def _counterpart(backend: IndexBackend, patid: str) -> dict:
@@ -256,6 +321,26 @@ def get_cluster_pairs(
                 reviewer_ts_utc=member_ts.get(reviewer_side) if reviewer_side else None,
             )
         )
+
+    # ── Clustering (stage 6) ────────────────────────────────────────────────
+    # Every pair above that formed no merge edge of its own still shares a
+    # cluster with its counterpart — so something else connected them. Walk
+    # the same graph `assign_clusters` unions edges into, restricted to this
+    # cluster, and record the chain of members that did. FS's `matches_model`
+    # is read here rather than via `_ARTIFACTS` (see the comment on that
+    # dict) and only when it can actually matter — `fs_feeds_clustering` off
+    # (the default) means FS forms no clustering edges at all.
+    fs_edges: dict[tuple[str, str], dict] = {}
+    if settings.fs_feeds_clustering:
+        fs_path = artifact_path(manifest, "matches_model", settings) if manifest else None
+        if fs_path is not None:
+            fs_edges = _pair_index(
+                read_pairs_touching(fs_path, members), ("classification_tier",)
+            )
+    merge_graph = _build_merge_graph(pairs, fs_edges)
+    for pair in pairs:
+        if pair.verdict not in _EDGE_VERDICTS and pair.joined_by != "reviewer":
+            pair.cluster_path = _shortest_path(merge_graph, pair.patid_a, pair.patid_b)
 
     # ── External comparisons ────────────────────────────────────────────────
     # Every pair key any artifact produced that straddles the cluster

@@ -147,6 +147,8 @@ def list_review_queue(
     confidence_max: float | None = None,
     reviewed: bool | None = None,
     search: str | None = None,
+    patid_a: str | None = None,
+    patid_b: str | None = None,
     page: int = 1,
     page_size: int | None = None,
     backend: IndexBackend = Depends(get_backend),
@@ -156,11 +158,21 @@ def list_review_queue(
     of which cluster it belongs to (docs/Dashboard-Guide.md's Review Queue
     tab). `reviewed` unset returns every candidate; pass `reviewed=false` for
     the default "Needs review" queue view, `reviewed=true` for "Already
-    reviewed"."""
+    reviewed".
+
+    `patid_a`/`patid_b` (either order — canonicalized here) narrow to one
+    exact pair: the deep link a cluster's comparison history sends a
+    reviewer on knows the pair, not what confidence/search/page would
+    currently surface it. They combine with any other filter passed
+    alongside them by AND, same as every filter here — a caller resolving a
+    specific pair should pass no other filter."""
     page_size = page_size or settings.records_page_size
+    if patid_a is not None and patid_b is not None:
+        patid_a, patid_b = sorted((patid_a, patid_b))
     rows, total = backend.list_review_candidates(
         confidence_min=confidence_min, confidence_max=confidence_max,
-        reviewed=reviewed, search=search, page=page, page_size=page_size,
+        reviewed=reviewed, search=search, patid_a=patid_a, patid_b=patid_b,
+        page=page, page_size=page_size,
     )
     items = [_to_review_queue_item(row) for row in rows]
     return ReviewQueuePage(total=total, page=page, page_size=page_size, items=items)

@@ -12,11 +12,16 @@ import { Toast } from "@/components/shared/Toast";
 
 const PAGE_SIZE = 25;
 
-// The registry shows only resolved, final clusters — auto-matched,
-// manually merged, or standalone with nothing pending. Anything still
-// awaiting a decision (`origin: "review"`) belongs on the Review Queue tab,
-// not here.
-const FINAL_ORIGINS = "deterministic,merge,none";
+// Every origin — auto-matched, manually merged, standalone with nothing
+// pending, and standalone-but-pending-review. A record only ever exists as
+// `origin: "review"` when it's a singleton (see `publish.py`'s per-cluster
+// loop), so it surfaces here purely under the "All" toggle below —
+// `multiOnly`'s `min_members: 2` already excludes every singleton,
+// regardless of origin, from the default view. Deciding it (merge/dismiss)
+// still only happens on the Review Queue tab; this just makes sure a
+// pending record isn't invisible to someone browsing/searching the
+// registry who doesn't know to look there.
+const ALL_ORIGINS = "deterministic,merge,none,review";
 
 /** Filters *and* the selected cluster live in the URL so a reviewer can link
  * a colleague straight to the cluster they're questioning, and so back/refresh
@@ -93,7 +98,7 @@ function DatasetPageContent() {
 
   const { data, isLoading, isError } = useRecords({
     ...state.filters,
-    origin: FINAL_ORIGINS,
+    origin: ALL_ORIGINS,
     // `min_members`, not `is_merged`: the latter counts *unlocked* members at
     // publish time, so it hides any multi-record cluster a reviewer has
     // already touched — 168 of 762 in the current index.

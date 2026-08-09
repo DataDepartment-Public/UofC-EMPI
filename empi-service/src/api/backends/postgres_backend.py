@@ -480,6 +480,8 @@ def list_review_candidates(
     confidence_max: float | None = None,
     reviewed: bool | None = None,
     search: str | None = None,
+    patid_a: str | None = None,
+    patid_b: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> tuple[list[dict], int]:
@@ -489,6 +491,9 @@ def list_review_candidates(
     Postgres's `LIKE` is case-sensitive, unlike SQLite's)."""
     where = []
     params: list = []
+    if patid_a is not None and patid_b is not None:
+        where.append("rc.patid_a = %s AND rc.patid_b = %s")
+        params.extend([patid_a, patid_b])
     if confidence_min is not None:
         where.append("COALESCE(rc.confidence, rc.ml_match_probability) >= %s")
         params.append(confidence_min)

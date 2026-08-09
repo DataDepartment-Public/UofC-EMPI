@@ -568,13 +568,17 @@ class ParquetIndexBackend:
         confidence_max: float | None = None,
         reviewed: bool | None = None,
         search: str | None = None,
+        patid_a: str | None = None,
+        patid_b: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[dict], int]:
         """Pandas equivalent of `sql_backend.list_review_candidates` — candidate-grain
         (one row per pair, not per cluster). "Reviewed" mirrors the SQL
         version: both sides sharing a `mid` today (merged), or a prior
-        `dismiss` audit_log entry for the exact pair."""
+        `dismiss` audit_log entry for the exact pair. `patid_a`/`patid_b`
+        narrow to one exact pair, AND-combined with any other filter — see
+        the SQL version's docstring."""
         rc = self._deduped_review_candidates()
         members = self._tables["entity_member"][["patid", "mid"]]
         attrs = self._tables["record_attrs"][_DISPLAY_ATTR_COLUMNS]
@@ -605,6 +609,8 @@ class ParquetIndexBackend:
 
         sort_conf = joined["confidence"].fillna(joined["ml_match_probability"])
         mask = pd.Series(True, index=joined.index)
+        if patid_a is not None and patid_b is not None:
+            mask &= (joined["patid_a"] == patid_a) & (joined["patid_b"] == patid_b)
         if confidence_min is not None:
             mask &= sort_conf >= confidence_min
         if confidence_max is not None:

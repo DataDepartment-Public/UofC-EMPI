@@ -75,6 +75,14 @@ export function ClusterList({
           </SegmentButton>
         </div>
 
+        {!multiOnly && (
+          <div className="mb-2 text-[10.5px] text-gray">
+            Includes standalone records still pending review (badged{" "}
+            <span className="font-semibold text-[#0a7a78]">Needs review</span>
+            ) — decide those from the Review Queue tab.
+          </div>
+        )}
+
         <input
           type="text"
           placeholder="Master Patient ID or name…"

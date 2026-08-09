@@ -41,6 +41,28 @@ export function useReviewQueue(filters: ReviewQueueFilters) {
   });
 }
 
+/** One exact review-queue candidate, regardless of the main list's current
+ * filters/page — the deep-link a cluster's comparison history sends a
+ * reviewer on. `data` resolves to `null` (not an error) once the query
+ * settles and the pair isn't a review candidate — dismissed, merged away,
+ * or from a run that's aged out. */
+export function useReviewCandidate(
+  patidA: string | null,
+  patidB: string | null,
+) {
+  return useQuery({
+    queryKey: ["review-queue", "pair", patidA, patidB],
+    queryFn: async () => {
+      const page = await api.listReviewQueue({
+        patid_a: patidA as string,
+        patid_b: patidB as string,
+      });
+      return page.items[0] ?? null;
+    },
+    enabled: patidA !== null && patidB !== null,
+  });
+}
+
 export function useCluster(mid: string | null) {
   return useQuery({
     queryKey: ["cluster", mid],
